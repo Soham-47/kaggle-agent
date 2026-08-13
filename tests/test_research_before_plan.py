@@ -6,26 +6,13 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from fakes import FakeKaggleApi
+from helpers import copy_min_workspace as _copy_min
 from kaggle_agent.config import load_competition, load_settings
 from kaggle_agent.kaggle_api import KaggleClient
 from kaggle_agent.llm.router import ModelRouter
 from kaggle_agent.notify.telegram import FakeTelegram
 from kaggle_agent.orchestrator import Orchestrator, run_daily
 from kaggle_agent.research.deep import DeepResearchResult
-from kaggle_agent.state_md import AgentState, save_state
-
-
-def _copy_min(root: Path, real: Path) -> None:
-    import shutil
-
-    shutil.copytree(real / "config", root / "config")
-    shutil.copytree(real / "competitions", root / "competitions")
-    (root / "memory").mkdir()
-    for name in ("MEMORY.md", "COMPETITION.md", "state.md", "research.md"):
-        shutil.copy(real / "memory" / name, root / "memory" / name)
-    (root / "memory" / "experiments").mkdir()
-    (root / "memory" / "daily").mkdir()
-    save_state(AgentState(paused=False, competition="rsna_knee"), root)
 
 
 @dataclass

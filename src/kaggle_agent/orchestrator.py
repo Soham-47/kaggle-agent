@@ -169,11 +169,18 @@ class Orchestrator:
             state = self._begin(state, dry, now, result)
             result.context_sections = len(build_context_pack(self.root).sections)
 
-            if "LOCK" in self.settings.phases:
-                state = self._run_named_phases(("LOCK",), state, dry, result)
-            state = self._run_named_phases(("RESEARCH",), state, dry, result)
+            # Block order is fixed (RESEARCH before the slice). Each block
+            # is intersected with settings.phases so yaml can still drop steps.
+            state = self._run_named_phases(
+                self._enabled_phases(("LOCK",)), state, dry, result
+            )
+            state = self._run_named_phases(
+                self._enabled_phases(("RESEARCH",)), state, dry, result
+            )
             state = self._train_slice(state, dry, result)
-            state = self._run_named_phases(TAIL_PHASES, state, dry, result)
+            state = self._run_named_phases(
+                self._enabled_phases(TAIL_PHASES), state, dry, result
+            )
 
             self._finish_ok(state, result)
         except Exception as exc:  # noqa: BLE001
@@ -241,6 +248,10 @@ class Orchestrator:
         save_state(state, self.root)
         append_daily_log(f"error: {exc}", self.root)
 
+    def _enabled_phases(self, phases: tuple[str, ...]) -> tuple[str, ...]:
+        allowed = set(self.settings.phases)
+        return tuple(p for p in phases if p in allowed)
+
     def _run_named_phases(
         self,
         phases: tuple[str, ...] | list[str],
@@ -258,7 +269,9 @@ class Orchestrator:
     def _train_slice(
         self, state: AgentState, dry: bool, result: CycleResult
     ) -> AgentState:
-        return self._run_named_phases(TRAIN_SLICE_PHASES, state, dry, result)
+        return self._run_named_phases(
+            self._enabled_phases(TRAIN_SLICE_PHASES), state, dry, result
+        )
 
     def _phase(
         self,

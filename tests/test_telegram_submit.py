@@ -1,31 +1,13 @@
 from pathlib import Path
 
 from fakes import FakeKaggleApi
+from helpers import copy_min_workspace as _copy_min
 from kaggle_agent.kaggle_api import KaggleClient
 from kaggle_agent.notify.commands import handle_command, process_updates
 from kaggle_agent.notify.telegram import FakeTelegram
 from kaggle_agent.orchestrator import run_daily
 from kaggle_agent.state_md import load_state, save_state, AgentState
 from kaggle_agent.submit.pending import load_pending, request_approval
-
-
-def _copy_min(root: Path, real: Path) -> None:
-    import shutil
-
-    from kaggle_agent.state_md import AgentState, save_state
-
-    shutil.copytree(real / "config", root / "config")
-    shutil.copytree(real / "competitions", root / "competitions")
-    (root / "memory").mkdir()
-    for name in ("MEMORY.md", "COMPETITION.md", "state.md", "research.md"):
-        shutil.copy(real / "memory" / name, root / "memory" / name)
-    (root / "memory" / "experiments").mkdir()
-    (root / "memory" / "daily").mkdir()
-    (root / "data").mkdir()
-    (root / "data" / "sample_submission.csv").write_text(
-        "StudyInstanceUID\ns1\ns2\n", encoding="utf-8"
-    )
-    save_state(AgentState(paused=False, competition="rsna_knee"), root)
 
 
 def _fake_browser(url: str, max_chars: int = 12000) -> str:
