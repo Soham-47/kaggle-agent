@@ -1,4 +1,4 @@
-# Review: Slice 7 — Telegram approve + submit gate
+# Review: Slice 7, Telegram approve + submit gate
 
 ### Context
 - [x] Spec: `docs/specs/slice-07-telegram-submit.md`
@@ -9,7 +9,7 @@
 - [x] Live submit blocked without `pending.status == approved`
 - [x] `/approve` / `/reject` / `/pause` / `/resume` / `/budget` update markdown state
 - [x] Unauthorized chat IDs rejected when allowed_chat_id set
-- [x] Tests: **41 passed** offline
+- [x] Tests: 41 passed offline
 
 ### Readability
 - [x] Command handlers extracted; submit dry vs real split
@@ -33,11 +33,11 @@
 ### Findings
 | Severity | Item | Status |
 |----------|------|--------|
-| **Required** | Dead no-op exp check in `_submit` | Fixed in simplification |
-| **Required** | Silly `_submit_dry` return hack | Fixed |
-| **Optional** | Live cycle still needs human `/approve` between cycles if TELEGRAM_APPROVE resets pending to pending each run | By design: approve then re-run cycle, or later wait-loop |
-| **Optional** | HEAL is placeholder until slice 8 | OK |
-| **FYI** | Full Telegram Bot API not used (no keyboards) | OK for v1 |
+| Required | Dead no-op exp check in `_submit` | Fixed in simplification |
+| Required | Silly `_submit_dry` return hack | Fixed |
+| Optional | Live cycle still needs human `/approve` between cycles if TELEGRAM_APPROVE resets pending to pending each run | By design: approve then re-run cycle, or later wait-loop |
+| Optional | HEAL is placeholder until slice 8 | OK |
+| FYI | Full Telegram Bot API not used (no keyboards) | OK for v1 |
 
 ### Verdict
-- [x] **Approve** — ready for Slice 8 (heal + cron) or production bot wiring
+- [x] Approve. Ready for Slice 8 (heal + cron) or production bot wiring.

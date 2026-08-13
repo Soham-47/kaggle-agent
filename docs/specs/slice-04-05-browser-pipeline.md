@@ -1,9 +1,9 @@
-# Spec: Slice 4–5 — Browser research + pipeline smoke
+# Spec: Slice 4-5, browser research + pipeline smoke
 
 ## Objective
 
-1. **Slice 4:** Scrape competition overview/discussion **text** (when API is thin) via injectable page fetcher; default production path uses **browser-harness**; never submit via browser.
-2. **Slice 5:** Ship a **schema-correct baseline pipeline** and **local smoke** that writes a valid submission CSV (constant probs) without DICOM train.
+1. Slice 4: scrape competition overview/discussion text (when the API is thin) via an injectable page fetcher. The default production path uses browser-harness. Never submit via browser.
+2. Slice 5: ship a schema-correct baseline pipeline and local smoke that writes a valid submission CSV (constant probs) without DICOM train.
 
 ## Success criteria
 

@@ -1,4 +1,4 @@
-# Review: kaggle-agent slices 1–3 (post-simplification)
+# Review: kaggle-agent slices 1-3 (post-simplification)
 
 ### Context
 - [x] Self-healing Kaggle agent: md memory, Zen PLAN, Kaggle API research
@@ -37,10 +37,10 @@
 - [x] Integration marker for live API
 
 ### Findings addressed in this pass
-1. **Required (fixed):** orchestrator unit test called live Kaggle (~30s). Injected `FakeKaggleApi` via `run_daily(..., kaggle=)`.
-2. **Required (fixed):** dead aliases (`load_current`, `write_experiment_stub`) removed.
-3. **Optional (deferred):** quiet Kaggle SDK stdout ("Next Page Token") — library side effect.
-4. **Optional (deferred):** empty `code/`, `heal/`, `notify/`, `submit/`, `train/` packages stay as slice placeholders.
+1. Required (fixed): orchestrator unit test called live Kaggle (~30s). Injected `FakeKaggleApi` via `run_daily(..., kaggle=)`.
+2. Required (fixed): dead aliases (`load_current`, `write_experiment_stub`) removed.
+3. Optional (deferred): quiet Kaggle SDK stdout ("Next Page Token"). Library side effect.
+4. Optional (deferred): empty `code/`, `heal/`, `notify/`, `submit/`, `train/` packages stay as slice placeholders.
 
 ### Verdict
-- [x] **Approve** — ready for Slice 4 or 5
+- [x] Approve. Ready for Slice 4 or 5.

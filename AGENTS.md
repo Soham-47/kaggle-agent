@@ -1,22 +1,22 @@
-# Agent instructions — kaggle-agent
+# Agent instructions: kaggle-agent
 
 This repo runs one Kaggle competition at a time. Set `default_competition` in `config/settings.yaml` and keep that contest's facts in `memory/COMPETITION.md` plus `config/competitions/<id>.yaml`.
 
-## Channels (important)
+## Channels
 
 | Action | Tool |
 |--------|------|
-| Download meta CSV, list kernels, **submit**, LB, limits | **`kaggle_agent.kaggle_api.KaggleClient`** + `~/.kaggle/kaggle.json` |
-| Discussions / HTML pages the API cannot give | **browser-harness** (research only; headed Chrome from `scripts/start_research_chrome.sh`) |
-| Deep research (notebooks, papers, repos, web) | **`research/deep.py`** plus **`research/source_cards.py`** (one worker per top kernel) |
-| LLM plan / code brief / distill / vision | **OpenCode Zen** (`OPENCODE_API_KEY`) |
-| Approve a real submit | **Telegram** `/yes` (when enabled) |
+| Download meta CSV, list kernels, submit, LB, limits | `kaggle_agent.kaggle_api.KaggleClient` + `~/.kaggle/kaggle.json` |
+| Discussions / HTML pages the API cannot give | browser-harness (research only; headed Chrome from `scripts/start_research_chrome.sh`) |
+| Deep research (notebooks, papers, repos, web) | `research/deep.py` plus `research/source_cards.py` (one worker per top kernel) |
+| LLM plan / code brief / distill / vision | OpenCode Zen (`OPENCODE_API_KEY`) |
+| Approve a real submit | Telegram `/yes` (when enabled) |
 
 Never submit via the browser. Never invent a second memory store.
 
-RESEARCH always runs in this order: Kaggle snapshot → browser pages → parallel source cards → recursive DeepResearcher. Source cards and `pipeline/methods.json` are what CODE implements.
+RESEARCH always runs in this order: Kaggle snapshot, then browser pages, then parallel source cards, then recursive DeepResearcher. Source cards and `pipeline/methods.json` are what CODE implements.
 
-## Memory (lean — only these are ingested)
+## Memory (only these are ingested)
 
 | File | Role |
 |------|------|
@@ -26,7 +26,7 @@ RESEARCH always runs in this order: Kaggle snapshot → browser pages → parall
 | `memory/research.md` | distilled research (Kaggle snapshot + browser + deep digest) |
 | `memory/research-deep/source-*.md` | last 2 method cards (PLAN/CODE) |
 | `memory/experiments/*.md` | last 2 loaded into context |
-| `memory/daily/` | logs only — **not** in context pack |
+| `memory/daily/` | logs only; not in the context pack |
 
 ## Rules
 

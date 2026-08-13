@@ -4,7 +4,7 @@ Five-axis review after wiring source cards into RESEARCH → PLAN → CODE.
 
 ## Context
 
-Deep research must produce implementable method cards. CODE attaches listed datasets, finds hidden test IDs, and rank-averages prediction tables. Docs are written for any contest.
+Deep research must produce method cards CODE can ship. CODE attaches listed datasets, finds hidden test IDs, and rank-averages prediction tables. Docs are written for any contest.
 
 ## Correctness
 

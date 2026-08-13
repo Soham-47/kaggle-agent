@@ -1,4 +1,4 @@
-# Spec: Slice 7 — Telegram approve + Kaggle submit gate
+# Spec: Slice 7, Telegram approve + Kaggle submit gate
 
 ## Objective
 

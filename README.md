@@ -1,6 +1,6 @@
 # kaggle-agent
 
-A daily loop that researches **whichever Kaggle contest you point it at**, writes a small experiment, trains on Kaggle Kernels, and submits only after you approve.
+A daily loop that researches the Kaggle contest you point it at, writes a small experiment, trains on Kaggle Kernels, and submits only after you approve.
 
 The agent code is contest-agnostic. A contest is three files: a YAML under `config/competitions/`, a short `memory/COMPETITION.md`, and a pipeline under `competitions/<id>/`. `competitions/rsna_knee/` is one worked example, not a hard-wired target.
 

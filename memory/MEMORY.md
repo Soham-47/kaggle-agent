@@ -14,7 +14,7 @@ Durable facts only. Keep short. Contest-specific numbers live under Active conte
 - Kernel: always build a notebook package under `competitions/<id>/notebooks/<exp>/`. Push only if `kernel.push: true` and the cycle is not dry.
 - Kernel resume: if `memory/kernel_job.md` is still RUNNING, the next cycle polls that job (no second push).
 - Heal: tune → recipe → new → pause (`memory/heal.md`). Pause sets `state.paused`.
-- Cron: `bash scripts/install_cron.sh` — see `docs/cron.md`.
+- Cron: `bash scripts/install_cron.sh`. See `docs/cron.md`.
 
 ## Goals
 

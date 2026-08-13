@@ -1,18 +1,18 @@
-# Spec: Slice 3 — Kaggle API adapter
+# Spec: Slice 3, Kaggle API adapter
 
 ## Objective
 
-Give the agent a **deep module** over the official Kaggle Public API so the daily cycle can:
+Give the agent a deep module over the official Kaggle Public API so the daily cycle can:
 
-1. Read **submission limits** (remaining allowance).
-2. List **meta files** (CSV only; not full DICOM tree).
-3. Download **small meta CSVs** (sample_submission, etc.).
-4. Read **public leaderboard** top rows.
-5. List **top public kernels** for the competition.
-6. List **our recent submissions**.
-7. Prepare **submit** behind `dry_run=True` by default (no accidental spend).
+1. Read submission limits (remaining allowance).
+2. List meta files (CSV only; not full DICOM tree).
+3. Download small meta CSVs (sample_submission, and similar).
+4. Read public leaderboard top rows.
+5. List top public kernels for the competition.
+6. List our recent submissions.
+7. Prepare submit behind `dry_run=True` by default (no accidental spend).
 
-Submit stays **API-only** (never browser-harness). Browser is research HTML only (later slice).
+Submit stays API-only (never browser-harness). Browser is research HTML only (later slice).
 
 ## Tech stack
 
@@ -21,7 +21,7 @@ Submit stays **API-only** (never browser-harness). Browser is research HTML only
 | Official client | `kaggle` PyPI package (CLI + `kaggle.api.KaggleApi`) | https://www.kaggle.com/docs/api |
 | Verified version | 2.2.4 (probed on host via `uv tool run --from kaggle`) | package import |
 | Auth | `~/.kaggle/kaggle.json` via `api.authenticate()` | same docs |
-| HTTP | library-internal (we do not reimplement REST) | — |
+| HTTP | library-internal (we do not reimplement REST) | n/a |
 
 ## Module design (codebase-design)
 
@@ -65,9 +65,9 @@ uv run pytest -m integration
 
 ## Boundaries
 
-- **Always:** default `dry_run=True` on submit; never download full DICOM tree; cite official API methods.
-- **Ask first:** real submit (`dry_run=False`); Telegram still required in later slice.
-- **Never:** browser-based submit; commit `kaggle.json`; store API secrets in memory md.
+- Always: default `dry_run=True` on submit; never download full DICOM tree; cite official API methods.
+- Ask first: real submit (`dry_run=False`); Telegram still required in later slice.
+- Never: browser-based submit; commit `kaggle.json`; store API secrets in memory md.
 
 ## Success criteria
 
@@ -78,4 +78,4 @@ uv run pytest -m integration
 
 ## Open questions
 
-None for Slice 3 — pilot slug already in config.
+None for Slice 3. The pilot slug is already in config.

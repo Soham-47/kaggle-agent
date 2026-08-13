@@ -7,4 +7,4 @@
 - best_score: none
 - decision_next: wait_approve
 - last_improved: never
-- note: submit blocked — need /approve
+- note: submit blocked, need /approve

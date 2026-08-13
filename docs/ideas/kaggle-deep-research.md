@@ -6,7 +6,7 @@ PLAN/CODE need the actual methods from public notebooks that already beat us, no
 
 ## Direction
 
-One worker per named source (top kernels, host discussion, cited paper). Each writes a method card. Merge only implementable steps into `research.md` and `pipeline/methods.json`. Do not rely on a generic web crawl for this.
+One worker per named source (top kernels, host discussion, cited paper). Each writes a method card. Merge only steps CODE can ship into `research.md` and `pipeline/methods.json`. Do not rely on a generic web crawl for this.
 
 This is part of the daily RESEARCH phase.
 

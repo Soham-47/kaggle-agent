@@ -1,10 +1,10 @@
-# Spec: Slice 8 — Heal policy + cron + kernel resume
+# Spec: Slice 8, heal policy + cron + kernel resume
 
 ## Objective
 
-1. **Heal:** after each cycle, choose next action: `tune` → `recipe` → `new` → `pause` based on score progress and attempt counts.
-2. **Kernel resume:** if a pushed kernel is still RUNNING, next cron polls it instead of starting a second push.
-3. **Cron:** document + install helper for daily `run_daily.py` with flock via existing `RunLock`.
+1. Heal: after each cycle, choose next action: `tune` → `recipe` → `new` → `pause` based on score progress and attempt counts.
+2. Kernel resume: if a pushed kernel is still RUNNING, next cron polls it instead of starting a second push.
+3. Cron: document + install helper for daily `run_daily.py` with flock via existing `RunLock`.
 
 ## Success criteria
 

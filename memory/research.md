@@ -20,16 +20,16 @@ Distilled from Kaggle API (not browser). Keep short.
 
 ### Leaderboard (public top)
 
-1. Brandon Low — 0.946
-2. MKhlystun — 0.946
-3. CloseAI — 0.946
-4. Lukas Nissen Molvær — 0.943
-5. qkrtkddnjs — 0.942
-6. Pizza Boy — 0.941
-7. JOLEE — 0.938
-8. Sida Zuo — 0.937
-9. Siontist — 0.936
-10. Aastik Rajan15 — 0.936
+1. Brandon Low: 0.946
+2. MKhlystun: 0.946
+3. CloseAI: 0.946
+4. Lukas Nissen Molvær: 0.943
+5. qkrtkddnjs: 0.942
+6. Pizza Boy: 0.941
+7. JOLEE: 0.938
+8. Sida Zuo: 0.937
+9. Siontist: 0.936
+10. Aastik Rajan15: 0.936
 
 ### Top public kernels
 
@@ -118,20 +118,17 @@ Source pages for `rsna-knee-abnormality-detection` (not for submit).
 
 Distilled from articles, papers, notebooks, repos, web.
 
-- The supplied search-result snippets do not contain any Kaggle notebook content for `rsna-knee-abnormality-detection`, nor any `submission.csv`, `sample_submission`, public/private LB score, `macro_auc`, model architecture, fold count, image preprocessing, or ensemble details.
-- All snippets are generic AUC-optimization research-paper abstracts: topics include weakly supervised AUC optimization, large-scale AUC maximization, kernelized AUC maximization machines, deep AUC maximization, and surrogate-loss consistency for AUC.
-- One snippet names `WSAUC` as a unified framework for weakly supervised AUC optimization covering noisy-label learning, positive-unlabeled learning, multi-instance learning, and a truncated `semi-...` setting.
-- One snippet states that Deep AUC Maximization has been applied successfully to imbalanced medical tasks such as chest X-ray classification and skin-lesion classification, but may overfit on small datasets because it aggressively separates positive and negative prediction scores.
-- The provided search-result snippets do not contain any Kaggle notebook/code page for `rsna-knee-abnormality-detection`, nor any dataset files such as `sample_submission`, `submission.csv`, `test.csv`, or `test_series.csv`.
-- No exact RSNA Knee Abnormality Detection competition metrics, public leaderboard scores, model architectures, CV schemes, or submission-format details are present in the supplied results.
-- One unrelated result discusses Macro-AUC for multi-label learning, defining Macro-AUC as the arithmetic mean of class-wise AUCs and emphasizing its relevance under class imbalance.
-- One unrelated medical-imaging result describes a chest X-ray multi-label pipeline using SE-ResNeXt101 `(32 × 4d)` fine-tuned for 14 thoracic findings with a sigmoid head and Multilabel Iterative Stratification.
-- The provided snippets contain no Kaggle code pages and no RSNA Knee Abnormality Detection content; they reference unrelated topics such as LeakGuard, ECOVNet, the Siberian Radioheliograph, ensemble control systems, and Milnor fibration product maps.
-- No verifiable RSNA knee CV/fold/leak/ensemble/DINOv2/EfficientNet metrics, architectures, notebook authors, or Kaggle entities can be extracted from the supplied search results.
-- The provided search results do not include any Kaggle Code notebook content for "RSNA Knee Abnormality Detection" or "rsna-knee-abnormality-detection"; none mention RSNA knee data, leaderboard score, macro_auc value, fold CV, submission.csv format, or a competition-specific pipeline.
-- The only EfficientNet-related snippets are generic/non-RSNA: one describes EfficientNet as CNNs balancing width, depth, and resolution; another reports EfficientNet experiments for brain tumor, breast cancer mammography, chest cancer, and skin cancer classification, but provides no metrics or Kaggle notebook identifiers.
-- The only DINO/DINOv2-related snippets are non-RSNA: one describes a training-free deformable image registration method using DINO features, and another compares SE-ResNet, EfficientNet, and DINOv2 for smartphone-acquired eyelid-parameter measurement including MRD1, MRD2, and Levator Function.
-- Several retrieved snippets are unrelated Kaggle/GitHub-style project notes, including web-scraping-books, Admission_prediction, all-the-news text classification, and ETL project guidelines; they provide no usable evidence for RSNA Knee Abnormality Detection methods or scores.
+The web/arXiv snippets did not include Kaggle notebooks, `submission.csv`, `sample_submission`, public or private LB scores, or a contest-specific pipeline for `rsna-knee-abnormality-detection`. No RSNA knee CV, fold, leak, ensemble, DINOv2, or EfficientNet numbers from this contest showed up either.
+
+What the snippets did contain:
+
+- Generic AUC papers: weakly supervised AUC (one names `WSAUC` for noisy-label, positive-unlabeled, multi-instance, and a truncated `semi-...` setting), large-scale AUC, kernelized AUC, Deep AUC Maximization, and surrogate-loss consistency.
+- Deep AUC Maximization applied to imbalanced medical tasks (chest X-ray, skin-lesion). It can overfit on small datasets because it pushes positive and negative scores apart.
+- Macro-AUC defined as the arithmetic mean of class-wise AUCs, useful under class imbalance.
+- An unrelated chest X-ray multi-label pipeline: SE-ResNeXt101 `(32 × 4d)`, 14 thoracic findings, sigmoid head, Multilabel Iterative Stratification.
+- EfficientNet described as balancing width, depth, and resolution; experiments on brain tumor, breast cancer mammography, chest cancer, and skin cancer, with no metrics or Kaggle notebook IDs.
+- DINO/DINOv2 snippets that are not RSNA: training-free deformable registration with DINO features; SE-ResNet vs EfficientNet vs DINOv2 for smartphone eyelid measurements (MRD1, MRD2, Levator Function).
+- Other noise: LeakGuard, ECOVNet, the Siberian Radioheliograph, ensemble control systems, Milnor fibration maps, plus project notes (web-scraping-books, Admission_prediction, all-the-news, ETL guidelines).
 
 - source: http://arxiv.org/abs/1208.0645v4
 - source: http://arxiv.org/abs/1211.5715v1

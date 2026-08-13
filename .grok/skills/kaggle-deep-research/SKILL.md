@@ -5,7 +5,7 @@ description: Parallel primary-source research for the active Kaggle contest. One
 
 # Kaggle deep research (one agent per source)
 
-The daily `DeepResearcher` lists kernel titles and often distills off-topic arXiv. PLAN only sees a cut of `research.md`. This skill (and the in-cycle `source_cards` workers) pull implementable methods from named sources.
+The daily `DeepResearcher` lists kernel titles and often distills off-topic arXiv. PLAN only sees a cut of `research.md`. This skill (and the in-cycle `source_cards` workers) pull methods from named sources that CODE can ship.
 
 The daily orchestrator already runs this during RESEARCH. You do not wait for a separate command.
 
