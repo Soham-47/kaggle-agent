@@ -58,8 +58,8 @@ def next_loop_count(
 ) -> int:
     """Map last score-gain rate to next slice count. None rate = first run."""
     if rate is None:
-        return int(default_n)
+        return int(min(n_max, max(n_min, default_n)))
     gain = max(float(rate), 0.0)
-    denom = 1.0 + (gain / typical_gain if typical_gain else 0.0)
+    denom = 1.0 + (gain / typical_gain if typical_gain > 0 else 0.0)
     n = round(n_min + (n_max - n_min) / denom)
     return int(min(n_max, max(n_min, n)))
