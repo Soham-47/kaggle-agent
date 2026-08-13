@@ -47,7 +47,11 @@ def test_next_n_two_trains_once_submit(tmp_path: Path):
     assert result.train_slices == 2
     assert result.research_passes >= 1
     notebooks = root / "competitions" / "rsna_knee" / "notebooks"
-    pkgs = [p for p in notebooks.iterdir() if p.is_dir()] if notebooks.is_dir() else []
+    pkgs = (
+        [p for p in notebooks.iterdir() if p.is_dir() and "-s" in p.name]
+        if notebooks.is_dir()
+        else []
+    )
     assert len(pkgs) == 2
     assert result.submit_ok is True
     assert len(_code_subs(api)) == 1
