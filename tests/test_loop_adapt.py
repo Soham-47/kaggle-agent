@@ -1,7 +1,13 @@
 from pathlib import Path
 
 from kaggle_agent.config import load_settings
-from kaggle_agent.loop import LoopState, load_loop, next_loop_count, save_loop
+from kaggle_agent.loop import (
+    LoopState,
+    load_loop,
+    next_loop_count,
+    record_run_score,
+    save_loop,
+)
 from kaggle_agent.paths import repo_root
 
 
@@ -64,6 +70,37 @@ def test_load_loop_missing_file_defaults(tmp_path: Path):
     assert loaded.last_score == "none"
     assert loaded.prev_score == "none"
     assert loaded.next_n == "3"
+
+
+def test_record_run_score_typical_gain():
+    loop = LoopState(last_score="0.50", next_n="3")
+    out = record_run_score(
+        loop,
+        "0.51",
+        n_used=3,
+        n_min=2,
+        n_max=8,
+        typical_gain=0.01,
+        default_n=3,
+    )
+    assert out.last_score == "0.51"
+    assert out.prev_score == "0.50"
+    assert out.last_n == "3"
+    assert out.next_n == "5"
+
+
+def test_record_run_score_worse_is_zero_rate():
+    loop = LoopState(last_score="0.60", next_n="3")
+    out = record_run_score(
+        loop,
+        "0.50",
+        n_used=2,
+        n_min=2,
+        n_max=8,
+        typical_gain=0.01,
+        default_n=3,
+    )
+    assert out.next_n == "8"
 
 
 def test_settings_loop_defaults():

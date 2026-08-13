@@ -47,9 +47,16 @@ from kaggle_agent.submit.pending import (
     mark_submitted,
     request_approval,
     save_pending,
+    set_decision,
     usable_approval,
 )
 from kaggle_agent.heal.policy import decide_next, load_heal, save_heal
+from kaggle_agent.loop import (
+    load_loop,
+    next_loop_count,
+    parse_loop_score,
+    update_loop_from_score,
+)
 from kaggle_agent.train.kernel_job import load_kernel_job
 from kaggle_agent.train.kernel_runner import run_kernel_phase
 from kaggle_agent.train.local_smoke import run_competition_smoke
@@ -74,7 +81,9 @@ Do not invent a new architecture. Do not include secrets."""
 DEFAULT_HYPOTHESIS = "dry-run default: schema-valid 0.5 baseline then improve"
 
 TRAIN_SLICE_PHASES = ("PLAN", "CODE", "LOCAL_SMOKE", "KERNEL_TRAIN", "VALIDATE_SUB")
-TAIL_PHASES = ("TELEGRAM_APPROVE", "SUBMIT", "FEEDBACK", "HEAL", "REPORT")
+SUBMIT_PHASES = ("TELEGRAM_APPROVE", "SUBMIT", "FEEDBACK")
+TAIL_PHASES = ("HEAL", "REPORT")
+_SLICE_ERR_PREFIXES = ("code:", "smoke:", "kernel:", "validate:")
 
 
 @dataclass
@@ -156,9 +165,15 @@ class Orchestrator:
         self._telegram = telegram
         self._browser_submit = browser_submit
         self._mcp_submit_fn = mcp_submit_fn  # tests inject call_tool
+        self._assume_approved = False
+        self._loop_n_used = 0
 
-    def run_cycle(self, *, dry_run: bool | None = None) -> CycleResult:
+    def run_cycle(
+        self, *, dry_run: bool | None = None, assume_approved: bool = False
+    ) -> CycleResult:
         dry = self.settings.dry_run if dry_run is None else dry_run
+        self._assume_approved = assume_approved
+        self._loop_n_used = 0
         result = CycleResult(competition=self.competition.id, dry_run=dry)
         now = datetime.now(timezone.utc)
         state = load_state(self.root)
@@ -181,7 +196,11 @@ class Orchestrator:
             state = self._run_named_phases(
                 self._enabled_phases(("RESEARCH",)), state, dry, result
             )
-            state = self._train_slice(state, dry, result)
+            state = self._run_train_slices(state, dry, result, started=now)
+            state = self._run_named_phases(
+                self._enabled_phases(SUBMIT_PHASES), state, dry, result
+            )
+            self._update_loop_after_feedback(result)
             state = self._run_named_phases(
                 self._enabled_phases(TAIL_PHASES), state, dry, result
             )
@@ -269,6 +288,120 @@ class Orchestrator:
             append_daily_log(phase, self.root)
             state = self._phase(phase, state=state, dry=dry, result=result)
         return state
+
+    def _resolve_loop_n(self) -> int:
+        n_min = self.settings.loop_n_min
+        n_max = self.settings.loop_n_max
+        loop = load_loop(self.root)
+        try:
+            n = int(str(loop.next_n).strip())
+        except (TypeError, ValueError):
+            n = 0
+        if n <= 0:
+            n = next_loop_count(
+                None,
+                n_min=n_min,
+                n_max=n_max,
+                typical_gain=self.settings.loop_typical_gain,
+                default_n=self.settings.loop_default_n,
+            )
+        else:
+            # Honor explicit next_n=1 in tests; still cap at n_max.
+            cap = n_max if n_max > 0 else n
+            n = max(1, min(n, cap))
+        return n
+
+    def _clear_slice_fields(self, result: CycleResult) -> None:
+        result.code_ok = None
+        result.smoke_ok = None
+        result.smoke_path = None
+        result.kernel_ok = None
+        result.kernel_ref = None
+        result.kernel_path = None
+        result.kernel_resumed = None
+        result.validate_ok = None
+        result.candidate_csv = None
+
+    def _run_train_slices(
+        self,
+        state: AgentState,
+        dry: bool,
+        result: CycleResult,
+        *,
+        started: datetime,
+    ) -> AgentState:
+        n = self._resolve_loop_n()
+        base_exp = result.experiment_id or "exp"
+        best: dict[str, Any] | None = None
+        used = 0
+        for i in range(1, n + 1):
+            if i > 1:
+                if load_state(self.root).paused:
+                    append_daily_log("train loop stop: paused", self.root)
+                    break
+                limit = self.settings.loop_max_minutes
+                if limit > 0:
+                    elapsed = (
+                        datetime.now(timezone.utc) - started
+                    ).total_seconds() / 60.0
+                    if elapsed >= limit:
+                        append_daily_log("train loop stop: max_minutes", self.root)
+                        break
+            if n > 1:
+                result.experiment_id = f"{base_exp}-s{i}"
+                state.active_experiment = result.experiment_id
+                save_state(state, self.root)
+            self._clear_slice_fields(result)
+            err_before = len(result.errors)
+            append_daily_log(f"train slice {i}/{n}", self.root)
+            state = self._train_slice(state, dry, result)
+            used = i
+            csv = result.candidate_csv
+            if result.validate_ok and csv and Path(csv).is_file():
+                prior = [
+                    e
+                    for e in result.errors[:err_before]
+                    if not e.startswith(_SLICE_ERR_PREFIXES)
+                ]
+                best = {
+                    "experiment_id": result.experiment_id,
+                    "kernel_path": result.kernel_path,
+                    "kernel_ref": result.kernel_ref,
+                    "candidate_csv": csv,
+                    "smoke_path": result.smoke_path,
+                    "kernel_ok": result.kernel_ok,
+                    "errors": prior + result.errors[err_before:],
+                }
+        self._loop_n_used = used
+        if best:
+            result.experiment_id = best["experiment_id"]
+            result.kernel_path = best["kernel_path"]
+            result.kernel_ref = best["kernel_ref"]
+            result.candidate_csv = best["candidate_csv"]
+            result.smoke_path = best["smoke_path"]
+            result.kernel_ok = best["kernel_ok"]
+            result.validate_ok = True
+            result.errors = list(best["errors"])
+            state.active_experiment = result.experiment_id
+        else:
+            result.validate_ok = False
+            result.candidate_csv = None
+        return state
+
+    def _update_loop_after_feedback(self, result: CycleResult) -> None:
+        score = result.feedback_score
+        if parse_loop_score(score) is None:
+            return
+        update_loop_from_score(
+            self.root,
+            score,
+            n_used=self._loop_n_used or 1,
+            n_min=self.settings.loop_n_min,
+            n_max=self.settings.loop_n_max,
+            typical_gain=self.settings.loop_typical_gain,
+            default_n=self.settings.loop_default_n,
+            direction=self.competition.metric_direction,
+        )
 
     def _train_slice(
         self, state: AgentState, dry: bool, result: CycleResult
@@ -647,15 +780,21 @@ class Orchestrator:
 
     def _validate_sub(self, state: AgentState, result: CycleResult) -> AgentState:
         """Validate best local candidate CSV (kernel output preferred, else smoke)."""
+        # This slice only — do not pick leftover smoke from other experiments.
         candidates: list[Path] = []
         if result.kernel_path:
             candidates.append(Path(result.kernel_path) / "output" / "submission.csv")
         if result.smoke_path:
             candidates.append(Path(result.smoke_path))
-        # Also check latest smoke under submissions/
-        sub_dir = self.root / self.competition.workspace_relative / "submissions"
-        if sub_dir.is_dir():
-            candidates.extend(sorted(sub_dir.glob("*_smoke.csv"), reverse=True)[:1])
+        exp_id = result.experiment_id
+        if exp_id:
+            same = (
+                self.root
+                / self.competition.workspace_relative
+                / "submissions"
+                / f"{exp_id}_smoke.csv"
+            )
+            candidates.append(same)
 
         path = next((p for p in candidates if p.is_file()), None)
         if path is None:
@@ -731,6 +870,23 @@ class Orchestrator:
             append_daily_log("approve skipped: no validated candidate", self.root)
             return state
 
+        if self._assume_approved:
+            request_approval(
+                exp_id=exp_id,
+                csv_path=csv_path,
+                competition=self.competition.slug,
+                message="assume_approved",
+                root=self.root,
+                kernel_path=result.kernel_path or "none",
+                kernel_ref=result.kernel_ref or "none",
+            )
+            set_decision("latest", approved=True, root=self.root)
+            result.approve_ok = True
+            result.waiting_approve = False
+            state.pending_approve = exp_id
+            append_daily_log(f"approve assumed exp={exp_id}", self.root)
+            return state
+
         # Live: keep prior /yes so a second /run live can submit without re-asking
         if not dry:
             prior = usable_approval(self.root, competition=self.competition.slug)
@@ -791,7 +947,7 @@ class Orchestrator:
             return state
 
         pending = load_pending(self.root)
-        if not dry and self.settings.require_telegram_approve:
+        if not dry and self.settings.require_telegram_approve and not self._assume_approved:
             if (
                 pending.status == "approved"
                 and pending.csv_path not in {csv_path, "none"}
@@ -1108,6 +1264,7 @@ def run_daily(
     *,
     root: Path | None = None,
     dry_run: bool | None = None,
+    assume_approved: bool = False,
     kaggle: KaggleClient | None = None,
     browser_fetch: FetchFn | None = None,
     telegram: SupportsTelegram | None = None,
@@ -1126,5 +1283,5 @@ def run_daily(
         telegram=telegram,
         browser_submit=browser_submit,
         mcp_submit_fn=mcp_submit_fn,
-    ).run_cycle(dry_run=dry_run)
+    ).run_cycle(dry_run=dry_run, assume_approved=assume_approved)
 

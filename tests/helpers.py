@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from kaggle_agent.loop import LoopState, save_loop
 from kaggle_agent.state_md import AgentState, save_state
 
 
@@ -31,3 +32,5 @@ def copy_min_workspace(
     write_min_study_csv(root)
     # Real state may be paused; tests need a clean agent
     save_state(AgentState(paused=False, competition=competition), root)
+    # Keep existing cycle tests at N=1; production missing loop.md still defaults to 3
+    save_loop(LoopState(next_n="1"), root)
