@@ -30,7 +30,7 @@ Swap this block when you change `default_competition`.
 - slug: rsna-knee-abnormality-detection
 - metric: macro AUC (rank-based). A constant probability file scores about 0.500.
 - public_score: 0.526
-- experiment: 20260813-recipe-cpu / submission 55485145 (metadata ranker)
+- experiment: 20260813-cards-fix / submission 55486807 (same 0.526 as 55485145)
 - submit header: keep `Baker's` apostrophe
 - host rejects P100; `kernel.enable_gpu` stays false unless the host allows another accelerator
 
@@ -41,6 +41,6 @@ Swap this block when you change `default_competition`.
 - Do not `import pandas` in local agent paths. It is not in local deps. Kernels have it. Use stdlib `csv` locally.
 - Sibling `.py` files are not importable inside Kaggle notebooks. Inline the recipe.
 - Pending-submit reuse must not carry a stale `kernel_path` / `kernel_ref`. Reset those to `none` before a new live package.
-- Daily Chrome CDP can break after an in-place Chrome upgrade (`chrome (deleted)`, `DevToolsActivePort` claims 9222 but nothing listens). Restart Chrome, or point the harness at a dedicated `--user-data-dir` (`BU_CDP_URL`).
+- Browser research uses a headed profile from `scripts/start_research_chrome.sh` (`~/.local/share/kaggle-agent/chrome`, `BU_CDP_URL=http://127.0.0.1:9224`). Sign in to Kaggle once in that window. Do not attach to daily Chrome 9222 (often stale after an upgrade). Headless `/tmp/kaggle-agent-chrome` has no Google session.
 - Stale `memory/run.lock` after a killed run blocks the next cycle. Remove the file and set `lock_held: false`.
 - CODE should implement method cards: attach public weight datasets, rank-average members, do not probability-mean AUC ensembles.

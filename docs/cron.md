@@ -28,6 +28,19 @@ Manual / Telegram:
 4. LOCAL_SMOKE, KERNEL_TRAIN (retry CPU if the host rejects GPU), VALIDATE
 5. Telegram approve, submit, feedback, heal
 
+## Research Chrome (Kaggle sign-in)
+
+Browser research uses a dedicated headed Chrome, not your daily window.
+
+```bash
+bash scripts/start_research_chrome.sh
+# first time: Sign In on the new window (Google SSO / MFA)
+# leave it running. Profile: ~/.local/share/kaggle-agent/chrome
+# CDP: http://127.0.0.1:9224  (BU_CDP_URL)
+```
+
+Do not attach to daily Chrome port 9222. That port often dies after a Chrome upgrade.
+
 ## Telegram bot (separate process)
 
 Cron does not run the bot. Keep it as a user service or `screen`/`tmux`:

@@ -1,0 +1,40 @@
+# Copy to config/competitions/<id>.yaml and fill in from the contest page.
+# Then: mkdir -p competitions/<id>/pipeline && copy a baseline recipe.
+
+id: my_contest
+slug: the-kaggle-url-slug
+title: Contest title
+deadline: "2026-12-31"
+url: https://www.kaggle.com/competitions/the-kaggle-url-slug
+
+metric:
+  name: auc          # any short name
+  direction: max     # max or min
+  description: ""
+
+labels: []           # empty = single-target or read from sample_submission.csv
+
+submission:
+  id_column: id
+  probability_columns: []
+  # file = CSV upload; notebook = kernels_push + submit_code
+
+workspace:
+  relative: competitions/my_contest
+
+models:
+  plan: null
+  code: null
+  distill: null
+  vision: null
+
+train:
+  backend: kaggle_kernel
+  local_smoke_only: true
+
+submit:
+  mode: notebook     # or file
+  output_file: submission.csv
+
+submit_budget:
+  max_proposals_per_day: 2

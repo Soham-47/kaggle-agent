@@ -1,6 +1,6 @@
 """Read-only browser research for competition HTML pages.
 
-Production: browser-harness (JS-rendered Kaggle pages).
+Production: browser-use / browser-harness on the headed research Chrome.
 Tests: inject a fetch(url, max_chars) -> text callable.
 
 Never used for submit. Skill: browser-harness (new_tab + js body text).
@@ -115,8 +115,9 @@ def _normalize_harness_stdout(stdout: str) -> str:
 
 def fetch_via_browser_harness(url: str, max_chars: int = 12000) -> str:
     """Extract document body text via browser-harness."""
-    if not shutil.which("browser-harness"):
-        raise BrowserResearchError("browser-harness not on PATH")
+    cli = shutil.which("browser-use") or shutil.which("browser-harness")
+    if not cli:
+        raise BrowserResearchError("browser-use / browser-harness not on PATH")
 
     script = f"""
 import time
@@ -142,11 +143,11 @@ print(raw if isinstance(raw, str) else str(raw or ''))
 """
     env = os.environ.copy()
     if not env.get("BU_CDP_URL") and not env.get("BU_CDP_WS"):
-        # Dedicated automation Chrome (see debug notes). Daily Chrome 9222 is often stale.
+        # Headed research Chrome from scripts/start_research_chrome.sh (not daily 9222).
         env.setdefault("BU_CDP_URL", "http://127.0.0.1:9224")
     try:
         proc = subprocess.run(
-            ["browser-harness"],
+            [cli],
             input=script,
             capture_output=True,
             text=True,

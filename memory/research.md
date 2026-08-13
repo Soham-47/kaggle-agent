@@ -57,8 +57,7 @@ Source pages for `rsna-knee-abnormality-detection` (not for submit).
 
 ### overview
 
-- menu Skip to content Create explore Home emoji_events Competitions leaderboard Benchmarks smart_toy Game Arena code Data Hub expand_more format_list_bulleted More expand_more search ​ Sign In Register Kaggle uses cookies…
-- RADIOLOGICAL SOCIETY OF NORTH AMERICA · RESEARCH CODE COMPETITION · 2 MONTHS TO GO Join Competition more_horiz RSNA Knee Abnormality Detection Create a model that can detect knee abnormalities based on multimodal imaging…
+- RADIOLOGICAL SOCIETY OF NORTH AMERICA · RESEARCH CODE COMPETITION · 2 MONTHS TO GO Submit Prediction more_horiz RSNA Knee Abnormality Detection Create a model that can detect knee abnormalities based on multimodal imagin…
 - In this competition, you are tasked to build machine learning models that detect a defined set of clinically important abnormalities on knee MRI examinations.
 - Start 8 days ago Close 2 months to go Merger & Entry Description link keyboard_arrow_up The knee is the most commonly injured and imaged joint in the body.
 - Osteoarthritis alone affects an estimated 654 million people worldwide, while acute knee injuries account for 15 to 40 percent of all sports-related trauma.
@@ -69,47 +68,83 @@ Source pages for `rsna-knee-abnormality-detection` (not for submit).
 - In this competition, you will develop multimodal machine learning models to detect twelve clinically important knee abnormalities.
 - You'll work with the first RSNA AI Challenge dataset that pairs every imaging study with its original radiology report, enabling your models to learn from both visual scans and written diagnostic text.
 - High-performing models can act as robust decision support tools, delivering the accuracy, consistency, and speed needed to elevate expert-level knee MRI interpretation and improve care across disparate clinic settings.
+- Evaluation link keyboard_arrow_up Submissions are evaluated by the average area under the ROC curve between the predicted confidence scores and the observed targets across the twelve targets: Final Score = 1 12 ∑ 𝑖 = 0 1…
 
 ### discussion
 
-- menu Skip to content Create explore Home emoji_events Competitions leaderboard Benchmarks smart_toy Game Arena code Data Hub expand_more format_list_bulleted More expand_more search ​ Sign In Register Kaggle uses cookies…
-- RADIOLOGICAL SOCIETY OF NORTH AMERICA · RESEARCH CODE COMPETITION · 2 MONTHS TO GO Join Competition more_horiz RSNA Knee Abnormality Detection Create a model that can detect knee abnormalities based on multimodal imaging…
-- Po-Hao "Howard" Chen · Posted 7d ago arrow_drop_up 11 arrow_drop_down more_horiz push_pin How to get started + Competition's Official Discord María Cruz · Last comment 7d ago by Ali Ahmad arrow_drop_up 3 arrow_drop_down …
-- Harsh_2035 · Last comment 2d ago by pandabi arrow_drop_up 26 arrow_drop_down 10 comments more_horiz Public/private test split — stratified by site, or entire sites held out?
-- Matteo Vitali · Last comment 5h ago by paul margain arrow_drop_up 3 arrow_drop_down 1 comment more_horiz 58 labelled studies out of 4,407 — the rest of the supervision is in the reports Luka Duvanov · Last comment 21h ag…
-- · Last comment 1d ago by Enai arrow_drop_up 2 arrow_drop_down 5 comments more_horiz Rules clarification: external knee-MRI datasets, and using an LLM API to derive labels from the reports Fernando Faria · Last comment 4d…
-- Tested for DICOM metadata shortcut Oleksii Zhukov · Last comment 5d ago by agr hmmm arrow_drop_up 17 arrow_drop_down 2 comments more_horiz Classifying labels into 12 abnormalities using Report in train.csv file Malav D M…
-- Handudu · Last comment 2d ago by Kupid Technologies arrow_drop_up 2 arrow_drop_down 1 comment more_horiz "Not addressed" is a label too — what we learned reading 4,407 knee reports with an LLM stevenleehans · Last commen…
-- Tiago Mazzutti · Posted 4d ago arrow_drop_up 2 arrow_drop_down more_horiz Strong-pipeline replication: SOFT wins 3/3 seeds (+0.014 AUC), but the 58-study CI crosses zero FHZ982 · Posted 4d ago arrow_drop_up 2 arrow_drop_…
-- FHZ982 · Last comment 4d ago by Po-Hao "Howard" Chen arrow_drop_up 3 arrow_drop_down 1 comment more_horiz 1 2
+- RADIOLOGICAL SOCIETY OF NORTH AMERICA · RESEARCH CODE COMPETITION · 2 MONTHS TO GO Submit Prediction more_horiz RSNA Knee Abnormality Detection Create a model that can detect knee abnormalities based on multimodal imagin…
+- Po-Hao "Howard" Chen · Posted 7d ago arrow_drop_up 11 more_horiz push_pin How to get started + Competition's Official Discord María Cruz · Last comment 7d ago by Ali Ahmad arrow_drop_up 3 1 comment more_horiz All other t…
+- Matteo Vitali · Last comment 6h ago by paul margain arrow_drop_up 3 1 comment more_horiz 58 labelled studies out of 4,407 — the rest of the supervision is in the reports Luka Duvanov · Last comment 1d ago by Luka Duvanov…
+- · Last comment 1d ago by Enai arrow_drop_up 2 5 comments more_horiz I got a perfect usecase for this competition.
+- Harsh_2035 · Last comment 2d ago by pandabi arrow_drop_up 26 10 comments more_horiz YOLO used to be useful in such competition.
+- Handudu · Last comment 2d ago by Kupid Technologies arrow_drop_up 2 1 comment more_horiz Your notebook hit an unhandled error while rerunning your code.
+- Saanvi Belede Naga · Last comment 3d ago by PC Jimmmy arrow_drop_up -2 3 comments more_horiz reports will be unavailable for the hidden test set?
+- Nicolas Pantoja · Last comment 3d ago by Po-Hao "Howard" Chen arrow_drop_up 0 1 comment more_horiz Clarification on MIRA Section 6 hangglider5 · Posted 4d ago arrow_drop_up 0 more_horiz Eligibility under 18 ValkBlox · La…
+- Tiago Mazzutti · Posted 4d ago arrow_drop_up 2 more_horiz 1 2
 
+### submissions
+
+- RADIOLOGICAL SOCIETY OF NORTH AMERICA · RESEARCH CODE COMPETITION · 2 MONTHS TO GO Submit Prediction more_horiz RSNA Knee Abnormality Detection Create a model that can detect knee abnormalities based on multimodal imagin…
+- If less than 2 are selected, Kaggle will automatically select from your best scoring submissions.
+- Learn More Auto-selection candidates help 0/2 All Successful Selected Errors Recent Submission and Description Public Score info Select check_circle rsna-knee-agent 20260813-cards-fix - Version 1 Succeeded · 1h ago · age…
+
+### thread-58-labels
+
+- RADIOLOGICAL SOCIETY OF NORTH AMERICA · RESEARCH CODE COMPETITION · 2 MONTHS TO GO Submit Prediction more_horiz RSNA Knee Abnormality Detection Create a model that can detect knee abnormalities based on multimodal imagin…
+- There is no partial labelling to exploit.
+- The reports are in seven languages — English, Turkish, Spanish, German, Greek (178 of them, in Greek script), Dutch, French — plus 428 a stopword detector cannot place.
+- Turkish negates after the term (efüzyon izlenmedi), so a left-only negation window silently inverts the second-largest language in the corpus.
+- Fluid_Sensitive and Fat_Suppression are the same column, identical on all 24,371 series.
+- Every study has all three planes and both contrast types — no fallback path needed for a fixed-shape input.
+- A plain multilingual keyword matcher, vocabulary not tuned on the 58, gets 0.86 on Baker's cyst and 0.66 on effusion.
+- The 58 are not a random sample: ACL prevalence is 41% there against ~20% in the corpus.
+- https://www.kaggle.com/code/nekkon/knee-mri-58-labels-for-4-407-studies 1 add_reaction comment 3 Comments 1 appreciation comment Hotness undo redo format_size format_bold format_italic format_strikethrough insert_link fo…
+- attach_file Post Comment Malav D Modi Posted 2 days ago arrow_drop_up 1 more_vert I need to ask that my approach i thought was to convert the report to identify labels for rest of report but it cannot happen due to large…
+- What else approach i can use to convert my report into labels given in the csv file ?
+- reply Reply add_reaction React Luka Duvanov TOPIC AUTHOR Posted a day ago · 1268th in this Competition arrow_drop_up 1 more_vert You don't need to translate the reports.
+
+### thread-dino3
+
+- RADIOLOGICAL SOCIETY OF NORTH AMERICA · RESEARCH CODE COMPETITION · 2 MONTHS TO GO Submit Prediction more_horiz RSNA Knee Abnormality Detection Create a model that can detect knee abnormalities based on multimodal imagin…
+- Am I correct in assuming that we can’t use it?
+- add_reaction React comment 2 Comments Hotness undo redo format_size format_bold format_italic format_strikethrough insert_link format_quote code format_list_numbered format_list_bulleted table_chart insert_photo smart_di…
+- attach_file Post Comment PC Jimmmy Posted 7 days ago · 660th in this Competition arrow_drop_up 2 more_vert Dino v3 has been used in other competitions this year - so I think its good !
+- reply Reply add_reaction React PC Jimmmy Posted 7 days ago · 660th in this Competition arrow_drop_up 1 more_vert The attached solution shows a write-up from a person who used Dino V3 - it was NOT one of the models in the…
+- You might find code in that competition on how folks handled getting v3.
+- I am using it now for this competition, but training local and including the files in my dataset so I have no need to get to the model on kaggle.
+- I mention the solution as he had nice things to say about me :) reply Reply add_reaction React PC Jimmmy Posted 6 days ago · 660th in this Competition arrow_drop_up 1 more_vert My V2 model scored 0.775 while pretty much …
+- reply Reply add_reaction React 8 more replies arrow_drop_down +2
 ## Deep research digest
 
-Method cards for PLAN/CODE. Our public best: 0.526.
+Distilled from articles, papers, notebooks, repos, web.
 
-**Must implement**
+- The supplied search-result snippets do not contain any Kaggle notebook content for `rsna-knee-abnormality-detection`, nor any `submission.csv`, `sample_submission`, public/private LB score, `macro_auc`, model architecture, fold count, image preprocessing, or ensemble details.
+- All snippets are generic AUC-optimization research-paper abstracts: topics include weakly supervised AUC optimization, large-scale AUC maximization, kernelized AUC maximization machines, deep AUC maximization, and surrogate-loss consistency for AUC.
+- One snippet names `WSAUC` as a unified framework for weakly supervised AUC optimization covering noisy-label learning, positive-unlabeled learning, multi-instance learning, and a truncated `semi-...` setting.
+- One snippet states that Deep AUC Maximization has been applied successfully to imbalanced medical tasks such as chest X-ray classification and skin-lesion classification, but may overfit on small datasets because it aggressively separates positive and negative prediction scores.
+- The provided search-result snippets do not contain any Kaggle notebook/code page for `rsna-knee-abnormality-detection`, nor any dataset files such as `sample_submission`, `submission.csv`, `test.csv`, or `test_series.csv`.
+- No exact RSNA Knee Abnormality Detection competition metrics, public leaderboard scores, model architectures, CV schemes, or submission-format details are present in the supplied results.
+- One unrelated result discusses Macro-AUC for multi-label learning, defining Macro-AUC as the arithmetic mean of class-wise AUCs and emphasizing its relevance under class imbalance.
+- One unrelated medical-imaging result describes a chest X-ray multi-label pipeline using SE-ResNeXt101 `(32 × 4d)` fine-tuned for 14 thoracic findings with a sigmoid head and Multilabel Iterative Stratification.
+- The provided snippets contain no Kaggle code pages and no RSNA Knee Abnormality Detection content; they reference unrelated topics such as LeakGuard, ECOVNet, the Siberian Radioheliograph, ensemble control systems, and Milnor fibration product maps.
+- No verifiable RSNA knee CV/fold/leak/ensemble/DINOv2/EfficientNet metrics, architectures, notebook authors, or Kaggle entities can be extracted from the supplied search results.
+- The provided search results do not include any Kaggle Code notebook content for "RSNA Knee Abnormality Detection" or "rsna-knee-abnormality-detection"; none mention RSNA knee data, leaderboard score, macro_auc value, fold CV, submission.csv format, or a competition-specific pipeline.
+- The only EfficientNet-related snippets are generic/non-RSNA: one describes EfficientNet as CNNs balancing width, depth, and resolution; another reports EfficientNet experiments for brain tumor, breast cancer mammography, chest cancer, and skin cancer classification, but provides no metrics or Kaggle notebook identifiers.
+- The only DINO/DINOv2-related snippets are non-RSNA: one describes a training-free deformable image registration method using DINO features, and another compares SE-ResNet, EfficientNet, and DINOv2 for smartphone-acquired eyelid-parameter measurement including MRD1, MRD2, and Levator Function.
+- Several retrieved snippets are unrelated Kaggle/GitHub-style project notes, including web-scraping-books, Admission_prediction, all-the-news text classification, and ETL project guidelines; they provide no usable evidence for RSNA Knee Abnormality Detection methods or scores.
 
-1. Use public kernel methods (imaging or published weight packs), not constant scores.
-2. Find test IDs from hidden study folders.
-3. Rank-average members. AUC-style metrics only read order.
-4. Train labels from reports / mounted label tables. Gold subsets are too small for priors.
-
-**Sources**
-
-- source: https://www.kaggle.com/code/aadigupta7686/0-899-let-me-cook — [0.899] Let me Cook; public 0.891
-  next: Attach datasets ['input/rsna-knee-b3-v47-folds-0-3', 'input/rsna-knee-weights', 'input/rsna-knee-abnormality-detection'] and reuse their infer path. Our score=0.526.
-
-- source: https://www.kaggle.com/code/pilkwang/rsna-knee-baseline-v1 — RSNA Knee baseline v1; public 0.85
-  next: Pull this kernel and copy its inference ID discovery + rank-average. Our score=0.526.
-
-- source: https://www.kaggle.com/code/prvsiyan/rsna-knee-read-the-report-then-the-knee — RSNA Knee: read the report, then the knee; public 0.906
-  next: Pull this kernel and copy its inference ID discovery + rank-average. Rank-average member scores; do not probability-mean. Our score=0.526.
-
-- source: https://www.kaggle.com/code/romanrozen/rsna-knee-data-structure-eda-baseline — RSNA Knee | Data structure, EDA, baseline🔥; public unknown
-  next: Pull this kernel and copy its inference ID discovery + rank-average. Our score=0.526.
-
-- source: https://www.kaggle.com/code/romantamrazov/rsna-knee-dinosaur-v2 — RSNA Knee | DINOsaur V2 🦖; public unknown
-  next: Pull this kernel and copy its inference ID discovery + rank-average. Rank-average member scores; do not probability-mean. Our score=0.526.
-
-- source: https://www.kaggle.com/code/wguesdon/rsna-knee-dinov2-at-meniscus-resolution — RSNA Knee DINOv2 at meniscus resolution; public 0.156
-  next: Attach datasets ['wguesdon/rsna-knee-llm-report-labels-opus', 'torch/GPU', 'mnt/data/Github/Kaggle/Competitions', 'data/kaggle_mirror/rsna-knee-abnormality-detection', 'data/raw', 'input/rsna-knee-abnormality-detection', 'kaggle_mirror/rsna
+- source: http://arxiv.org/abs/1208.0645v4
+- source: http://arxiv.org/abs/1211.5715v1
+- source: http://arxiv.org/abs/1710.00760v4
+- source: http://arxiv.org/abs/2009.02646v1
+- source: http://arxiv.org/abs/2009.11850v2
+- source: http://arxiv.org/abs/2201.01145v1
+- source: http://arxiv.org/abs/2304.08715v3
+- source: http://arxiv.org/abs/2305.05248v2
+- source: http://arxiv.org/abs/2305.14258v2
+- source: http://arxiv.org/abs/2310.11693v1
+- source: http://arxiv.org/abs/2402.15687v1
+- source: http://arxiv.org/abs/2407.18100v3
+- source: http://arxiv.org/abs/2412.18231v1
+- source: http://arxiv.org/abs/2504.00515v1
+- source: http://arxiv.org/abs/2504.04422v1

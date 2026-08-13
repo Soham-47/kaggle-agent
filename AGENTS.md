@@ -7,7 +7,7 @@ This repo runs one Kaggle competition at a time. Set `default_competition` in `c
 | Action | Tool |
 |--------|------|
 | Download meta CSV, list kernels, **submit**, LB, limits | **`kaggle_agent.kaggle_api.KaggleClient`** + `~/.kaggle/kaggle.json` |
-| Discussions / HTML pages the API cannot give | **browser-harness** (research only) |
+| Discussions / HTML pages the API cannot give | **browser-harness** (research only; headed Chrome from `scripts/start_research_chrome.sh`) |
 | Deep research (notebooks, papers, repos, web) | **`research/deep.py`** plus **`research/source_cards.py`** (one worker per top kernel) |
 | LLM plan / code brief / distill / vision | **OpenCode Zen** (`OPENCODE_API_KEY`) |
 | Approve a real submit | **Telegram** `/yes` (when enabled) |

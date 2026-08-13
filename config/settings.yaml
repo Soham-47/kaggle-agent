@@ -42,6 +42,7 @@ browser_research:
   pages:
     - overview
     - discussion
+  # CDP: headed profile from scripts/start_research_chrome.sh (BU_CDP_URL, default 9224)
   # fail-soft: cycle continues if browser scrape fails
 
 research:

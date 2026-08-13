@@ -1,87 +1,69 @@
 # kaggle-agent
 
-A daily loop that researches a Kaggle contest, writes a small experiment, trains it on Kaggle Kernels, and submits only after you approve.
+A daily loop that researches **whichever Kaggle contest you point it at**, writes a small experiment, trains on Kaggle Kernels, and submits only after you approve.
 
-Point it at any contest. The active one lives in `config/settings.yaml` (`default_competition`) plus `config/competitions/<id>.yaml` and `memory/COMPETITION.md`. The first contest we ran this on was RSNA Knee Abnormality Detection. The agent code is not tied to that name.
+The agent code is contest-agnostic. A contest is three files: a YAML under `config/competitions/`, a short `memory/COMPETITION.md`, and a pipeline under `competitions/<id>/`. `competitions/rsna_knee/` is one worked example, not a hard-wired target.
 
 ## What a cycle does
 
-RESEARCH runs first, always, and in this order:
+RESEARCH always runs first:
 
 1. Kaggle API snapshot (limits, leaderboard, kernels, meta files)
 2. Browser pages the API does not give (overview, discussion)
-3. One method card per top public kernel, in parallel (`research/source_cards.py`)
-4. Recursive DeepResearcher over Kaggle, arXiv, GitHub, and the web
+3. One method card per top public kernel
+4. Recursive search over Kaggle, arXiv, GitHub, and the web
 
-Cards go to `memory/research-deep/source-*.md`. A short digest is merged into `memory/research.md`. Attachable datasets land in `competitions/<id>/pipeline/methods.json`.
-
-PLAN reads that pack (digest first, plus the last two cards). CODE applies the local recipe and the cards: attach listed datasets, find hidden test IDs from study folders, rank-average members. If Zen is available it also writes a short `code_brief.md`. Then local smoke, kernel package, optional push. If the host rejects the GPU (for example P100), the runner turns GPU off and pushes again.
-
-Live submit still waits for Telegram `/yes` unless you already approved.
-
-## Tools
-
-| Need | What we use |
-|------|-------------|
-| Limits, LB, kernels, submit | `kaggle_agent.kaggle_api.KaggleClient` and `~/.kaggle/kaggle.json` |
-| Discussion HTML | browser-harness (research only) |
-| Plan / code brief / distill | OpenCode Zen (`OPENCODE_API_KEY`) |
-| Human gate | Telegram `/yes` |
-
-Do not submit through the browser. Notebook contests use `kernels_push` then `competition_submit_code`. File contests upload a CSV. MCP submit stays off by default because it cannot push a kernel you do not already own.
-
-## Memory
-
-Only a few files go into the LLM pack:
-
-```text
-memory/MEMORY.md
-memory/COMPETITION.md
-memory/state.md
-memory/research.md
-memory/research-deep/source-*.md   # last 2
-memory/experiments/                # last 2
-memory/daily/                      # logs, not in context
-```
-
-Do not put secrets in those files.
+PLAN reads those cards. CODE applies the contest recipe plus listed datasets. Then local smoke, kernel package, optional push. Live submit waits for Telegram `/yes`.
 
 ## Setup
 
+You need Python 3.11+, [uv](https://github.com/astral-sh/uv), and a Kaggle account.
+
 ```bash
-cd ~/kaggle-agent
+git clone https://github.com/Soham-47/kaggle-agent.git
+cd kaggle-agent
 uv sync --extra dev
-# put OPENCODE_API_KEY and Telegram vars in .env (not committed)
-# ~/.kaggle/kaggle.json for the API
-# ~/.kaggle/access_token (KGAT_...) if you turn MCP on
+cp .env.example .env
+# edit .env: OPENCODE_API_KEY, optional Telegram tokens
+# put ~/.kaggle/kaggle.json in place (Kaggle account → Settings → API)
 ```
+
+Optional, for discussion HTML:
+
+```bash
+bash scripts/start_research_chrome.sh
+# sign in to Kaggle once in that window; leave it running
+```
+
+## Point it at a contest
+
+```bash
+bash scripts/new_competition.sh my_id the-kaggle-url-slug
+# edit config/competitions/my_id.yaml (metric, labels, submit.mode)
+# edit competitions/my_id/pipeline/ (schema, baseline, recipe)
+# set default_competition: my_id in config/settings.yaml
+```
+
+`submit.mode` is `notebook` when the host only accepts kernel submits, or `file` for a CSV upload.
+
+Honor the host GPU rules in `kernel.enable_gpu`. Some contests reject P100.
 
 ## Run
 
 ```bash
 uv run pytest
-uv run python scripts/run_daily.py --competition <id>
-# dry-run is the default in settings.yaml
-uv run python scripts/run_daily.py --no-dry-run
+uv run python scripts/run_daily.py --competition my_id
+# dry-run is the default
+uv run python scripts/run_daily.py --competition my_id --no-dry-run
 ```
 
 Telegram (separate process):
 
 ```bash
-export TELEGRAM_BOT_TOKEN=...
-export TELEGRAM_CHAT_ID=...
 uv run python scripts/telegram_bot.py
 ```
 
-Useful bot commands: `/run`, `/run live`, `/yes`, `/no`, `/status`, `/pause`, `/resume`.
-
-## Add another contest
-
-1. Write `config/competitions/<id>.yaml` (slug, metric, labels, submit mode, workspace).
-2. Create `competitions/<id>/pipeline/` with at least `schema.py`, `baseline.py`, `recipe.py`.
-3. Put a short `memory/COMPETITION.md` for that contest.
-4. Set `default_competition: <id>` or pass `--competition <id>`.
-5. Honor the host accelerator rules in `kernel.enable_gpu`.
+Commands: `/run`, `/run live`, `/yes`, `/no`, `/status`, `/pause`, `/resume`.
 
 ## Submit safety
 
@@ -90,23 +72,49 @@ Useful bot commands: `/run`, `/run live`, `/yes`, `/no`, `/status`, `/pause`, `/
 3. The next live cycle may call the Kaggle API.
 4. Dry-run never spends a submission.
 
-If you reuse an old `/yes`, check that `kernel_path` / `kernel_ref` are not leftover from a broken package.
+Do not submit through the browser.
 
-## Cron and heal
+## Tools
 
-```bash
-bash scripts/install_cron.sh 6   # daily 06:00 UTC
+| Need | What we use |
+|------|-------------|
+| Limits, LB, kernels, submit | `kaggle_agent.kaggle_api.KaggleClient` + `~/.kaggle/kaggle.json` |
+| Discussion HTML | browser-use on `scripts/start_research_chrome.sh` |
+| Plan / code brief | OpenCode Zen (`OPENCODE_API_KEY`) |
+| Human gate | Telegram `/yes` |
+
+## Memory
+
+Only these files go into the LLM pack:
+
+```text
+memory/MEMORY.md
+memory/COMPETITION.md
+memory/state.md
+memory/research.md
+memory/research-deep/source-*.md   # last 2
+memory/experiments/                # last 2
 ```
 
-Heal ladder: tune → recipe → new → pause (`memory/heal.md`). If a kernel is still RUNNING, the next cron polls it instead of pushing again. Details: `docs/cron.md`.
+Starter copies live in `memory/templates/`. Do not put secrets in memory files.
+
+## Cron
+
+```bash
+bash scripts/install_cron.sh 6
+```
+
+Heal ladder: tune → recipe → new → pause. Details: `docs/cron.md`.
 
 ## Layout
 
 ```text
-src/kaggle_agent/     agent library
-competitions/<id>/    per-contest pipeline and notebooks
-config/               settings + contest yaml
-memory/               lean files the loop reads
-scripts/run_daily.py  cron / CLI entry
-tests/                pytest
+src/kaggle_agent/           shared agent
+competitions/<id>/pipeline  per-contest training recipe
+config/competitions/        contest YAML
+memory/                     lean files the loop reads
+scripts/run_daily.py        entry
+scripts/new_competition.sh  scaffold a new contest
 ```
+
+MIT license. See `LICENSE`.
