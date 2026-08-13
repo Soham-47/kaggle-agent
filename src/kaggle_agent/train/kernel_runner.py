@@ -237,7 +237,7 @@ def gpu_forbidden(message: str) -> bool:
     low = (message or "").lower()
     return any(
         token in low
-        for token in ("p100", "cannot use gpu", "gpu is not allowed", "accelerator")
+        for token in ("p100", "cannot use gpu", "gpu is not allowed", "cannot use p100")
     )
 
 

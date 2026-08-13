@@ -702,14 +702,23 @@ def rank_mean_mounted(test_ids, pred):
     for csv in kin.rglob("*.csv"):
         if csv.name in skip or csv.stat().st_size > 80_000_000:
             continue
+        low = str(csv).lower()
+        if any(tok in low for tok in ("label", "llm", "report", "gold")):
+            continue
         try:
-            df = pd.read_csv(csv, nrows=5)
+            df = pd.read_csv(csv, nrows=8)
         except Exception:
             continue
         if ID_COL not in df.columns:
             continue
         labs = [c for c in LABELS if c in df.columns]
         if len(labs) < max(3, len(LABELS) // 3):
+            continue
+        sample = df[labs].apply(pd.to_numeric, errors="coerce")
+        # skip 0/1 label tables (not ranked probabilities)
+        vals = sample.values.reshape(-1)
+        vals = vals[~pd.isna(vals)]
+        if len(vals) and set(np.round(vals, 6)).issubset({0.0, 1.0}):
             continue
         try:
             full = pd.read_csv(csv, usecols=[ID_COL] + labs)
@@ -742,11 +751,14 @@ def try_dinov2(test_ids, pred):
     except Exception as e:
         print("no torch", e)
         return pred
+    if not torch.cuda.is_available():
+        print("skip dinov2: cpu only (do not blend random embeddings)")
+        return pred
     weight_paths = list(Path("/kaggle/input").rglob("*.pth")) + list(Path("/kaggle/input").rglob("*.pt"))
     dino_dirs = [p for p in Path("/kaggle/input").glob("*dino*") if p.is_dir()] if Path("/kaggle/input").is_dir() else []
     print("dino dirs", dino_dirs[:6], "weight files", len(weight_paths))
-    if not torch.cuda.is_available() and not dino_dirs and not weight_paths:
-        print("skip dinov2: no gpu/weights")
+    if not dino_dirs and not weight_paths:
+        print("skip dinov2: no weights")
         return pred
     try:
         model = torch.hub.load("facebookresearch/dinov2", "dinov2_vits14", pretrained=True)
