@@ -1,0 +1,28 @@
+{
+  "dataset_sources": [
+    "input/rsna-knee-b3-v47-folds-0-3",
+    "input/rsna-knee-weights",
+    "input/rsna-knee-abnormality-detection",
+    "aadigupta7686/0-899-let-me-cook",
+    "pilkwang/rsna-knee-baseline-v1",
+    "prvsiyan/rsna-knee-read-the-report-then-the-knee"
+  ],
+  "model_sources": [
+    "wguesdon/rsna-knee-dinov2-at-meniscus-resolution"
+  ],
+  "infer_hints": [
+    "discover_test_ids_from_folders",
+    "train_on_report_or_llm_labels",
+    "grouped_cv",
+    "rank_mean_ensemble"
+  ],
+  "implement_steps": [
+    "Attach datasets ['input/rsna-knee-b3-v47-folds-0-3', 'input/rsna-knee-weights', 'input/rsna-knee-abnormality-detection'] and reuse their infer path. Our score=0.526.",
+    "Pull this kernel and copy its inference ID discovery + rank-average. Our score=0.526.",
+    "Pull this kernel and copy its inference ID discovery + rank-average. Rank-average member scores; do not probability-mean. Our score=0.526.",
+    "Pull this kernel and copy its inference ID discovery + rank-average. Our score=0.526.",
+    "Pull this kernel and copy its inference ID discovery + rank-average. Rank-average member scores; do not probability-mean. Our score=0.526.",
+    "Attach datasets ['wguesdon/rsna-knee-llm-report-labels-opus', 'torch/GPU', 'mnt/data/Github/Kaggle/Competitions', 'data/kaggle_mirror/rsna-knee-abnormality-detection', 'data/raw', 'input/rsna-knee-abnormality-detection', 'kaggle_mirror/rsna"
+  ],
+  "n_cards": 6
+}

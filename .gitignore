@@ -1,0 +1,35 @@
+.env
+.env.*
+*.pyc
+__pycache__/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+uv.lock.bak
+*.egg-info/
+dist/
+build/
+
+# runtime
+memory/run.lock
+memory/kernel_job.md
+memory/pending_submit.md
+memory/daily/
+memory/research-deep/deep-*.md
+memory/experiments/
+
+# contest artifacts (regenerated)
+competitions/*/notebooks/
+competitions/*/submissions/
+competitions/*/research-cache/
+competitions/*/experiments/
+competitions/*/data/
+/data/
+
+# editor / OS
+.idea/
+.vscode/
+*.swp
+.DS_Store

@@ -1,0 +1,92 @@
+# Global agent settings (no secrets — use env vars)
+
+repo_name: kaggle-agent
+default_competition: rsna_knee
+
+paths:
+  memory_dir: memory
+  competitions_dir: competitions
+  config_competitions_dir: config/competitions
+
+zen:
+  base_url: https://opencode.ai/zen/v1
+  # API key from env: OPENCODE_API_KEY
+  # Default model ids (competition config can override)
+  default_plan_model: gpt-5.5
+  default_code_model: gpt-5.5
+  default_distill_model: gpt-5.5
+  default_vision_model: gpt-5.5  # override per competition when multimodal needed
+
+code_agent:
+  # Shell command template; {prompt_file} is filled at runtime
+  cmd: null  # e.g. "opencode run --file {prompt_file}"
+  workdir_relative: competitions
+
+telegram:
+  # TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID from env
+  enabled: true
+
+submit:
+  max_proposals_per_day: 2
+  require_telegram_approve: true
+  dry_run_default: true
+  # Notebook contests: API push + submit_code is the path that scores.
+  # MCP notebook submit cannot push a kernel you do not already own.
+  mcp: false
+  api: true
+  browser_fallback: true
+
+browser_research:
+  enabled: true
+  prefer_browser_harness: true
+  pages:
+    - overview
+    - discussion
+  # fail-soft: cycle continues if browser scrape fails
+
+research:
+  deep:
+    # deep-research style stage: articles, papers, notebooks, repos, web
+    enabled: true
+    breadth: 3       # queries per level
+    depth: 2         # recursion depth
+    max_queries: 12  # hard cap across the whole run
+    per_query_limit: 5
+    max_learnings: 4
+    max_followups: 3
+    max_fetches: 40
+    max_minutes: 15  # cron-safe time budget
+    report_dir: memory/research-deep
+
+kernel:
+  # Build package always; push only if push=true AND orchestrator.dry_run=false
+  push: true
+  enable_gpu: false  # honor host accelerator policy; runner retries CPU on P100/GPU ban
+  # username: null  # default: from ~/.kaggle/kaggle.json
+
+orchestrator:
+  dry_run: true
+  # research: Kaggle API first, then browser read-only pages
+  # submit: API (notebook push + submit_code) → browser_fallback
+  phases:
+    - LOCK
+    - RESEARCH
+    - PLAN
+    - CODE
+    - LOCAL_SMOKE
+    - KERNEL_TRAIN
+    - VALIDATE_SUB
+    - TELEGRAM_APPROVE
+    - SUBMIT
+    - FEEDBACK
+    - HEAL
+    - REPORT
+
+heal:
+  max_tune_attempts: 3
+  max_no_improve_days: 5
+  # ladder: tune → recipe → new → pause (sets state.paused)
+
+cron:
+  hour_utc: 6
+  # install: bash scripts/install_cron.sh

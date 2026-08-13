@@ -1,0 +1,218 @@
+"""Load settings.yaml and competition YAML configs."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+
+import yaml
+
+from kaggle_agent.paths import config_dir, repo_root
+
+DEFAULT_PHASES = (
+    "LOCK",
+    "RESEARCH",
+    "PLAN",
+    "CODE",
+    "LOCAL_SMOKE",
+    "KERNEL_TRAIN",
+    "VALIDATE_SUB",
+    "TELEGRAM_APPROVE",
+    "SUBMIT",
+    "FEEDBACK",
+    "HEAL",
+    "REPORT",
+)
+
+
+@dataclass(frozen=True)
+class DeepResearchSettings:
+    enabled: bool = True
+    breadth: int = 3
+    depth: int = 2
+    max_queries: int = 12
+    per_query_limit: int = 5
+    max_learnings: int = 4
+    max_followups: int = 3
+    max_fetches: int = 40
+    max_minutes: float = 15.0
+    report_dir: str = "memory/research-deep"
+
+
+@dataclass(frozen=True)
+class Settings:
+    raw: dict[str, Any]
+    root: Path
+
+    @property
+    def default_competition(self) -> str:
+        return str(self.raw.get("default_competition", "rsna_knee"))
+
+    @property
+    def dry_run(self) -> bool:
+        return bool(self.raw.get("orchestrator", {}).get("dry_run", True))
+
+    @property
+    def phases(self) -> list[str]:
+        phases = self.raw.get("orchestrator", {}).get("phases")
+        return [str(p) for p in (phases or DEFAULT_PHASES)]
+
+    @property
+    def max_proposals_per_day(self) -> int:
+        return int(self.raw.get("submit", {}).get("max_proposals_per_day", 2))
+
+    def zen_model(self, role: str) -> str:
+        zen = self.raw.get("zen", {})
+        key = f"default_{role}_model"
+        return str(zen.get(key, "gpt-5.5"))
+
+    @property
+    def browser_research_enabled(self) -> bool:
+        return bool(self.raw.get("browser_research", {}).get("enabled", True))
+
+    @property
+    def browser_prefer_harness(self) -> bool:
+        return bool(self.raw.get("browser_research", {}).get("prefer_browser_harness", True))
+
+    @property
+    def browser_pages(self) -> list[str]:
+        pages = self.raw.get("browser_research", {}).get("pages") or ["overview", "discussion"]
+        return [str(p) for p in pages]
+
+    def deep_research_config(self) -> "DeepResearchSettings":
+        deep = self.raw.get("research", {}).get("deep", {}) or {}
+
+        def _num(key: str, default: int | float) -> int | float:
+            return deep.get(key, default)
+
+        return DeepResearchSettings(
+            enabled=bool(deep.get("enabled", True)),
+            breadth=int(_num("breadth", 3)),
+            depth=int(_num("depth", 2)),
+            max_queries=int(_num("max_queries", 12)),
+            per_query_limit=int(_num("per_query_limit", 5)),
+            max_learnings=int(_num("max_learnings", 4)),
+            max_followups=int(_num("max_followups", 3)),
+            max_fetches=int(_num("max_fetches", 40)),
+            max_minutes=float(_num("max_minutes", 15.0)),
+            report_dir=str(deep.get("report_dir", "memory/research-deep")),
+        )
+
+    @property
+    def kernel_push(self) -> bool:
+        """Push notebook to Kaggle (only when orchestrator dry_run is false)."""
+        return bool(self.raw.get("kernel", {}).get("push", False))
+
+    @property
+    def kernel_enable_gpu(self) -> bool:
+        return bool(self.raw.get("kernel", {}).get("enable_gpu", False))
+
+    @property
+    def kernel_username(self) -> str | None:
+        raw = self.raw.get("kernel", {}).get("username")
+        return str(raw) if raw else None
+
+    @property
+    def telegram_enabled(self) -> bool:
+        return bool(self.raw.get("telegram", {}).get("enabled", False))
+
+    @property
+    def require_telegram_approve(self) -> bool:
+        return bool(self.raw.get("submit", {}).get("require_telegram_approve", True))
+
+    @property
+    def browser_submit_fallback(self) -> bool:
+        """If MCP+API submit fail, try browser-harness UI (needs logged-in Chrome)."""
+        return bool(self.raw.get("submit", {}).get("browser_fallback", True))
+
+    @property
+    def mcp_submit(self) -> bool:
+        """Try Kaggle official MCP submit first. Off by default (notebook comps)."""
+        return bool(self.raw.get("submit", {}).get("mcp", False))
+
+    @property
+    def api_submit(self) -> bool:
+        """Try Kaggle Python API submit (after MCP if enabled)."""
+        return bool(self.raw.get("submit", {}).get("api", True))
+
+    @property
+    def max_tune_attempts(self) -> int:
+        return int(self.raw.get("heal", {}).get("max_tune_attempts", 3))
+
+    @property
+    def max_no_improve_days(self) -> int:
+        return int(self.raw.get("heal", {}).get("max_no_improve_days", 5))
+
+    @property
+    def cron_hour(self) -> int:
+        return int(self.raw.get("cron", {}).get("hour_utc", 6))
+
+
+@dataclass(frozen=True)
+class CompetitionConfig:
+    raw: dict[str, Any]
+    path: Path
+
+    @property
+    def id(self) -> str:
+        return str(self.raw["id"])
+
+    @property
+    def slug(self) -> str:
+        return str(self.raw["slug"])
+
+    @property
+    def labels(self) -> list[str]:
+        return [str(x) for x in self.raw.get("labels", [])]
+
+    @property
+    def metric_direction(self) -> str:
+        return str(self.raw.get("metric", {}).get("direction", "max"))
+
+    @property
+    def id_column(self) -> str:
+        return str(self.raw.get("submission", {}).get("id_column", "StudyInstanceUID"))
+
+    @property
+    def workspace_relative(self) -> str:
+        return str(
+            self.raw.get("workspace", {}).get("relative", f"competitions/{self.id}")
+        )
+
+    @property
+    def submit_mode(self) -> str:
+        """file = CSV upload API; notebook = kernels-only submit_code."""
+        return str(self.raw.get("submit", {}).get("mode", "file")).lower()
+
+    @property
+    def submit_output_file(self) -> str:
+        return str(self.raw.get("submit", {}).get("output_file", "submission.csv"))
+
+    def model_for(self, role: str, settings: Settings) -> str:
+        models = self.raw.get("models") or {}
+        value = models.get(role)
+        return str(value) if value else settings.zen_model(role)
+
+
+def _read_yaml(path: Path) -> dict[str, Any]:
+    if not path.is_file():
+        raise FileNotFoundError(f"Missing config: {path}")
+    data = yaml.safe_load(path.read_text(encoding="utf-8"))
+    if data is None:
+        return {}
+    if not isinstance(data, dict):
+        raise ValueError(f"Config must be a mapping: {path}")
+    return data
+
+
+def load_settings(root: Path | None = None) -> Settings:
+    root = root or repo_root()
+    path = config_dir(root) / "settings.yaml"
+    return Settings(raw=_read_yaml(path), root=root)
+
+
+def load_competition(competition_id: str, root: Path | None = None) -> CompetitionConfig:
+    root = root or repo_root()
+    path = config_dir(root) / "competitions" / f"{competition_id}.yaml"
+    return CompetitionConfig(raw=_read_yaml(path), path=path)

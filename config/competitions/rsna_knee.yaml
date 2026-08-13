@@ -1,0 +1,67 @@
+# Pilot competition: RSNA Knee Abnormality Detection
+
+id: rsna_knee
+slug: rsna-knee-abnormality-detection
+title: RSNA Knee Abnormality Detection
+deadline: "2026-10-22"
+url: https://www.kaggle.com/competitions/rsna-knee-abnormality-detection
+
+metric:
+  name: macro_auc
+  direction: max  # higher is better
+  description: Macro-averaged ROC AUC over 12 findings
+
+labels:
+  - ACL
+  - MCL
+  - Medial Meniscus
+  - Lateral Meniscus
+  - Medial OA
+  - Lateral OA
+  - PF OA
+  - Effusion
+  - Synovitis
+  - Baker's
+  - Contusion
+  - Fracture
+
+submission:
+  id_column: StudyInstanceUID
+  # Header must match sample_submission.csv exactly (including Baker's apostrophe)
+  probability_columns:
+    - ACL
+    - MCL
+    - Medial Meniscus
+    - Lateral Meniscus
+    - Medial OA
+    - Lateral OA
+    - PF OA
+    - Effusion
+    - Synovitis
+    - Baker's
+    - Contusion
+    - Fracture
+
+workspace:
+  relative: competitions/rsna_knee
+
+models:
+  # OpenCode Zen model ids — override when you know preferred multimodal ids
+  plan: null      # null → settings.zen.default_plan_model
+  code: null
+  distill: null
+  vision: null    # set a multimodal Zen model for screenshot / image research
+
+train:
+  backend: kaggle_kernel
+  local_smoke_only: true  # full DICOM train stays on Kaggle
+
+submit:
+  # This competition is notebooks-only (isKernelsSubmissionsOnly).
+  # CSV API upload returns 400; must push kernel then submit_code.
+  # browser_fallback (settings): UI path if API notebook submit fails.
+  mode: notebook
+  output_file: submission.csv
+
+submit_budget:
+  max_proposals_per_day: 2
