@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -149,17 +150,35 @@ def _poll_and_maybe_pull(
     exp_id: str,
 ) -> KernelRunResult:
     try:
-        st = client.kernels_status(kernel_ref)
-        result.status = st
-        result.message = f"status={st}"
-        job = KernelJob(
-            kernel_ref=kernel_ref,
-            folder=str(folder) if folder else "none",
-            status=st,
-            competition=competition,
-            exp_id=exp_id,
-        )
-        save_kernel_job(job, root)
+        st = "unknown"
+        for attempt in range(40):
+            st = client.kernels_status(kernel_ref)
+            result.status = st
+            result.message = f"status={st}"
+            job = KernelJob(
+                kernel_ref=kernel_ref,
+                folder=str(folder) if folder else "none",
+                status=st,
+                competition=competition,
+                exp_id=exp_id,
+            )
+            save_kernel_job(job, root)
+            st_now = (st or "").lower().replace(" ", "")
+            if st_now in DONE or st_now in {"error", "failed"}:
+                break
+            if attempt == 0 and st_now in {"complete", "completed", "success"}:
+                break
+            # Tests and hosts that return a terminal status on the first call exit here.
+            if st_now not in {
+                "running",
+                "queued",
+                "pending",
+                "pushed",
+                "cancelrequested",
+                "cancel_requested",
+            }:
+                break
+            time.sleep(30)
     except Exception as exc:  # noqa: BLE001
         result.errors.append(f"status: {exc}")
         return result

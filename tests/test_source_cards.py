@@ -22,10 +22,13 @@ def test_extract_datasets_and_hints():
     text = """
     https://www.kaggle.com/datasets/pilkwang/rsna-knee-weights
     kaggle.com/models/metaresearch/dinov2/PyTorch/small/1
+    also mention input/rsna-knee-abnormality-detection and user/some-kernel-title
     rank-mean the folds; iterdir on test study folders
     """
     ds = extract_datasets(text)
     assert any("rsna-knee-weights" in x for x in ds)
+    assert not any(x.startswith("input/") for x in ds)
+    assert "user/some-kernel-title" not in ds
     hints = extract_infer_hints(text)
     assert "rank_mean_ensemble" in hints
     assert "discover_test_ids_from_folders" in hints
@@ -72,4 +75,4 @@ def test_run_source_cards_writes_digest(tmp_path: Path):
     )
     assert cards
     research = (root / "memory" / "research.md").read_text(encoding="utf-8")
-    assert "Deep research digest" in research
+    assert "Method cards" in research or "Deep research digest" in research

@@ -9,7 +9,7 @@ from kaggle_agent.paths import memory_dir
 
 # Keep this list tiny — every file costs tokens every cycle.
 CORE = ("MEMORY.md", "COMPETITION.md", "state.md", "research.md")
-_DIGEST = "## Deep research digest"
+_DIGEST_HEADINGS = ("## Method cards", "## Deep research digest")
 
 
 @dataclass
@@ -30,12 +30,20 @@ class ContextPack:
 
 
 def _research_with_digest_first(text: str) -> str:
-    """Put the method-card digest before the long Kaggle snapshot so PLAN sees it."""
-    if _DIGEST not in text:
+    """Put implementable card/digest sections before the long Kaggle snapshot."""
+    chunks: list[str] = []
+    rest = text
+    for heading in _DIGEST_HEADINGS:
+        if heading not in rest:
+            continue
+        before, after = rest.split(heading, 1)
+        # keep only this section body until the next ## heading
+        body, _, tail = after.partition("\n## ")
+        chunks.append((heading + body).strip())
+        rest = before + (("## " + tail) if tail else "")
+    if not chunks:
         return text
-    before, after = text.split(_DIGEST, 1)
-    digest = (_DIGEST + after).strip()
-    return digest + "\n\n" + before.strip()
+    return "\n\n".join(chunks) + "\n\n" + rest.strip()
 
 
 def build_context_pack(root: Path | None = None, *, last_experiments: int = 2) -> ContextPack:

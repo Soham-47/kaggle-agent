@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import re
+import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any, Callable  # noqa: I001
@@ -36,28 +37,47 @@ def skip_kernel(row: KernelRow) -> bool:
     return "efficiency lb" in title or "efficiency-lb" in ref
 
 
+_NOT_A_DATASET_OWNER = {
+    "input",
+    "data",
+    "mnt",
+    "tmp",
+    "home",
+    "torch",
+    "kaggle",
+    "working",
+    "output",
+}
+
+
 def extract_datasets(text: str) -> list[str]:
+    """Only keep explicit Kaggle dataset/model refs, not kernel slugs or local paths."""
     found = re.findall(
-        r"(?:kaggle\.com/(?:datasets|models)/|['\"])/?"
-        r"([a-z0-9_-]+/[a-z0-9_-]+(?:/[A-Za-z0-9._-]+){0,3})",
-        text,
-        flags=re.I,
-    )
-    extra = re.findall(
-        r"\b([a-z0-9_-]+/(?:[a-z0-9_-]+-)+[a-z0-9_-]+)\b",
+        r"kaggle\.com/(datasets|models)/([a-z0-9_-]+/[a-z0-9_-]+(?:/[A-Za-z0-9._-]+){0,3})",
         text,
         flags=re.I,
     )
     out: list[str] = []
-    for ref in found + extra:
+    kinds: dict[str, str] = {}
+    for kind, ref in found:
         ref = ref.strip("/")
-        low = ref.lower()
-        if any(bad in low for bad in _SKIP_DATASET):
-            continue
-        if ref.count("/") < 1:
+        owner = ref.split("/", 1)[0].lower()
+        if owner in _NOT_A_DATASET_OWNER or "competitions/" in ref:
             continue
         if ref not in out:
             out.append(ref)
+            kinds[ref] = kind.lower()
+    # second pass: owner/name next to 'dataset' / 'weights' / 'labels' words
+    for ref in re.findall(r"\b([a-z0-9_-]+/[a-z0-9_-]+)\b", text, flags=re.I):
+        low = ref.lower()
+        owner = low.split("/", 1)[0]
+        if owner in _NOT_A_DATASET_OWNER:
+            continue
+        if not any(tok in low for tok in ("weight", "label", "dataset", "dinov2")):
+            continue
+        if ref not in out:
+            out.append(ref)
+            kinds[ref] = "dataset"
     return out[:8]
 
 
@@ -112,9 +132,12 @@ def card_from_notebook(row: KernelRow, notebook_text: str, our_score: str) -> st
     )
 
 
+METHOD_CARDS_HEADING = "## Method cards"
+
+
 def merge_digest(cards: list[Path], research_md: Path, our_score: str) -> None:
     lines = [
-        "## Deep research digest",
+        METHOD_CARDS_HEADING,
         "",
         f"Method cards for PLAN/CODE. Our public best: {our_score}.",
         "",
@@ -140,7 +163,7 @@ def merge_digest(cards: list[Path], research_md: Path, our_score: str) -> None:
         if step_m:
             lines.append(f"  next: {step_m.group(1)[:240]}")
         lines.append("")
-    merge_section_into_research_md(research_md, "## Deep research digest", "\n".join(lines))
+    merge_section_into_research_md(research_md, METHOD_CARDS_HEADING, "\n".join(lines))
 
 
 def write_methods_sidecar(cards: list[Path], workspace: Path) -> Path:
@@ -186,6 +209,9 @@ def load_methods(workspace: Path) -> dict[str, Any]:
     return data if isinstance(data, dict) else {}
 
 
+_PULL_LOCK = threading.Lock()
+
+
 def _write_one_card(
     *,
     row: KernelRow,
@@ -194,7 +220,8 @@ def _write_one_card(
     our_score: str,
 ) -> Path:
     hit = SourceHit(url=row.url, title=row.title, kind="kaggle")
-    text = src.content(hit) or row.title or ""
+    with _PULL_LOCK:
+        text = src.content(hit) or row.title or ""
     card = card_from_notebook(row, text, our_score)
     path = dest / f"source-{_slug(row.ref)}.md"
     path.write_text(card, encoding="utf-8")
