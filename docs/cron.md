@@ -16,17 +16,18 @@ Cron sources `.env` so Zen/Telegram keys work. Log: `memory/daily/cron.log`.
 Manual / Telegram:
 
 ```text
-/run          # dry-run cycle
-/run live     # live cycle (submit still needs /yes)
+/run          # full live loop; /run counts as submit approval
+/run dry      # practice loop, no real submit
 ```
+
+`/run` loops then submits once (research until cards, N train slices, one submit).
 
 ## What a cycle does
 
-1. RESEARCH: Kaggle snapshot, browser pages, parallel source cards, DeepResearcher
-2. PLAN: Zen reads memory + method cards
-3. CODE: apply recipe + apply method cards (datasets, rank-mean, ID discovery)
-4. LOCAL_SMOKE, KERNEL_TRAIN (retry CPU if the host rejects GPU), VALIDATE
-5. Telegram approve, submit, feedback, heal
+1. RESEARCH: loop until method cards are implementable (Kaggle snapshot, browser, source cards, DeepResearcher)
+2. Repeat N train slices: PLAN, CODE, LOCAL_SMOKE, KERNEL_TRAIN, VALIDATE
+3. One submit of the best candidate (Telegram `/run` counts as approval)
+4. Feedback, heal, report
 
 ## Research Chrome (Kaggle sign-in)
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from kaggle_agent.loop import LoopState, save_loop
 from kaggle_agent.notify.commands import HELP, handle_command, process_updates
 from kaggle_agent.notify.run_agent import start_agent_cycle, start_agent_cycle_async
 from kaggle_agent.state_md import AgentState, RunLock, load_state, save_state
@@ -17,7 +18,7 @@ def test_help_and_start_list_advertised_commands():
         assert r.start_cycle is False
         for needle in (
             "/run",
-            "/run live",
+            "/run dry",
             "/status",
             "/yes",
             "/no",
@@ -62,6 +63,18 @@ def test_status_reports_phase_budget_and_pending(tmp_path: Path):
     assert "0.500" in r.reply
     assert "exp-status" in r.reply
     assert "pending" in r.reply.lower()
+    assert "next_n: 3" in r.reply
+    assert "last_n: none" in r.reply
+    assert "last_score: none" in r.reply
+    save_loop(
+        LoopState(next_n="5", last_n="2", last_score="0.61"),
+        tmp_path,
+    )
+    r2 = handle_command("/status", root=tmp_path)
+    assert r2.ok
+    assert "next_n: 5" in r2.reply
+    assert "last_n: 2" in r2.reply
+    assert "last_score: 0.61" in r2.reply
 
 
 def test_yes_and_ok_approve_latest(tmp_path: Path):
@@ -70,7 +83,8 @@ def test_yes_and_ok_approve_latest(tmp_path: Path):
     r = handle_command("/ok", root=tmp_path)
     assert r.ok
     assert load_pending(tmp_path).status == "approved"
-    assert "/run live" in r.reply
+    assert "/run" in r.reply
+    assert "/run live" not in r.reply
 
 
 def test_no_rejects_latest(tmp_path: Path):
@@ -102,10 +116,12 @@ def test_approve_wrong_exp_fails(tmp_path: Path):
 def test_run_bot_suffix_and_live_flag(tmp_path: Path):
     (tmp_path / "memory").mkdir()
     save_state(AgentState(paused=False), tmp_path)
-    dry = handle_command("/run@KaggleAgentBot", root=tmp_path)
-    assert dry.ok and dry.start_cycle and dry.cycle_dry_run is True
-    live = handle_command("/run@KaggleAgentBot live", root=tmp_path)
+    live = handle_command("/run@KaggleAgentBot", root=tmp_path)
     assert live.ok and live.start_cycle and live.cycle_dry_run is False
+    live2 = handle_command("/run@KaggleAgentBot live", root=tmp_path)
+    assert live2.ok and live2.start_cycle and live2.cycle_dry_run is False
+    dry = handle_command("/run@KaggleAgentBot dry", root=tmp_path)
+    assert dry.ok and dry.start_cycle and dry.cycle_dry_run is True
 
 
 def test_run_while_paused_does_not_start_cycle(tmp_path: Path):
@@ -130,7 +146,7 @@ def test_process_updates_run_live_sets_start_flags(tmp_path: Path):
     (tmp_path / "memory").mkdir()
     save_state(AgentState(paused=False), tmp_path)
     updates = [
-        {"update_id": 1, "message": {"chat": {"id": 42}, "text": "/run live"}},
+        {"update_id": 1, "message": {"chat": {"id": 42}, "text": "/run"}},
     ]
     out = process_updates(updates, root=tmp_path, allowed_chat_id="42")
     assert len(out) == 1

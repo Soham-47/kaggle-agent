@@ -56,7 +56,7 @@ def main() -> int:
         try:
             client.send_message(
                 "Kaggle agent bot is online.\n\n"
-                "Try /help for commands, /status for state, /run for a safe dry cycle."
+                "Try /help for commands, /status for state, /run for a full live loop."
             )
         except TelegramError as exc:
             print(f"startup notify failed: {exc}", file=sys.stderr)

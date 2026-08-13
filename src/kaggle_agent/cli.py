@@ -12,9 +12,18 @@ def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(description="kaggle-agent daily cycle")
     p.add_argument("--competition", default=None)
     p.add_argument("--dry-run", action=argparse.BooleanOptionalAction, default=None)
+    p.add_argument(
+        "--assume-approved",
+        action="store_true",
+        help="Treat this live cycle as already approved (Telegram /run).",
+    )
     args = p.parse_args(argv)
 
-    r = run_daily(args.competition, dry_run=args.dry_run)
+    r = run_daily(
+        args.competition,
+        dry_run=args.dry_run,
+        assume_approved=args.assume_approved,
+    )
     if r.skipped:
         print(f"skipped: {r.skip_reason}")
         return 0
@@ -37,7 +46,7 @@ def main(argv: list[str] | None = None) -> int:
         print(r.plan_text[:2000])
     if r.waiting_approve:
         print(
-            "waiting_approve: send /yes then /run live to submit",
+            "waiting_approve: send /yes then /run to submit",
             file=sys.stderr,
         )
         return 0  # not a hard failure

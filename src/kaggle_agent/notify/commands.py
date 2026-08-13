@@ -5,21 +5,24 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
+from kaggle_agent.loop import load_loop
 from kaggle_agent.state_md import load_state, save_state
 from kaggle_agent.submit.pending import load_pending, set_decision
 
 HELP = """Kaggle agent — what you can do
 
-Run a cycle
-• /run — dry run (safe: no real Kaggle submit)
-• /run live — real run (submit still needs your /yes)
+Run
+• /run — full live loop (research until cards, N train slices, one submit)
+• /run dry — practice loop, no real Kaggle submit
 
-Check state
-• /status — phase, budget, pending submit, last note
+/run counts as submit approval. I will not wait for /yes.
 
-Approve a submit
-• /yes — approve the latest candidate
-• /no — reject it
+Check
+• /status — phase, budget, pending submit, loop next_n / last_n / last_score
+
+Approve
+• /yes — optional; /run already counts as approval
+• /no — reject a pending candidate
 • /approve <exp_id> — approve a specific run
 • /reject <exp_id> — reject a specific run
 
@@ -31,7 +34,7 @@ Control
 Help
 • /help — this message
 
-Typical flow: /run → read the report → for a real submit, /run live then /yes"""
+Typical flow: send /run. That loops then submits once."""
 
 
 @dataclass
@@ -100,7 +103,7 @@ def handle_command(text: str, *, root: Path | None = None) -> CommandResult:
 
 
 def _run_cmd(args: list[str], root: Path | None) -> CommandResult:
-    dry = True
+    dry = False
     if args:
         flag = args[0].lower()
         if flag in {"live", "prod", "real", "--live", "--no-dry-run"}:
@@ -112,8 +115,8 @@ def _run_cmd(args: list[str], root: Path | None) -> CommandResult:
                 ok=False,
                 reply=(
                     "Usage:\n"
-                    "• /run — dry run (safe)\n"
-                    "• /run live — real run (submit still needs /yes)"
+                    "• /run — full live loop (research until cards, N slices, one submit)\n"
+                    "• /run dry — practice loop (no real submit)"
                 ),
             )
     state = load_state(root)
@@ -124,17 +127,16 @@ def _run_cmd(args: list[str], root: Path | None) -> CommandResult:
         )
     if dry:
         reply = (
-            "Starting a dry run…\n\n"
-            "This will research, plan, build, smoke-test, and prepare a "
-            "submission file. It will not spend a Kaggle submission.\n\n"
-            "I'll message you when it finishes. You can check /status anytime."
+            "Starting a practice run (/run dry)…\n\n"
+            "Research until cards, then N train slices. "
+            "It will not spend a Kaggle submission.\n\n"
+            "I'll message you when it finishes. /status anytime."
         )
     else:
         reply = (
-            "Starting a LIVE run…\n\n"
-            "This can train/push kernels and prepare a real submit. "
-            "A real Kaggle submit still needs your /yes after the cycle "
-            "asks for approval.\n\n"
+            "Starting a full live loop…\n\n"
+            "Research until cards → N train slices → one submit.\n"
+            "/run counts as your approval. I will not wait for /yes.\n\n"
             "I'll message you when it finishes."
         )
     return CommandResult(
@@ -180,9 +182,9 @@ def _decide(exp: str, approved: bool, root: Path | None) -> CommandResult:
             "What this means:\n"
             "The file is cleared for a real Kaggle submit.\n\n"
             "Next step:\n"
-            "Send /run live\n\n"
-            "That live cycle will reuse the approved candidate and call "
-            "the Kaggle submit API (still only once you already said /yes)."
+            "Send /run\n\n"
+            "That loop will reuse this approved candidate and call "
+            "the Kaggle submit API."
         )
         return CommandResult(ok=True, reply=reply)
 
@@ -204,6 +206,7 @@ def _decide(exp: str, approved: bool, root: Path | None) -> CommandResult:
 def _status_text(root: Path | None) -> str:
     state = load_state(root)
     pending = load_pending(root)
+    loop = load_loop(root)
     pause = "yes — send /resume" if state.paused else "no"
     return "\n".join(
         [
@@ -217,6 +220,11 @@ def _status_text(root: Path | None) -> str:
             f"(date {state.budget_date})",
             f"Personal best score: {state.public_best}",
             "",
+            "Loop",
+            f"  next_n: {loop.next_n}",
+            f"  last_n: {loop.last_n}",
+            f"  last_score: {loop.last_score}",
+            "",
             "Pending submit",
             f"  Status: {pending.status}",
             f"  Exp: {pending.exp_id}",
@@ -225,7 +233,7 @@ def _status_text(root: Path | None) -> str:
             "",
             f"Note: {state.note}",
             "",
-            "Tips: /run (dry) · /run live · /yes · /no · /help",
+            "Tips: /run · /run dry · /yes · /no · /help",
         ]
     )
 

@@ -50,10 +50,10 @@ def test_pause_resume_budget(tmp_path: Path):
 
 def test_run_command_flags(tmp_path: Path):
     (tmp_path / "memory").mkdir()
-    dry = handle_command("/run", root=tmp_path)
-    assert dry.ok and dry.start_cycle and dry.cycle_dry_run is True
-    live = handle_command("/run live", root=tmp_path)
+    live = handle_command("/run", root=tmp_path)
     assert live.ok and live.start_cycle and live.cycle_dry_run is False
+    dry = handle_command("/run dry", root=tmp_path)
+    assert dry.ok and dry.start_cycle and dry.cycle_dry_run is True
     bad = handle_command("/run please", root=tmp_path)
     assert not bad.ok
 

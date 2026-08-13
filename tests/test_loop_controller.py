@@ -44,6 +44,8 @@ def test_next_n_two_trains_once_submit(tmp_path: Path):
         telegram=FakeTelegram(),
     )
     assert result.phases_run.count("PLAN") == 2
+    assert result.train_slices == 2
+    assert result.research_passes >= 1
     notebooks = root / "competitions" / "rsna_knee" / "notebooks"
     pkgs = [p for p in notebooks.iterdir() if p.is_dir()] if notebooks.is_dir() else []
     assert len(pkgs) == 2

@@ -63,14 +63,13 @@ Telegram (separate process):
 uv run python scripts/telegram_bot.py
 ```
 
-Commands: `/run`, `/run live`, `/yes`, `/no`, `/status`, `/pause`, `/resume`.
+Commands: `/run` (loops then submits once; counts as approval), `/run dry`, `/status`, `/pause`, `/resume`.
 
 ## Submit safety
 
-1. The cycle writes a candidate and `memory/pending_submit.md`.
-2. You send `/yes`.
-3. The next live cycle may call the Kaggle API.
-4. Dry-run never spends a submission.
+1. `/run` is a full live loop: research until cards, N train slices, one submit.
+2. Sending `/run` counts as approval. Cron still writes `memory/pending_submit.md` and can wait for `/yes` unless you pass `--assume-approved`.
+3. `/run dry` never spends a submission.
 
 Do not submit through the browser.
 

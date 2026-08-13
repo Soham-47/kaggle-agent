@@ -74,6 +74,7 @@ def start_agent_cycle(
         cmd.append("--dry-run")
     else:
         cmd.append("--no-dry-run")
+        cmd.append("--assume-approved")
 
     log_dir = memory_dir(root) / "daily"
     log_dir.mkdir(parents=True, exist_ok=True)
@@ -94,8 +95,7 @@ def start_agent_cycle(
             msg = (
                 f"Cycle finished ({mode}).\n\n"
                 f"Log: {log_path}\n\n"
-                "If it was a live run, check the report: you may need to "
-                "send /yes (approve) then /run live to submit."
+                "Live /run loops then submits once when a candidate is ready."
             )
         else:
             msg = (

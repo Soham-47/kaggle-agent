@@ -116,6 +116,8 @@ class CycleResult:
     feedback_score: str | None = None
     heal_decision: str | None = None
     kernel_resumed: bool | None = None
+    train_slices: int = 0
+    research_passes: int = 0
     errors: list[str] = field(default_factory=list)
 
     @property
@@ -373,6 +375,7 @@ class Orchestrator:
                     "errors": prior + result.errors[err_before:],
                 }
         self._loop_n_used = used
+        result.train_slices = used
         if best:
             result.experiment_id = best["experiment_id"]
             result.kernel_path = best["kernel_path"]
@@ -456,6 +459,7 @@ class Orchestrator:
             self._source_cards(result)
             later_queries = 4 if pass_i > 1 else None
             self._deep_research(result, max_queries=later_queries)
+            result.research_passes = pass_i
             append_daily_log(f"research pass {pass_i}/{max_passes}", self.root)
             if cards_feasible(workspace, research_md):
                 append_daily_log("research cards feasible", self.root)
@@ -887,7 +891,7 @@ class Orchestrator:
             append_daily_log(f"approve assumed exp={exp_id}", self.root)
             return state
 
-        # Live: keep prior /yes so a second /run live can submit without re-asking
+        # Live: keep prior /yes so a second /run can submit without re-asking
         if not dry:
             prior = usable_approval(self.root, competition=self.competition.slug)
             if prior is not None:
@@ -967,7 +971,7 @@ class Orchestrator:
                     f"CSV: {csv_path}\n"
                     f"Status: {pending.status}\n\n"
                     "Everything else succeeded.\n\n"
-                    "Send /yes now, then /run live again.\n"
+                    "Send /yes now, then /run again.\n"
                     "After /yes, the next live run will submit without asking again."
                 )
                 return state
@@ -1231,7 +1235,7 @@ class Orchestrator:
             next_step = (
                 "Next step (required):\n"
                 "1) Send /yes to approve this candidate\n"
-                "2) Send /run live so it can submit to Kaggle\n"
+                "2) Send /run so it can submit to Kaggle\n"
             )
         elif hard:
             headline = f"Cycle finished with problems — {mode}"
@@ -1240,10 +1244,18 @@ class Orchestrator:
             headline = f"Cycle finished — {mode}"
             next_step = "Next: /status · /run · /help\n"
 
+        slices = result.train_slices
+        slice_line = (
+            f"Train slices: {slices}\n" if slices else ""
+        )
+        passes = result.research_passes
+        pass_line = f"Research passes: {passes}\n" if passes else ""
+
         text = (
             f"{headline}\n\n"
             f"Experiment: {result.experiment_id}\n"
-            f"Competition: {self.competition.slug}\n\n"
+            f"Competition: {self.competition.slug}\n"
+            f"{slice_line}{pass_line}\n"
             f"Steps\n{steps}\n\n"
             f"Score / feedback: {result.feedback_score or 'none yet'}\n"
             f"Heal next: {result.heal_decision or 'n/a'}\n"
