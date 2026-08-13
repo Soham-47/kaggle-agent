@@ -88,6 +88,13 @@ heal:
   max_no_improve_days: 5
   # ladder: tune → recipe → new → pause (sets state.paused)
 
+loop:
+  n_min: 2
+  n_max: 8
+  typical_gain: 0.01
+  default_n: 3
+  max_minutes: 90
+
 cron:
   hour_utc: 6
   # install: bash scripts/install_cron.sh

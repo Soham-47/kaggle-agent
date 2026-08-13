@@ -12,6 +12,11 @@ def test_load_settings():
     assert s.mcp_submit is False
     assert s.api_submit is True
     assert s.kernel_push is True
+    assert s.loop_n_min == 2
+    assert s.loop_n_max == 8
+    assert s.loop_typical_gain == 0.01
+    assert s.loop_default_n == 3
+    assert s.loop_max_minutes == 90
 
 
 def test_load_rsna_competition():

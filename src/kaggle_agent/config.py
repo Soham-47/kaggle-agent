@@ -145,6 +145,26 @@ class Settings:
         return int(self.raw.get("heal", {}).get("max_no_improve_days", 5))
 
     @property
+    def loop_n_min(self) -> int:
+        return int(self.raw.get("loop", {}).get("n_min", 2))
+
+    @property
+    def loop_n_max(self) -> int:
+        return int(self.raw.get("loop", {}).get("n_max", 8))
+
+    @property
+    def loop_typical_gain(self) -> float:
+        return float(self.raw.get("loop", {}).get("typical_gain", 0.01))
+
+    @property
+    def loop_default_n(self) -> int:
+        return int(self.raw.get("loop", {}).get("default_n", 3))
+
+    @property
+    def loop_max_minutes(self) -> float:
+        return float(self.raw.get("loop", {}).get("max_minutes", 90))
+
+    @property
     def cron_hour(self) -> int:
         return int(self.raw.get("cron", {}).get("hour_utc", 6))
 
