@@ -16,6 +16,11 @@ def _copy_min(root: Path, real: Path) -> None:
         shutil.copy(real / "memory" / name, root / "memory" / name)
     (root / "memory" / "experiments").mkdir()
     (root / "memory" / "daily").mkdir()
+    # Kernel package needs real IDs; /data is gitignored and not in worktrees.
+    (root / "data").mkdir()
+    (root / "data" / "sample_submission.csv").write_text(
+        "StudyInstanceUID\ns1\ns2\n", encoding="utf-8"
+    )
     # Real state may be paused; tests need a clean agent
     save_state(AgentState(paused=False, competition="rsna_knee"), root)
 

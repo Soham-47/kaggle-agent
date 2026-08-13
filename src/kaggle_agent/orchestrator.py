@@ -69,6 +69,9 @@ Do not invent a new architecture. Do not include secrets."""
 
 DEFAULT_HYPOTHESIS = "dry-run default: schema-valid 0.5 baseline then improve"
 
+TRAIN_SLICE_PHASES = ("PLAN", "CODE", "LOCAL_SMOKE", "KERNEL_TRAIN", "VALIDATE_SUB")
+TAIL_PHASES = ("TELEGRAM_APPROVE", "SUBMIT", "FEEDBACK", "HEAL", "REPORT")
+
 
 @dataclass
 class CycleResult:
@@ -166,11 +169,11 @@ class Orchestrator:
             state = self._begin(state, dry, now, result)
             result.context_sections = len(build_context_pack(self.root).sections)
 
-            for phase in self.settings.phases:
-                state.phase = phase
-                save_state(state, self.root)
-                append_daily_log(phase, self.root)
-                state = self._phase(phase, state=state, dry=dry, result=result)
+            if "LOCK" in self.settings.phases:
+                state = self._run_named_phases(("LOCK",), state, dry, result)
+            state = self._run_named_phases(("RESEARCH",), state, dry, result)
+            state = self._train_slice(state, dry, result)
+            state = self._run_named_phases(TAIL_PHASES, state, dry, result)
 
             self._finish_ok(state, result)
         except Exception as exc:  # noqa: BLE001
@@ -237,6 +240,25 @@ class Orchestrator:
         state.note = "error"
         save_state(state, self.root)
         append_daily_log(f"error: {exc}", self.root)
+
+    def _run_named_phases(
+        self,
+        phases: tuple[str, ...] | list[str],
+        state: AgentState,
+        dry: bool,
+        result: CycleResult,
+    ) -> AgentState:
+        for phase in phases:
+            state.phase = phase
+            save_state(state, self.root)
+            append_daily_log(phase, self.root)
+            state = self._phase(phase, state=state, dry=dry, result=result)
+        return state
+
+    def _train_slice(
+        self, state: AgentState, dry: bool, result: CycleResult
+    ) -> AgentState:
+        return self._run_named_phases(TRAIN_SLICE_PHASES, state, dry, result)
 
     def _phase(
         self,
