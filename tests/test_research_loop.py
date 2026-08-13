@@ -52,16 +52,20 @@ def _orch(
     )
 
 
-def _count_source_cards(monkeypatch) -> dict[str, int]:  # noqa: ANN001
+def _count_method(monkeypatch, name: str) -> dict[str, int]:  # noqa: ANN001
     calls = {"n": 0}
-    orig = Orchestrator._source_cards
+    orig = getattr(Orchestrator, name)
 
-    def wrapped(self, result):  # noqa: ANN001
+    def wrapped(self, *args, **kwargs):  # noqa: ANN001
         calls["n"] += 1
-        return orig(self, result)
+        return orig(self, *args, **kwargs)
 
-    monkeypatch.setattr(Orchestrator, "_source_cards", wrapped)
+    monkeypatch.setattr(Orchestrator, name, wrapped)
     return calls
+
+
+def _count_source_cards(monkeypatch) -> dict[str, int]:  # noqa: ANN001
+    return _count_method(monkeypatch, "_source_cards")
 
 
 def _stub_deep(monkeypatch) -> None:  # noqa: ANN001
@@ -85,6 +89,9 @@ def test_cards_feasible_needs_sidecar_step_and_section(tmp_path: Path):
         '{"implement_steps": ["attach public weights"]}\n',
         encoding="utf-8",
     )
+    research.write_text("notes only; no method or digest heading\n", encoding="utf-8")
+    assert cards_feasible(workspace, research) is False
+    research.write_text("## Method cards\n", encoding="utf-8")
     assert cards_feasible(workspace, research) is True
     research.write_text("## Deep research digest\n- x\n", encoding="utf-8")
     assert cards_feasible(workspace, research) is True
@@ -122,7 +129,9 @@ def test_missing_methods_json_attempts_second_pass(tmp_path: Path, monkeypatch):
 
 def test_pass_cap_respected(tmp_path: Path, monkeypatch):
     _stub_deep(monkeypatch)
-    calls = _count_source_cards(monkeypatch)
+    cards = _count_source_cards(monkeypatch)
+    snaps = _count_method(monkeypatch, "_kaggle_snapshot")
+    browsers = _count_method(monkeypatch, "_browser_research")
     root = _setup(tmp_path, drop_methods=True)
     result = _orch(
         root,
@@ -130,7 +139,11 @@ def test_pass_cap_respected(tmp_path: Path, monkeypatch):
         loop_passes=2,
     ).run_cycle(dry_run=True)
     assert not result.skipped
-    assert calls["n"] == 2
+    assert result.kaggle_ok is True
+    assert result.errors == []
+    assert cards["n"] == 2
+    assert snaps["n"] == 1
+    assert browsers["n"] == 1
     logs = "".join(
         p.read_text(encoding="utf-8")
         for p in (root / "memory" / "daily").glob("*.md")
