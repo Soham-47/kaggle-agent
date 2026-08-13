@@ -80,6 +80,15 @@ class Settings:
         pages = self.raw.get("browser_research", {}).get("pages") or ["overview", "discussion"]
         return [str(p) for p in pages]
 
+    @property
+    def research_loop_passes(self) -> int:
+        raw = (self.raw.get("research") or {}).get("loop_passes", 3)
+        try:
+            n = int(raw)
+        except (TypeError, ValueError):
+            n = 3
+        return max(1, n)
+
     def deep_research_config(self) -> "DeepResearchSettings":
         deep = self.raw.get("research", {}).get("deep", {}) or {}
 

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -22,7 +22,11 @@ from kaggle_agent.research.browser import (
     FetchFn,
     merge_browser_into_research_md,
 )
-from kaggle_agent.research.source_cards import run_source_card_research, write_methods_sidecar
+from kaggle_agent.research.source_cards import (
+    cards_feasible,
+    run_source_card_research,
+    write_methods_sidecar,
+)
 from kaggle_agent.research.deep import (
     ArxivSource,
     DeepResearcher,
@@ -306,6 +310,31 @@ class Orchestrator:
         state.note = updated.note
 
     def _research(self, state: AgentState, result: CycleResult) -> AgentState:
+        # Retry source cards until PLAN/CODE can implement; fail-soft if still thin.
+        max_passes = self.settings.research_loop_passes
+        workspace = self.root / self.competition.workspace_relative
+        research_md = memory_dir(self.root) / "research.md"
+        for pass_i in range(1, max_passes + 1):
+            need_snapshot = pass_i == 1 or result.kaggle_ok is not True
+            if need_snapshot:
+                self._kaggle_snapshot(state, result)
+            if self.settings.browser_research_enabled and need_snapshot:
+                self._browser_research(result)
+            self._source_cards(result)
+            later_queries = 4 if pass_i > 1 else None
+            self._deep_research(result, max_queries=later_queries)
+            append_daily_log(f"research pass {pass_i}/{max_passes}", self.root)
+            if cards_feasible(workspace, research_md):
+                append_daily_log("research cards feasible", self.root)
+                break
+        else:
+            append_daily_log(
+                "research cards still thin; continuing",
+                self.root,
+            )
+        return state
+
+    def _kaggle_snapshot(self, state: AgentState, result: CycleResult) -> None:
         try:
             if self._kaggle is None:
                 self._kaggle = KaggleClient().connect()
@@ -329,12 +358,6 @@ class Orchestrator:
             result.kaggle_ok = False
             result.errors.append(f"research: {exc}")
             append_daily_log(f"kaggle research failed: {exc}", self.root)
-
-        if self.settings.browser_research_enabled:
-            self._browser_research(result)
-        self._source_cards(result)
-        self._deep_research(result)
-        return state
 
     def _browser_research(self, result: CycleResult) -> None:
         try:
@@ -387,9 +410,13 @@ class Orchestrator:
         except Exception as exc:  # noqa: BLE001
             append_daily_log(f"source cards failed: {exc}", self.root)
 
-    def _deep_research(self, result: CycleResult) -> None:
+    def _deep_research(
+        self, result: CycleResult, *, max_queries: int | None = None
+    ) -> None:
         """Deep-research stage: recursive search over web/papers/notebooks/repos."""
         deep = self.settings.deep_research_config()
+        if max_queries is not None:
+            deep = replace(deep, max_queries=max_queries)
         if not deep.enabled:
             return
         try:

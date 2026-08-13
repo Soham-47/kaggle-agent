@@ -209,6 +209,38 @@ def load_methods(workspace: Path) -> dict[str, Any]:
     return data if isinstance(data, dict) else {}
 
 
+_DEEP_DIGEST_HEADING = "## Deep research digest"
+
+
+def _implement_or_copyable_steps(data: dict[str, Any]) -> list[str]:
+    for key in ("implement_steps", "copyable_steps", "copyable_next_steps"):
+        raw = data.get(key)
+        if isinstance(raw, str) and raw.strip():
+            return [raw.strip()]
+        if isinstance(raw, list):
+            steps = [str(x).strip() for x in raw if str(x).strip()]
+            if steps:
+                return steps
+    return []
+
+
+def cards_feasible(workspace: Path, research_md: Path) -> bool:
+    """True when PLAN/CODE have a methods sidecar plus at least one copyable step.
+
+    Claimed public > our best is intentionally not required — that bar can stall
+    research forever on a new contest.
+    """
+    methods_path = workspace / "pipeline" / "methods.json"
+    if not methods_path.is_file():
+        return False
+    if not _implement_or_copyable_steps(load_methods(workspace)):
+        return False
+    if not research_md.is_file():
+        return False
+    text = research_md.read_text(encoding="utf-8")
+    return METHOD_CARDS_HEADING in text or _DEEP_DIGEST_HEADING in text
+
+
 _PULL_LOCK = threading.Lock()
 
 

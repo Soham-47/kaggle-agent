@@ -17,6 +17,7 @@ def test_load_settings():
     assert s.loop_typical_gain == 0.01
     assert s.loop_default_n == 3
     assert s.loop_max_minutes == 90
+    assert s.research_loop_passes == 3
 
 
 def test_load_rsna_competition():

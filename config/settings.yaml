@@ -46,6 +46,8 @@ browser_research:
   # fail-soft: cycle continues if browser scrape fails
 
 research:
+  # RESEARCH may retry source cards until methods.json is implementable
+  loop_passes: 3
   deep:
     # deep-research style stage: articles, papers, notebooks, repos, web
     enabled: true
