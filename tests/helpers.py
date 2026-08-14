@@ -23,7 +23,19 @@ def copy_min_workspace(
     import shutil
 
     shutil.copytree(real / "config", root / "config")
-    shutil.copytree(real / "competitions", root / "competitions")
+    skip = {
+        "notebooks",
+        "submissions",
+        "research-cache",
+        "experiments",
+        "data",
+        "__pycache__",
+    }
+    shutil.copytree(
+        real / "competitions",
+        root / "competitions",
+        ignore=lambda _dir, names: [n for n in names if n in skip],
+    )
     (root / "memory").mkdir()
     for name in ("MEMORY.md", "COMPETITION.md", "state.md", "research.md"):
         shutil.copy(real / "memory" / name, root / "memory" / name)

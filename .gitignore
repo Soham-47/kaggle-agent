@@ -27,6 +27,8 @@ competitions/*/submissions/
 competitions/*/research-cache/
 competitions/*/experiments/
 competitions/*/data/
+competitions/*/pipeline/code_brief.md
+competitions/*/pipeline/methods_applied.md
 /data/
 
 # editor / OS
