@@ -1,7 +1,7 @@
 [project]
 name = "kaggle-agent"
 version = "0.1.0"
-description = "Self-healing Kaggle competition agent (pilot: RSNA Knee)"
+description = "A daily loop for any Kaggle contest. It researches public kernels, trains on Kaggle Kernels, and submits after you approve."
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
