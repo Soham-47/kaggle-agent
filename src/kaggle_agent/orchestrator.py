@@ -23,6 +23,8 @@ from kaggle_agent.research.browser import (
     FetchFn,
     merge_browser_into_research_md,
 )
+from kaggle_agent.agents.code import make_code_agent
+from kaggle_agent.agents.plan import make_plan_agent, write_plan_text
 from kaggle_agent.research.agent import ResearchAgent
 from kaggle_agent.research.source_cards import (
     cards_feasible,
@@ -65,22 +67,6 @@ from kaggle_agent.train.kernel_job import load_kernel_job
 from kaggle_agent.train.kernel_runner import run_kernel_phase
 from kaggle_agent.train.local_smoke import run_competition_smoke
 from kaggle_agent.train.notebook_builder import write_kernel_package
-
-PLAN_SYSTEM = """You plan the next Kaggle experiment. Be brief.
-Reply with exactly 3 lines:
-hypothesis: <one sentence>
-approach: baseline|tune|recipe|new
-steps: <semicolon-separated minimal steps>
-Prefer the copyable next step from method cards (research-deep/source-*.md
-and the Deep research digest) over a constant-score baseline. No code."""
-
-CODE_SYSTEM = """You are the coding agent for this Kaggle cycle.
-Read the method cards. Reply with at most 8 short lines:
-1. Which public datasets/models to attach
-2. How to find hidden test IDs
-3. How to combine scores (rank-mean vs other)
-4. What not to copy
-Do not invent a new architecture. Do not include secrets."""
 
 DEFAULT_HYPOTHESIS = "dry-run default: schema-valid 0.5 baseline then improve"
 
@@ -729,51 +715,50 @@ class Orchestrator:
     def _code(self, state: AgentState, result: CycleResult) -> AgentState:
         workspace = self.root / self.competition.workspace_relative
         check = ensure_pipeline_ready(workspace)
-        if check.ok:
-            try:
-                import sys
-
-                sys.path.insert(0, str(workspace))
-                from pipeline.recipe import apply_from_cards, apply_recipe  # type: ignore
-
-                applied = apply_recipe(workspace, data_dir=self.root / "data")
-                cards = apply_from_cards(workspace)
-                result.code_ok = True
-                append_daily_log(
-                    f"code recipe {applied.message} cards={cards.message} "
-                    f"present={check.present}",
-                    self.root,
-                )
-                if not applied.ok:
-                    append_daily_log(
-                        f"code recipe skipped (kernel will train on Kaggle): {applied.message}",
-                        self.root,
-                    )
-                if (
-                    self.router is not None
-                    and self.router.available()
-                    and hasattr(self.router, "code")
-                ):
-                    try:
-                        pack = build_context_pack(self.root)
-                        brief = self.router.code(
-                            CODE_SYSTEM,
-                            f"Competition: {self.competition.slug}\n\n"
-                            f"{pack.as_prompt_block()}",
-                        )
-                        brief_path = workspace / "pipeline" / "code_brief.md"
-                        brief_path.write_text(brief, encoding="utf-8")
-                        append_daily_log("code agent brief written", self.root)
-                    except Exception as exc:  # noqa: BLE001
-                        append_daily_log(f"code agent brief skipped: {exc}", self.root)
-            except Exception as exc:  # noqa: BLE001
-                result.code_ok = False
-                result.errors.append(f"code: recipe failed: {exc}")
-                append_daily_log(f"code recipe failed: {exc}", self.root)
-        else:
+        if not check.ok:
             result.code_ok = False
             result.errors.append(f"code: missing {check.missing}")
             append_daily_log(f"code missing={check.missing}", self.root)
+            return state
+        zen = self.router.client if self.router is not None else None
+        model = self.competition.model_for("code", self.settings)
+        agent = make_code_agent(
+            zen,
+            model,
+            self.root,
+            workspace,
+            self.settings.code_agent_config(),
+            plan_text=result.plan_text or "",
+            log=lambda msg: append_daily_log(msg, self.root),
+        )
+        pack = build_context_pack(self.root)
+        out = agent.run(
+            f"Competition: {self.competition.slug}\n\n{pack.as_prompt_block(max_chars_per_section=1200)}"
+        )
+        append_daily_log(f"code agent stop={out.stop_reason} turns={out.turns}", self.root)
+        try:
+            import sys
+
+            sys.path.insert(0, str(workspace))
+            from pipeline.recipe import apply_from_cards, apply_recipe  # type: ignore
+
+            applied = apply_recipe(workspace, data_dir=self.root / "data")
+            cards = apply_from_cards(workspace)
+            result.code_ok = True
+            append_daily_log(
+                f"code recipe {applied.message} cards={cards.message} "
+                f"present={check.present}",
+                self.root,
+            )
+            if not applied.ok:
+                append_daily_log(
+                    f"code recipe skipped (kernel will train on Kaggle): {applied.message}",
+                    self.root,
+                )
+        except Exception as exc:  # noqa: BLE001
+            result.code_ok = False
+            result.errors.append(f"code: recipe failed: {exc}")
+            append_daily_log(f"code recipe failed: {exc}", self.root)
         return state
 
     def _local_smoke(self, state: AgentState, result: CycleResult) -> AgentState:
@@ -932,22 +917,34 @@ class Orchestrator:
         return state
 
     def _plan(self, state: AgentState, dry: bool, result: CycleResult) -> None:
-        hypothesis, approach, notes = DEFAULT_HYPOTHESIS, "baseline", "no LLM"
+        hypothesis, approach, notes = DEFAULT_HYPOTHESIS, "baseline", "plan agent"
         pack = build_context_pack(self.root)
+        workspace = self.root / self.competition.workspace_relative
+        zen = self.router.client if self.router is not None else None
+        model = self.competition.model_for("plan", self.settings)
 
-        if self.router.available():
-            try:
-                text = self.router.plan(
-                    PLAN_SYSTEM,
-                    f"Competition: {self.competition.slug}\n\n{pack.as_prompt_block()}",
-                )
-                result.plan_text = text
-                hypothesis, approach = _parse_plan_lines(text)
-                notes = "zen plan"
-            except Exception as exc:  # noqa: BLE001
-                notes = f"zen plan failed: {exc}"
-                result.errors.append(f"plan: {exc}")
-        else:
+        def on_plan(h: str, a: str, steps: str) -> None:
+            nonlocal hypothesis, approach
+            hypothesis, approach = h, a
+            result.plan_text = write_plan_text(h, a, steps)
+
+        agent, _state = make_plan_agent(
+            zen,
+            model,
+            self.root,
+            self.settings.plan_agent_config(),
+            workspace=workspace,
+            log=lambda msg: append_daily_log(msg, self.root),
+            on_plan=on_plan,
+        )
+        out = agent.run(
+            f"Competition: {self.competition.slug}\n\n{pack.as_prompt_block(max_chars_per_section=3000)}"
+        )
+        append_daily_log(f"plan agent stop={out.stop_reason} turns={out.turns}", self.root)
+        if result.plan_text is None:
+            result.plan_text = write_plan_text(hypothesis, approach, "")
+        notes = f"plan agent {out.stop_reason}"
+        if zen is None or not hasattr(zen, "chat"):
             notes = "OPENCODE_API_KEY missing; offline plan"
 
         write_experiment(

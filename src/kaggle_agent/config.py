@@ -95,14 +95,21 @@ class Settings:
             n = 3
         return max(1, n)
 
-    def research_agent_config(self) -> ResearchAgentSettings:
-        raw = (self.raw.get("research") or {}).get("agent") or {}
-        minutes = raw.get("max_minutes", 15)
-        turns = raw.get("max_tool_turns", 40)
+    def _agent_config(self, section: str, *, minutes: float = 15, turns: int = 40) -> ResearchAgentSettings:
+        raw = (self.raw.get(section) or {}).get("agent") or {}
         return ResearchAgentSettings(
-            max_minutes=float(minutes),
-            max_tool_turns=max(1, int(turns)),
+            max_minutes=float(raw.get("max_minutes", minutes)),
+            max_tool_turns=max(1, int(raw.get("max_tool_turns", turns))),
         )
+
+    def research_agent_config(self) -> ResearchAgentSettings:
+        return self._agent_config("research", minutes=15, turns=40)
+
+    def plan_agent_config(self) -> ResearchAgentSettings:
+        return self._agent_config("plan", minutes=10, turns=20)
+
+    def code_agent_config(self) -> ResearchAgentSettings:
+        return self._agent_config("code", minutes=10, turns=20)
 
     def deep_research_config(self) -> "DeepResearchSettings":
         deep = self.raw.get("research", {}).get("deep", {}) or {}

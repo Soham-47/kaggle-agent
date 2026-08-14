@@ -141,7 +141,7 @@ def test_agent_stops_on_time(tmp_path: Path, monkeypatch):
         ticks["n"] += 1
         return 0.0 if ticks["n"] < 4 else 1000.0
 
-    monkeypatch.setattr("kaggle_agent.research.agent.time.monotonic", monotonic)
+    monkeypatch.setattr("kaggle_agent.agents.loop.time.monotonic", monotonic)
 
     zen = _ScriptedZen([{"tool": "search", "args": {"query": "x"}}] * 20)
     agent = ResearchAgent(

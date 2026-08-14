@@ -14,7 +14,7 @@ This repo runs one Kaggle competition at a time. Set `default_competition` in `c
 
 Never submit via the browser. Never invent a second memory store.
 
-RESEARCH always runs in this order: Kaggle snapshot, then browser pages, then parallel source cards, then recursive DeepResearcher. Source cards and `pipeline/methods.json` are what CODE implements.
+RESEARCH always runs in this order: Kaggle snapshot, then browser pages, then the research tool-loop. PLAN and CODE are the same kind of tool-loop. Source cards and `pipeline/methods.json` are what CODE implements.
 
 ## Memory (only these are ingested)
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -15,12 +16,62 @@ from kaggle_agent.orchestrator import Orchestrator, run_daily
 from kaggle_agent.research.deep import DeepResearchResult
 
 
+class RecordingZen:
+    """Records chat messages; one scripted tool per stage."""
+
+    def __init__(self) -> None:
+        self.users: list[str] = []
+        self._n: dict[str, int] = {"research": 0, "plan": 0, "code": 0}
+
+    def chat(self, model, messages, **kwargs):  # noqa: ANN001
+        system = ""
+        user = ""
+        for m in messages:
+            if m.get("role") == "system":
+                system = str(m.get("content") or "")
+            if m.get("role") == "user":
+                user = str(m.get("content") or "")
+        self.users.append(user)
+        if "plan the next" in system:
+            self._n["plan"] += 1
+            if self._n["plan"] == 1:
+                return json.dumps(
+                    {
+                        "tool": "write_plan",
+                        "args": {
+                            "hypothesis": "use grouped folds from public notebooks",
+                            "approach": "tune",
+                            "steps": "pull winner notebook; keep Baker's header",
+                        },
+                    }
+                )
+            return json.dumps({"tool": "done", "args": {}})
+        if "coding agent" in system:
+            self._n["code"] += 1
+            if self._n["code"] == 1:
+                return json.dumps(
+                    {
+                        "tool": "write_brief",
+                        "args": {
+                            "text": "attach listed datasets; discover test dirs; rank-mean"
+                        },
+                    }
+                )
+            return json.dumps({"tool": "done", "args": {}})
+        self._n["research"] += 1
+        if self._n["research"] == 1:
+            return json.dumps({"tool": "deep_research", "args": {}})
+        if self._n["research"] == 2:
+            return json.dumps({"tool": "harvest_cards", "args": {}})
+        return json.dumps({"tool": "done", "args": {}})
+
+
 @dataclass
 class RecordingRouter:
-    """Stand-in ModelRouter: records plan prompts; exposes a dummy Zen client."""
+    """Stand-in ModelRouter: records plan/code agent chat."""
 
     plan_calls: list[tuple[str, str]] = field(default_factory=list)
-    client: object = field(default_factory=lambda: object())
+    client: RecordingZen = field(default_factory=RecordingZen)
 
     def available(self) -> bool:
         return True
@@ -98,14 +149,14 @@ def test_plan_prompt_includes_memory_competition_and_research(tmp_path: Path, mo
     )
     result = orch.run_cycle(dry_run=True)
     assert result.deep_ok is True
-    assert rec.plan_calls, "PLAN must call the router after research"
-    user = rec.plan_calls[0][1]
-    assert "## MEMORY.md" in user
-    assert "## COMPETITION.md" in user
-    assert "## research.md" in user
-    assert "Deep research digest" in user
-    assert "copyable next step" in user or "Must implement" in user
-    assert "Baker" in user  # contest header rule lives in COMPETITION.md
+    users = "\n".join(rec.client.users)
+    assert rec.client.users, "PLAN/CODE must chat after research"
+    assert "## MEMORY.md" in users
+    assert "## COMPETITION.md" in users
+    assert "## research.md" in users
+    assert "Deep research digest" in users
+    assert "copyable next step" in users or "Must implement" in users
+    assert "Baker" in users  # contest header rule lives in COMPETITION.md
 
 
 def test_deep_research_wires_kaggle_arxiv_github_web(tmp_path: Path, monkeypatch):

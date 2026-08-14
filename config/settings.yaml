@@ -64,6 +64,16 @@ research:
     max_minutes: 15  # cron-safe time budget
     report_dir: memory/research-deep
 
+plan:
+  agent:
+    max_minutes: 10
+    max_tool_turns: 20
+
+code:
+  agent:
+    max_minutes: 10
+    max_tool_turns: 20
+
 kernel:
   # Build package always; push only if push=true AND orchestrator.dry_run=false
   push: true

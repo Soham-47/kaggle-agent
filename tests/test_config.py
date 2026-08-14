@@ -21,6 +21,8 @@ def test_load_settings():
     agent = s.research_agent_config()
     assert agent.max_tool_turns == 40
     assert agent.max_minutes == 15.0
+    assert s.plan_agent_config().max_tool_turns == 20
+    assert s.code_agent_config().max_minutes == 10.0
 
 
 def test_load_rsna_competition():
