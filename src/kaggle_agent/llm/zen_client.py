@@ -14,6 +14,29 @@ class ZenError(RuntimeError):
     pass
 
 
+def _tool_calls_from_message(msg: dict[str, Any]) -> list[tuple[str, dict[str, Any]]]:
+    raw = msg.get("tool_calls") if isinstance(msg, dict) else None
+    if not isinstance(raw, list):
+        return []
+    out: list[tuple[str, dict[str, Any]]] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        fn = item.get("function") if isinstance(item.get("function"), dict) else {}
+        name = str(fn.get("name") or "").strip()
+        args_raw = fn.get("arguments") or {}
+        if isinstance(args_raw, str):
+            try:
+                parsed = json.loads(args_raw)
+            except json.JSONDecodeError:
+                parsed = {}
+        else:
+            parsed = args_raw
+        if name:
+            out.append((name, parsed if isinstance(parsed, dict) else {}))
+    return out
+
+
 def _usage_from_payload(payload: dict[str, Any]) -> dict[str, int]:
     usage = payload.get("usage") if isinstance(payload, dict) else None
     if not isinstance(usage, dict):
@@ -53,14 +76,56 @@ class ZenClient:
         *,
         temperature: float = 0.2,
         max_tokens: int = 1024,
+        tools: list[dict[str, Any]] | None = None,
+        tool_choice: str | dict[str, Any] | None = None,
+        extra_body: dict[str, Any] | None = None,
+    ) -> str:
+        try:
+            return self._post(
+                model,
+                messages,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                tools=tools,
+                tool_choice=tool_choice,
+                extra_body=extra_body,
+            )
+        except ZenError as exc:
+            if tools and "HTTP 400" in str(exc):
+                return self._post(
+                    model,
+                    messages,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                )
+            raise
+
+    def _post(
+        self,
+        model: str,
+        messages: list[dict[str, Any]],
+        *,
+        temperature: float,
+        max_tokens: int,
+        tools: list[dict[str, Any]] | None = None,
+        tool_choice: str | dict[str, Any] | None = None,
+        extra_body: dict[str, Any] | None = None,
     ) -> str:
         url = f"{self.base_url}/chat/completions"
-        body = {
+        body: dict[str, Any] = {
             "model": model,
             "messages": messages,
             "temperature": temperature,
             "max_tokens": max_tokens,
         }
+        if tools:
+            body["tools"] = tools
+            if tool_choice is not None:
+                body["tool_choice"] = tool_choice
+            if "deepseek.com" in self.base_url:
+                body["thinking"] = {"type": "disabled"}
+        if extra_body:
+            body.update(extra_body)
         data = json.dumps(body).encode("utf-8")
         headers = {
             "Authorization": f"Bearer {self.api_key}",
@@ -100,8 +165,10 @@ class ZenClient:
         if isinstance(payload, dict) and payload.get("error"):
             raise ZenError(f"Zen provider error: {payload['error']}")
         self.last_usage = _usage_from_payload(payload)
+        self.last_tool_calls: list[tuple[str, dict[str, Any]]] = []
         try:
             msg = payload["choices"][0]["message"]
+            self.last_tool_calls = _tool_calls_from_message(msg)
             content = msg.get("content")
             if content is None or (isinstance(content, str) and not content.strip()):
                 content = msg.get("reasoning_content") or msg.get("reasoning") or ""

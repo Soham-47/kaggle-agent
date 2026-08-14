@@ -131,7 +131,7 @@ def test_no_zen_harvests_then_deep():
     )
     out = agent.run("contest")
     assert out.stop_reason == "done"
-    assert seen == ["harvest", "deep"]
+    assert seen == ["harvest"]
 
 
 def test_agent_stops_on_time(tmp_path: Path, monkeypatch):

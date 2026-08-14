@@ -17,11 +17,11 @@ from kaggle_agent.research.source_cards import (
 
 CODE_SYSTEM = (
     "You are the coding agent for this Kaggle cycle. Call one tool per turn. "
-    'Reply with ONLY JSON: {"tool": name, "args": {}}. '
     "Tools: read_cards, read_plan, write_brief, write_methods, done. "
     "write_methods args: dataset_sources, model_sources, implement_steps "
     "(lists). Model pins must be owner/slug/framework/instance/version. "
-    "Never write dataset/model. Call done after a brief exists."
+    "Never write dataset/model. Call write_methods then done. "
+    'If you cannot call a tool, output {"tool": name, "args": {}}.'
 )
 
 
@@ -143,7 +143,7 @@ def make_code_agent(
         system=CODE_SYSTEM,
         log=log,
         accept_done=lambda: brief_path.is_file(),
-        no_zen_sequence=["write_brief"],
+        must_first=[],
         name="code",
         reject_msg="done rejected: write_brief first",
         tracer=tracer,

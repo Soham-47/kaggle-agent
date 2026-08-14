@@ -59,6 +59,8 @@ class StageAgent:
         log: LogFn | None = None,
         accept_done: Callable[[], bool] | None = None,
         no_zen_sequence: list[str] | None = None,
+        must_first: list[str] | None = None,
+        must_first_args: dict[str, dict[str, Any]] | None = None,
         name: str = "stage",
         reject_msg: str = "done rejected",
         tracer: Any | None = None,
@@ -70,7 +72,8 @@ class StageAgent:
         self._system = system
         self._log = log
         self._accept_done = accept_done
-        self._no_zen_sequence = list(no_zen_sequence or [])
+        self._must_first = list(must_first or no_zen_sequence or [])
+        self._must_first_args = dict(must_first_args or {})
         self._name = name
         self._reject_msg = reject_msg
         self._tracer = tracer
@@ -124,22 +127,58 @@ class StageAgent:
             transcript.append(f"tool={tool} args={args} result={obs[:2000]}")
             self._logmsg(f"{self._name} agent turn={turns} tool={tool}")
 
+    def _used_tools(self, transcript: list[str]) -> set[str]:
+        return {t.split(" ", 1)[0][5:] for t in transcript if t.startswith("tool=")}
+
+    def _forced_next(self, transcript: list[str]) -> tuple[str, dict[str, Any]] | None:
+        used = self._used_tools(transcript)
+        for name in self._must_first:
+            if name in self._tools and name not in used:
+                return name, dict(self._must_first_args.get(name) or {})
+        return None
+
+    def _user_blob(self, transcript: list[str]) -> str:
+        pack = transcript[0] if transcript else ""
+        tail = [t for t in transcript[1:] if t.startswith("tool=")][-12:]
+        return "Context:\n" + pack + "\n\nTranscript:\n" + "\n---\n".join(tail)
+
+    def _schemas(self) -> list[dict[str, Any]]:
+        names = list(self._tools) + (["done"] if "done" not in self._tools else [])
+        return [
+            {
+                "type": "function",
+                "function": {
+                    "name": name,
+                    "description": name,
+                    "parameters": {"type": "object", "additionalProperties": True},
+                },
+            }
+            for name in names
+        ]
+
     def _next_action(self, transcript: list[str]) -> tuple[str, dict[str, Any]]:
+        forced = self._forced_next(transcript)
+        if forced is not None:
+            return forced
         if self._zen is None or not hasattr(self._zen, "chat"):
-            used = {t.split(" ", 1)[0][5:] for t in transcript if t.startswith("tool=")}
-            for name in self._no_zen_sequence:
-                if name in self._tools and name not in used:
-                    return name, {}
             return "done", {"reason": "no_zen"}
-        user = "Transcript:\n" + "\n---\n".join(transcript[-8:])
+        writes = {"harvest_cards", "write_card", "write_plan", "write_methods", "write_custom_infer"}
+        used = self._used_tools(transcript)
+        choice = "auto" if used & writes else "required"
         raw = self._zen.chat(
             self._model,
             [
                 {"role": "system", "content": self._system},
-                {"role": "user", "content": user + "\n\nReply with ONLY valid JSON."},
+                {
+                    "role": "user",
+                    "content": self._user_blob(transcript)
+                    + '\n\nIf you cannot call a tool, output {"tool": name, "args": {}}.',
+                },
             ],
             temperature=0.2,
-            max_tokens=400,
+            max_tokens=2048,
+            tools=self._schemas(),
+            tool_choice=choice,
         )
         usage = getattr(self._zen, "last_usage", None) or {}
         self._trace(
@@ -149,7 +188,31 @@ class StageAgent:
             tokens_out=int(usage.get("tokens_out") or 0),
             chars=len(raw or ""),
         )
-        return parse_tool_call(raw)
+        native = list(getattr(self._zen, "last_tool_calls", None) or [])
+        if native:
+            return native[0]
+        tool, args = parse_tool_call(raw)
+        if tool != "invalid_json":
+            return tool, args
+        raw2 = self._zen.chat(
+            self._model,
+            [
+                {"role": "system", "content": self._system},
+                {
+                    "role": "user",
+                    "content": self._user_blob(transcript)
+                    + '\n\nPrevious reply was not a tool. Output {"tool": name, "args": {}}.',
+                },
+            ],
+            temperature=0.0,
+            max_tokens=2048,
+            tools=self._schemas(),
+            tool_choice=choice,
+        )
+        native = list(getattr(self._zen, "last_tool_calls", None) or [])
+        if native:
+            return native[0]
+        return parse_tool_call(raw2)
 
     def _trace(self, kind: str, **fields: Any) -> None:
         if self._tracer is None:

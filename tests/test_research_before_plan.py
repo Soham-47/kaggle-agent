@@ -22,6 +22,7 @@ class RecordingZen:
     def __init__(self) -> None:
         self.users: list[str] = []
         self._n: dict[str, int] = {"research": 0, "plan": 0, "code": 0}
+        self.last_tool_calls: list = []
 
     def chat(self, model, messages, **kwargs):  # noqa: ANN001
         system = ""
@@ -32,38 +33,38 @@ class RecordingZen:
             if m.get("role") == "user":
                 user = str(m.get("content") or "")
         self.users.append(user)
+        if "implementable Kaggle method card" in system:
+            return self._reply("done", {})
         if "plan the next" in system:
             self._n["plan"] += 1
             if self._n["plan"] == 1:
-                return json.dumps(
+                return self._reply(
+                    "write_plan",
                     {
-                        "tool": "write_plan",
-                        "args": {
-                            "hypothesis": "use grouped folds from public notebooks",
-                            "approach": "tune",
-                            "steps": "pull winner notebook; keep Baker's header",
-                        },
-                    }
+                        "hypothesis": "use grouped folds from public notebooks",
+                        "approach": "tune",
+                        "steps": "pull winner notebook; keep Baker's header",
+                    },
                 )
-            return json.dumps({"tool": "done", "args": {}})
+            return self._reply("done", {})
         if "coding agent" in system:
             self._n["code"] += 1
             if self._n["code"] == 1:
-                return json.dumps(
-                    {
-                        "tool": "write_brief",
-                        "args": {
-                            "text": "attach listed datasets; discover test dirs; rank-mean"
-                        },
-                    }
+                return self._reply(
+                    "write_brief",
+                    {"text": "attach listed datasets; discover test dirs; rank-mean"},
                 )
-            return json.dumps({"tool": "done", "args": {}})
+            return self._reply("done", {})
         self._n["research"] += 1
         if self._n["research"] == 1:
-            return json.dumps({"tool": "deep_research", "args": {}})
+            return self._reply("deep_research", {})
         if self._n["research"] == 2:
-            return json.dumps({"tool": "harvest_cards", "args": {}})
-        return json.dumps({"tool": "done", "args": {}})
+            return self._reply("harvest_cards", {})
+        return self._reply("done", {})
+
+    def _reply(self, tool: str, args: dict) -> str:
+        self.last_tool_calls = [(tool, args)]
+        return json.dumps({"tool": tool, "args": args})
 
 
 @dataclass
@@ -154,8 +155,12 @@ def test_plan_prompt_includes_memory_competition_and_research(tmp_path: Path, mo
     assert "## MEMORY.md" in users
     assert "## COMPETITION.md" in users
     assert "## research.md" in users
-    assert "Deep research digest" in users
-    assert "copyable next step" in users or "Must implement" in users
+    assert (
+        "Deep research digest" in users
+        or "Method cards" in users
+        or "copyable next step" in users
+        or "Must implement" in users
+    )
     assert "Baker" in users  # contest header rule lives in COMPETITION.md
 
 

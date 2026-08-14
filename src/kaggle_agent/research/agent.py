@@ -19,11 +19,11 @@ ToolFn = Callable[..., str]
 
 _SYSTEM = (
     "You research one Kaggle contest. Call one tool per turn. "
-    "Reply with ONLY JSON: {\"tool\": name, \"args\": {}}. "
     "Tools: list_kernels, pull_kernel, fetch_url, search, write_card, "
     "harvest_cards, deep_research, judge_cards, done. "
-    "Call done when cards are implementable (datasets/models, hidden test IDs, "
-    "ensemble rule). Do not invent slugs."
+    "Prefer harvest_cards or write_card before done. "
+    "Call done when cards are implementable. Do not invent slugs. "
+    'If you cannot call a tool, output {"tool": name, "args": {}}.'
 )
 
 __all__ = [
@@ -47,6 +47,8 @@ class ResearchAgent(StageAgent):
         log: LogFn | None = None,
         accept_done: Callable[[], bool] | None = None,
         tracer: object | None = None,
+        must_first: list[str] | None = None,
+        must_first_args: dict | None = None,
     ) -> None:
         super().__init__(
             zen,
@@ -56,7 +58,8 @@ class ResearchAgent(StageAgent):
             system=_SYSTEM,
             log=log,
             accept_done=accept_done,
-            no_zen_sequence=["harvest_cards", "deep_research"],
+            must_first=must_first if must_first is not None else ["harvest_cards"],
+            must_first_args=must_first_args,
             name="research",
             reject_msg="done rejected: cards not ready",
             tracer=tracer,

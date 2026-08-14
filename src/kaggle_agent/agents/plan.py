@@ -14,10 +14,10 @@ _PLAN_APPROACHES = frozenset({"baseline", "tune", "recipe", "new"})
 
 PLAN_SYSTEM = (
     "You plan the next Kaggle experiment. Call one tool per turn. "
-    'Reply with ONLY JSON: {"tool": name, "args": {}}. '
     "Tools: read_memory, read_cards, read_methods, write_plan, done. "
     "write_plan args: hypothesis, approach (baseline|tune|recipe|new), steps. "
-    "Prefer the copyable next step from method cards. Call done when the plan is written."
+    "Prefer the copyable next step from method cards. Call done when the plan is written. "
+    'If you cannot call a tool, output {"tool": name, "args": {}}.'
 )
 
 
@@ -128,7 +128,7 @@ def make_plan_agent(
         log=log,
         accept_done=lambda: bool(state.get("wrote"))
         and plan_is_ready(state["hypothesis"], state["approach"]),
-        no_zen_sequence=["write_plan"],
+        must_first=[],
         name="plan",
         reject_msg="done rejected: write_plan first",
         tracer=tracer,

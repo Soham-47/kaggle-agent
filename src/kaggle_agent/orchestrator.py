@@ -460,6 +460,7 @@ class Orchestrator:
             self._browser_research(result)
         zen = self.router.client if self.router is not None else None
         model = self.competition.model_for("distill", self.settings)
+        thin = not cards_feasible(workspace, research_md)
         agent = ResearchAgent(
             zen,
             model,
@@ -468,6 +469,8 @@ class Orchestrator:
             log=lambda msg: append_daily_log(msg, self.root),
             accept_done=lambda: cards_feasible(workspace, research_md),
             tracer=self._tracer,
+            must_first=["harvest_cards"] if thin else [],
+            must_first_args={"harvest_cards": {"reset": True}} if thin else None,
         )
         pack = build_context_pack(self.root)
         out = agent.run(pack.as_prompt_block(max_chars_per_section=1500) or self.competition.slug)
@@ -476,6 +479,13 @@ class Orchestrator:
             f"research agent stop={out.stop_reason} turns={out.turns}",
             self.root,
         )
+        harvested = any("wrote " in (o or "") and "card" in (o or "") for o in out.observations)
+        if not cards_feasible(workspace, research_md) and not harvested:
+            self._source_cards(result, reset=True)
+            if self._tracer is not None:
+                self._tracer.emit(
+                    "tool", stage="research", tool="harvest_cards", source="safety_net"
+                )
         if cards_feasible(workspace, research_md):
             append_daily_log("research cards feasible", self.root)
         else:
@@ -509,6 +519,8 @@ class Orchestrator:
             return src.content(hit)[:12000]
 
         def fetch_url(url: str = "", **_: Any) -> str:
+            if url and not url.lower().startswith(("http://", "https://")):
+                return "refuse: only http(s) urls"
             if self._browser_fetch is not None:
                 return str(self._browser_fetch(url, 12000))[:12000]
             from kaggle_agent.research.browser import fetch_via_http
@@ -550,8 +562,11 @@ class Orchestrator:
             feasible = cards_feasible(workspace, memory_dir(self.root) / "research.md")
             return f"ready={ready} feasible={feasible} {reason}"
 
-        def harvest_cards(**_: Any) -> str:
-            self._source_cards(result)
+        def harvest_cards(reset: bool | None = None, **_: Any) -> str:
+            research_md = memory_dir(self.root) / "research.md"
+            if reset is None:
+                reset = not cards_feasible(workspace, research_md)
+            self._source_cards(result, reset=bool(reset))
             cards = sorted(dest.glob("source-*.md")) if dest.is_dir() else []
             return f"wrote {len(cards)} cards"
 
@@ -628,7 +643,7 @@ class Orchestrator:
         append_daily_log(f"research judge ready={ready} {reason}", self.root)
         return ready
 
-    def _source_cards(self, result: CycleResult) -> None:
+    def _source_cards(self, result: CycleResult, *, reset: bool = True) -> None:
         """One Zen worker per kernel, discussion, and paper. New cards each pass."""
         if self._kaggle is None:
             return
@@ -645,7 +660,7 @@ class Orchestrator:
                 our_score=our,
                 zen=zen,
                 model=model,
-                reset=True,
+                reset=reset,
                 log=lambda msg: append_daily_log(msg, self.root),
             )
             if cards:
