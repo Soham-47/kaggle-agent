@@ -27,6 +27,12 @@ DEFAULT_PHASES = (
 
 
 @dataclass(frozen=True)
+class ResearchAgentSettings:
+    max_minutes: float = 15.0
+    max_tool_turns: int = 40
+
+
+@dataclass(frozen=True)
 class DeepResearchSettings:
     enabled: bool = True
     breadth: int = 3
@@ -88,6 +94,15 @@ class Settings:
         except (TypeError, ValueError):
             n = 3
         return max(1, n)
+
+    def research_agent_config(self) -> ResearchAgentSettings:
+        raw = (self.raw.get("research") or {}).get("agent") or {}
+        minutes = raw.get("max_minutes", 15)
+        turns = raw.get("max_tool_turns", 40)
+        return ResearchAgentSettings(
+            max_minutes=float(minutes),
+            max_tool_turns=max(1, int(turns)),
+        )
 
     def deep_research_config(self) -> "DeepResearchSettings":
         deep = self.raw.get("research", {}).get("deep", {}) or {}

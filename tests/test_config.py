@@ -18,6 +18,9 @@ def test_load_settings():
     assert s.loop_default_n == 3
     assert s.loop_max_minutes == 90
     assert s.research_loop_passes == 3
+    agent = s.research_agent_config()
+    assert agent.max_tool_turns == 40
+    assert agent.max_minutes == 15.0
 
 
 def test_load_rsna_competition():

@@ -349,9 +349,12 @@ def _json_completion(
 
 _SYSTEM = (
     "You are an expert researcher for Kaggle competitions. "
-    "You gather dense, accurate facts with exact numbers, metrics, methods, "
-    "architectures, and entity names. Value correctness over brevity. "
-    "Mistakes erode trust, so be precise. Today is "
+    "Follow the dzhng/deep-research loop: SERP queries with a researchGoal, "
+    "dense learnings, then follow-up directions. "
+    "Prefer site:kaggle.com/code, pinned discussions, and papers notebooks cite. "
+    "Ignore off-topic arXiv that only shares an AUC keyword. "
+    "Gather exact numbers, methods, architectures, and entity names. "
+    "Today is "
     + time.strftime("%Y-%m-%d")
     + "."
 )
@@ -410,13 +413,32 @@ class DeepResearcher:
     def _budget_left(self) -> bool:
         return self._query_count < self._config.max_queries and time.monotonic() < self._deadline
 
+    def _findings_enough(self, learnings: list[str]) -> bool:
+        """Waku-style judge: stop adding depth when facts are implementable."""
+        if self._client is None or len(learnings) < 3:
+            return False
+        user = (
+            "Do these learnings give a coding agent datasets to attach, "
+            "how to find hidden test IDs, and an ensemble rule? "
+            'Return JSON: {"enough": bool, "gap": str}\n\n'
+            + "\n".join(f"- {x}" for x in learnings[:16])
+        )
+        try:
+            parsed = _json_completion(
+                self._client, self._model, _SYSTEM, user, max_tokens=300
+            )
+        except Exception:  # noqa: BLE001
+            return False
+        return bool(parsed.get("enough"))
+
     def _generate_queries(self, query: str, learnings: list[str], num: int) -> list[dict[str, str]]:
         if self._client is None:
             return [{"query": query, "researchGoal": query}]
         learn = "\n".join(f"- {x}" for x in learnings[-12:])
         user = (
-            f"Given the prompt, generate up to {num} unique web research queries. "
-            f"Each must state its researchGoal and deeper follow-up directions. "
+            f"Given the prompt, generate up to {num} unique search queries "
+            f"(dzhng SERP style). At least one query must include site:kaggle.com. "
+            f"Each must state its researchGoal. "
             f"Return JSON: {{\"queries\": [{{\"query\": str, \"researchGoal\": str}}]}}\n\n"
             f"<prompt>{query}</prompt>\n\n"
             + (f"Learnings so far:\n{learn}" if learn else "")
@@ -489,20 +511,34 @@ class DeepResearcher:
         queries = self._generate_queries(query, learnings, breadth)
         self._logmsg(f"deep depth={depth} queries={len(queries)} total={self._query_count}")
 
-        for item in queries:
-            if not self._budget_left():
-                break
+        def _one(item: dict[str, str]) -> tuple[dict[str, str], list[SourceHit], dict[str, Any]]:
             try:
                 hits = self._gather_hits(item["query"], self._config.per_query_limit)
             except Exception:  # noqa: BLE001
                 hits = []
-            visited.extend(h.url for h in hits)
-            if not hits:
-                continue
-            new_breadth = max(1, breadth // 2)
-            distilled = self._distill(
-                item["query"], hits, self._config.max_learnings, self._config.max_followups
+            distilled = (
+                self._distill(
+                    item["query"],
+                    hits,
+                    self._config.max_learnings,
+                    self._config.max_followups,
+                )
+                if hits
+                else {"learnings": [], "followUpQuestions": []}
             )
+            return item, hits, distilled
+
+        packed: list[tuple[dict[str, str], list[SourceHit], dict[str, Any]]] = []
+        if queries:
+            with ThreadPoolExecutor(max_workers=min(4, len(queries))) as pool:
+                for item, hits, distilled in pool.map(_one, queries):
+                    if not self._budget_left():
+                        break
+                    packed.append((item, hits, distilled))
+
+        new_breadth = max(1, breadth // 2)
+        for item, hits, distilled in packed:
+            visited.extend(h.url for h in hits)
             learnings = _dedupe(learnings + distilled["learnings"])
             if depth - 1 > 0 and distilled["followUpQuestions"]:
                 follow = (
@@ -513,6 +549,9 @@ class DeepResearcher:
                 learnings, visited = self.research(
                     follow, new_breadth, depth - 1, learnings, visited
                 )
+        if self._client is not None and learnings and depth <= 1:
+            if self._findings_enough(learnings):
+                self._logmsg("deep judge: enough implementable facts")
         return learnings, visited
 
     def _gather_hits(self, query: str, limit: int) -> list[SourceHit]:

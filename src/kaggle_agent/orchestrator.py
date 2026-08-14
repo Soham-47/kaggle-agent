@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
@@ -22,8 +23,11 @@ from kaggle_agent.research.browser import (
     FetchFn,
     merge_browser_into_research_md,
 )
+from kaggle_agent.research.agent import ResearchAgent
 from kaggle_agent.research.source_cards import (
     cards_feasible,
+    judge_cards_ready,
+    merge_digest,
     run_source_card_research,
     write_methods_sidecar,
 )
@@ -446,30 +450,121 @@ class Orchestrator:
         state.note = updated.note
 
     def _research(self, state: AgentState, result: CycleResult) -> AgentState:
-        # Retry source cards until PLAN/CODE can implement; fail-soft if still thin.
-        max_passes = self.settings.research_loop_passes
         workspace = self.root / self.competition.workspace_relative
         research_md = memory_dir(self.root) / "research.md"
-        for pass_i in range(1, max_passes + 1):
-            need_snapshot = pass_i == 1 or result.kaggle_ok is not True
-            if need_snapshot:
-                self._kaggle_snapshot(state, result)
-            if self.settings.browser_research_enabled and need_snapshot:
-                self._browser_research(result)
-            self._source_cards(result)
-            later_queries = 4 if pass_i > 1 else None
-            self._deep_research(result, max_queries=later_queries)
-            result.research_passes = pass_i
-            append_daily_log(f"research pass {pass_i}/{max_passes}", self.root)
-            if cards_feasible(workspace, research_md):
-                append_daily_log("research cards feasible", self.root)
-                break
+        self._kaggle_snapshot(state, result)
+        if self.settings.browser_research_enabled:
+            self._browser_research(result)
+        zen = self.router.client if self.router is not None else None
+        model = self.competition.model_for("distill", self.settings)
+        agent = ResearchAgent(
+            zen,
+            model,
+            self._research_tools(result),
+            self.settings.research_agent_config(),
+            log=lambda msg: append_daily_log(msg, self.root),
+            accept_done=lambda: cards_feasible(workspace, research_md),
+        )
+        pack = build_context_pack(self.root)
+        out = agent.run(pack.as_prompt_block(max_chars_per_section=1500) or self.competition.slug)
+        result.research_passes = max(1, out.turns)
+        append_daily_log(
+            f"research agent stop={out.stop_reason} turns={out.turns}",
+            self.root,
+        )
+        if cards_feasible(workspace, research_md):
+            append_daily_log("research cards feasible", self.root)
         else:
-            append_daily_log(
-                "research cards still thin; continuing",
-                self.root,
-            )
+            append_daily_log("research cards still thin; continuing", self.root)
         return state
+
+    def _research_tools(self, result: CycleResult) -> dict[str, Any]:
+        workspace = self.root / self.competition.workspace_relative
+        dest = memory_dir(self.root) / "research-deep"
+        cache = workspace / "research-cache"
+        our = str(load_state(self.root).public_best or "unknown")
+        zen = self.router.client if self.router is not None else None
+        model = self.competition.model_for("distill", self.settings)
+
+        def list_kernels(query: str = "", limit: int = 6, **_: Any) -> str:
+            if self._kaggle is None:
+                return "no kaggle client"
+            rows = self._kaggle.kernels(self.competition.slug, top=int(limit) + 2)
+            refs = [r.ref for r in rows if r.ref][: int(limit)]
+            if query:
+                refs = [r for r in refs if query.lower() in r.lower()]
+            return "\n".join(refs) or "none"
+
+        def pull_kernel(ref: str = "", **_: Any) -> str:
+            if self._kaggle is None or not ref:
+                return "missing ref"
+            src = KaggleSource(self._kaggle, self.competition.slug, cache)
+            from kaggle_agent.research.deep import SourceHit
+
+            hit = SourceHit(url=ref, title=ref, kind="kaggle")
+            return src.content(hit)[:12000]
+
+        def fetch_url(url: str = "", **_: Any) -> str:
+            if self._browser_fetch is not None:
+                return str(self._browser_fetch(url, 12000))[:12000]
+            from kaggle_agent.research.browser import fetch_via_http
+
+            return fetch_via_http(url, 12000)[:12000]
+
+        def search(query: str = "", kind: str = "web", limit: int = 5, **_: Any) -> str:
+            sources = {
+                "kaggle": (
+                    KaggleSource(self._kaggle, self.competition.slug, cache)
+                    if self._kaggle is not None
+                    else None
+                ),
+                "arxiv": ArxivSource(),
+                "github": GithubSource(),
+                "web": WebSource(),
+            }
+            src = sources.get(str(kind), sources["web"])
+            if src is None:
+                return "no source"
+            hits = src.search(str(query), int(limit))
+            return "\n".join(f"{h.kind}\t{h.url}\t{h.title}" for h in hits) or "none"
+
+        def write_card(ref: str = "", markdown: str = "", **_: Any) -> str:
+            dest.mkdir(parents=True, exist_ok=True)
+            slug = re.sub(r"[^a-z0-9]+", "-", (ref or "src").lower()).strip("-")[:60]
+            path = dest / f"source-{slug or 'src'}.md"
+            path.write_text(markdown or f"# {ref}\n- ref: {ref}\n", encoding="utf-8")
+            cards = sorted(dest.glob("source-*.md"))
+            merge_digest(cards, memory_dir(self.root) / "research.md", our)
+            write_methods_sidecar(cards, workspace)
+            result.deep_ok = True
+            result.deep_sources = max(result.deep_sources, len(cards))
+            return str(path)
+
+        def judge_cards(**_: Any) -> str:
+            cards = sorted(dest.glob("source-*.md")) if dest.is_dir() else []
+            ready, reason = judge_cards_ready(zen, model, cards, our)
+            feasible = cards_feasible(workspace, memory_dir(self.root) / "research.md")
+            return f"ready={ready} feasible={feasible} {reason}"
+
+        def harvest_cards(**_: Any) -> str:
+            self._source_cards(result)
+            cards = sorted(dest.glob("source-*.md")) if dest.is_dir() else []
+            return f"wrote {len(cards)} cards"
+
+        def deep_research(**_: Any) -> str:
+            self._deep_research(result)
+            return f"deep_ok={result.deep_ok} sources={result.deep_sources}"
+
+        return {
+            "list_kernels": list_kernels,
+            "pull_kernel": pull_kernel,
+            "fetch_url": fetch_url,
+            "search": search,
+            "write_card": write_card,
+            "judge_cards": judge_cards,
+            "harvest_cards": harvest_cards,
+            "deep_research": deep_research,
+        }
 
     def _kaggle_snapshot(self, state: AgentState, result: CycleResult) -> None:
         try:
@@ -519,19 +614,34 @@ class Orchestrator:
             result.browser_ok = False
             append_daily_log(f"browser research failed: {exc}", self.root)
 
+    def _cards_judged_ready(self) -> bool:
+        dest = memory_dir(self.root) / "research-deep"
+        cards = sorted(dest.glob("source-*.md")) if dest.is_dir() else []
+        zen = self.router.client if self.router is not None else None
+        model = self.competition.model_for("distill", self.settings)
+        our = str(load_state(self.root).public_best or "unknown")
+        ready, reason = judge_cards_ready(zen, model, cards, our)
+        append_daily_log(f"research judge ready={ready} {reason}", self.root)
+        return ready
+
     def _source_cards(self, result: CycleResult) -> None:
-        """One method card per top public kernel (in-process research workers)."""
+        """One Zen worker per kernel, discussion, and paper. New cards each pass."""
         if self._kaggle is None:
             return
         try:
             our = str(load_state(self.root).public_best or "unknown")
             cache = self.root / self.competition.workspace_relative / "research-cache"
+            zen = self.router.client if self.router is not None else None
+            model = self.competition.model_for("distill", self.settings)
             cards = run_source_card_research(
                 client=self._kaggle,
                 competition=self.competition.slug,
                 cache_dir=cache,
                 root=self.root,
                 our_score=our,
+                zen=zen,
+                model=model,
+                reset=True,
                 log=lambda msg: append_daily_log(msg, self.root),
             )
             if cards:

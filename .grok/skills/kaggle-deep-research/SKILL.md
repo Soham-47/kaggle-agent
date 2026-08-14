@@ -5,9 +5,9 @@ description: Parallel primary-source research for the active Kaggle contest. One
 
 # Kaggle deep research (one agent per source)
 
-The daily `DeepResearcher` lists kernel titles and often distills off-topic arXiv. PLAN only sees a cut of `research.md`. This skill (and the in-cycle `source_cards` workers) pull methods from named sources that CODE can ship.
+The daily cycle already runs this in RESEARCH. RESEARCH is an in-process agent: Zen picks tools (list/pull kernels, fetch, search, write_card, harvest_cards, judge_cards, done) until it calls done, hits the time budget, or hits max_tool_turns. harvest_cards still launches one Zen job per source.
 
-The daily orchestrator already runs this during RESEARCH. You do not wait for a separate command.
+You do not wait for a separate command.
 
 ## When to run
 
@@ -21,9 +21,10 @@ The daily orchestrator already runs this during RESEARCH. You do not wait for a 
 2. List top kernels via `KaggleClient.kernels(slug)` filtered to this contest. Skip host Efficiency LB notebooks (scoreboard, not a model).
 3. Add pinned discussion URLs from `memory/research.md` if present.
 4. Add at most two papers that the notebooks actually cite. Do not search raw arXiv for leaderboard names.
-5. Launch one worker per source in parallel. Cap at 8.
+5. Launch one Zen worker per source in parallel. Cap at 8. Delete old `source-*.md` first.
 6. Each worker writes one method card to `memory/research-deep/source-<slug>.md`.
-7. Merge a short "Must implement" list into `memory/research.md` under `## Deep research digest`. Prefer Kaggle notebook URLs first. Write `competitions/<id>/pipeline/methods.json` for CODE.
+7. Merge a short "Must implement" list into `memory/research.md` under `## Method cards`. Write `competitions/<id>/pipeline/methods.json` for CODE.
+8. The research agent calls judge_cards and done when cards look implementable. Hard stop is time plus `research.agent.max_tool_turns`.
 
 ## Method card template
 

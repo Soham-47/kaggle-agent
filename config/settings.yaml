@@ -46,8 +46,11 @@ browser_research:
   # fail-soft: cycle continues if browser scrape fails
 
 research:
-  # RESEARCH may retry source cards until methods.json is implementable
+  # RESEARCH is an LLM tool-loop (done / time / turn cap). loop_passes is unused.
   loop_passes: 3
+  agent:
+    max_minutes: 15
+    max_tool_turns: 40
   deep:
     # deep-research style stage: articles, papers, notebooks, repos, web
     enabled: true

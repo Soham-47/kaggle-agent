@@ -43,12 +43,19 @@ def _orch(
     settings.raw.setdefault("orchestrator", {})["phases"] = ["LOCK", "RESEARCH"]
     if loop_passes is not None:
         settings.raw.setdefault("research", {})["loop_passes"] = loop_passes
+    class _NoZen:
+        client = None
+
+        def available(self) -> bool:
+            return False
+
     return Orchestrator(
         settings,
         load_competition("rsna_knee", root),
         root=root,
         kaggle=kaggle,
         browser_fetch=lambda u, m=12000: "overview " * 20,
+        router=_NoZen(),
     )
 
 
@@ -86,7 +93,8 @@ def test_cards_feasible_needs_sidecar_step_and_section(tmp_path: Path):
     research.write_text("## Method cards\n", encoding="utf-8")
     assert cards_feasible(workspace, research) is False
     (workspace / "pipeline" / "methods.json").write_text(
-        '{"implement_steps": ["attach public weights"]}\n',
+        '{"implement_steps": ["attach public weights"], '
+        '"dataset_sources": ["owner/public-weights"]}\n',
         encoding="utf-8",
     )
     research.write_text("notes only; no method or digest heading\n", encoding="utf-8")
@@ -113,39 +121,35 @@ def test_one_kernel_one_pass_then_stop(tmp_path: Path, monkeypatch):
     )
 
 
-def test_missing_methods_json_attempts_second_pass(tmp_path: Path, monkeypatch):
+def test_missing_methods_json_harvest_then_done(tmp_path: Path, monkeypatch):
     _stub_deep(monkeypatch)
     calls = _count_source_cards(monkeypatch)
     root = _setup(tmp_path, drop_methods=True)
     result = _orch(
         root,
         KaggleClient(api=_EmptyKernelsApi()).connect(),
-        loop_passes=3,
     ).run_cycle(dry_run=True)
     assert not result.skipped
     assert not _methods_path(root).is_file()
-    assert calls["n"] >= 2
+    assert calls["n"] == 1
+    logs = "".join(
+        p.read_text(encoding="utf-8")
+        for p in (root / "memory" / "daily").glob("*.md")
+    )
+    assert "research agent stop=" in logs
+    assert "research cards still thin; continuing" in logs
 
 
-def test_pass_cap_respected(tmp_path: Path, monkeypatch):
+def test_snapshot_and_browser_once_then_agent(tmp_path: Path, monkeypatch):
     _stub_deep(monkeypatch)
-    cards = _count_source_cards(monkeypatch)
     snaps = _count_method(monkeypatch, "_kaggle_snapshot")
     browsers = _count_method(monkeypatch, "_browser_research")
     root = _setup(tmp_path, drop_methods=True)
     result = _orch(
         root,
         KaggleClient(api=_EmptyKernelsApi()).connect(),
-        loop_passes=2,
     ).run_cycle(dry_run=True)
     assert not result.skipped
     assert result.kaggle_ok is True
-    assert result.errors == []
-    assert cards["n"] == 2
     assert snaps["n"] == 1
     assert browsers["n"] == 1
-    logs = "".join(
-        p.read_text(encoding="utf-8")
-        for p in (root / "memory" / "daily").glob("*.md")
-    )
-    assert "research cards still thin; continuing" in logs
