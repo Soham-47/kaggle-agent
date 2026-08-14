@@ -116,6 +116,7 @@ def make_plan_agent(
     workspace: Path | None = None,
     log: Callable[[str], None] | None = None,
     on_plan: Callable[[str, str, str], None] | None = None,
+    tracer: Any | None = None,
 ) -> tuple[StageAgent, dict[str, str]]:
     tools, state = build_plan_tools(root, workspace, on_plan=on_plan)
     agent = StageAgent(
@@ -130,5 +131,6 @@ def make_plan_agent(
         no_zen_sequence=["write_plan"],
         name="plan",
         reject_msg="done rejected: write_plan first",
+        tracer=tracer,
     )
     return agent, state

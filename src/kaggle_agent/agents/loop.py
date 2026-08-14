@@ -30,7 +30,14 @@ def parse_tool_call(raw: str) -> tuple[str, dict[str, Any]]:
     try:
         parsed = json.loads(text)
     except json.JSONDecodeError:
-        return "invalid_json", {}
+        start, end = text.find("{"), text.rfind("}")
+        if start >= 0 and end > start:
+            try:
+                parsed = json.loads(text[start : end + 1])
+            except json.JSONDecodeError:
+                return "invalid_json", {}
+        else:
+            return "invalid_json", {}
     if not isinstance(parsed, dict):
         return "invalid_json", {}
     tool = str(parsed.get("tool") or "done").strip()
@@ -54,6 +61,7 @@ class StageAgent:
         no_zen_sequence: list[str] | None = None,
         name: str = "stage",
         reject_msg: str = "done rejected",
+        tracer: Any | None = None,
     ) -> None:
         self._zen = zen
         self._model = model
@@ -65,6 +73,7 @@ class StageAgent:
         self._no_zen_sequence = list(no_zen_sequence or [])
         self._name = name
         self._reject_msg = reject_msg
+        self._tracer = tracer
 
     def _logmsg(self, msg: str) -> None:
         if self._log is not None:
@@ -78,14 +87,18 @@ class StageAgent:
         while True:
             if time.monotonic() >= deadline:
                 self._logmsg(f"{self._name} agent stop: time")
+                self._trace("agent_stop", reason="time", turns=turns)
                 return StageAgentResult("time", turns, observations)
             if turns >= self._config.max_tool_turns:
                 self._logmsg(f"{self._name} agent stop: turn_cap")
+                self._trace("agent_stop", reason="turn_cap", turns=turns)
                 return StageAgentResult("turn_cap", turns, observations)
             tool, args = self._next_action(transcript)
+            self._trace("tool", tool=tool, turn=turns + 1, args_keys=sorted(args.keys()))
             if tool == "done":
                 if self._accept_done is None or self._accept_done():
                     self._logmsg(f"{self._name} agent stop: done {args}")
+                    self._trace("agent_stop", reason="done")
                     return StageAgentResult("done", turns, observations)
                 obs = self._reject_msg
                 turns += 1
@@ -128,4 +141,17 @@ class StageAgent:
             temperature=0.2,
             max_tokens=400,
         )
+        usage = getattr(self._zen, "last_usage", None) or {}
+        self._trace(
+            "llm",
+            model=self._model,
+            tokens_in=int(usage.get("tokens_in") or 0),
+            tokens_out=int(usage.get("tokens_out") or 0),
+            chars=len(raw or ""),
+        )
         return parse_tool_call(raw)
+
+    def _trace(self, kind: str, **fields: Any) -> None:
+        if self._tracer is None:
+            return
+        self._tracer.emit(kind, stage=self._name, **fields)

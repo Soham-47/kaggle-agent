@@ -9,7 +9,7 @@ This repo runs one Kaggle competition at a time. Set `default_competition` in `c
 | Download meta CSV, list kernels, submit, LB, limits | `kaggle_agent.kaggle_api.KaggleClient` + `~/.kaggle/kaggle.json` |
 | Discussions / HTML pages the API cannot give | browser-harness (research only; headed Chrome from `scripts/start_research_chrome.sh`) |
 | Deep research (notebooks, papers, repos, web) | `research/agent.py` tool loop; `source_cards.py` / `deep.py` as tools |
-| LLM plan / code brief / distill / vision | OpenCode Zen (`OPENCODE_API_KEY`) |
+| LLM plan / code brief / distill / vision | Official DeepSeek v4-flash (`DEEPSEEK_API_KEY`) |
 | Approve a real submit | Telegram `/yes` (when enabled) |
 
 Never submit via the browser. Never invent a second memory store.
@@ -45,4 +45,8 @@ uv run pytest
 uv run python scripts/run_daily.py --competition <id>
 # with Zen plan:
 OPENCODE_API_KEY=... uv run python scripts/run_daily.py
+# ops (Waku-style traces + evals + local dashboard)
+uv run kaggle-agent evals
+uv run kaggle-agent dashboard   # http://127.0.0.1:7777  (Run live or type /run)
+uv run kaggle-agent run         # same live cycle as /run
 ```

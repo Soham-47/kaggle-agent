@@ -67,6 +67,8 @@ from kaggle_agent.train.kernel_job import load_kernel_job
 from kaggle_agent.train.kernel_runner import run_kernel_phase
 from kaggle_agent.train.local_smoke import run_competition_smoke
 from kaggle_agent.train.notebook_builder import write_kernel_package
+from kaggle_agent.ops.evals import evaluate_cycle, persist_report
+from kaggle_agent.ops.tracing import Tracer
 
 DEFAULT_HYPOTHESIS = "dry-run default: schema-valid 0.5 baseline then improve"
 
@@ -159,6 +161,7 @@ class Orchestrator:
         self._mcp_submit_fn = mcp_submit_fn  # tests inject call_tool
         self._assume_approved = False
         self._loop_n_used = 0
+        self._tracer: Tracer | None = None
 
     def run_cycle(
         self, *, dry_run: bool | None = None, assume_approved: bool = False
@@ -215,6 +218,8 @@ class Orchestrator:
     ) -> AgentState:
         exp_id = now.strftime("%Y%m%d-%H%M%S") + ("-dry" if dry else "")
         result.experiment_id = exp_id
+        self._tracer = Tracer(self.root, cycle_id=exp_id)
+        self._tracer.emit("cycle_start", competition=self.competition.id, dry=dry)
         state.lock_held = True
         state.dry_run = dry
         state.competition = self.competition.id
@@ -251,6 +256,7 @@ class Orchestrator:
         else:
             msg = "end ok"
         append_daily_log(msg, self.root)
+        self._ops_close(result, state.last_result)
 
     def _finish_error(self, result: CycleResult, exc: Exception) -> None:
         result.errors.append(str(exc))
@@ -262,6 +268,15 @@ class Orchestrator:
         state.note = "error"
         save_state(state, self.root)
         append_daily_log(f"error: {exc}", self.root)
+        self._ops_close(result, "error")
+
+    def _ops_close(self, result: CycleResult, status: str) -> None:
+        if self._tracer is not None:
+            self._tracer.emit("cycle_end", status=status, errors=result.hard_errors[:5])
+        try:
+            persist_report(self.root, evaluate_cycle(self.root))
+        except Exception:  # noqa: BLE001
+            pass
 
     def _enabled_phases(self, phases: tuple[str, ...]) -> tuple[str, ...]:
         allowed = set(self.settings.phases)
@@ -278,6 +293,8 @@ class Orchestrator:
             state.phase = phase
             save_state(state, self.root)
             append_daily_log(phase, self.root)
+            if self._tracer is not None:
+                self._tracer.emit("phase", phase=phase)
             state = self._phase(phase, state=state, dry=dry, result=result)
         return state
 
@@ -450,6 +467,7 @@ class Orchestrator:
             self.settings.research_agent_config(),
             log=lambda msg: append_daily_log(msg, self.root),
             accept_done=lambda: cards_feasible(workspace, research_md),
+            tracer=self._tracer,
         )
         pack = build_context_pack(self.root)
         out = agent.run(pack.as_prompt_block(max_chars_per_section=1500) or self.competition.slug)
@@ -730,6 +748,7 @@ class Orchestrator:
             self.settings.code_agent_config(),
             plan_text=result.plan_text or "",
             log=lambda msg: append_daily_log(msg, self.root),
+            tracer=self._tracer,
         )
         pack = build_context_pack(self.root)
         out = agent.run(
@@ -936,6 +955,7 @@ class Orchestrator:
             workspace=workspace,
             log=lambda msg: append_daily_log(msg, self.root),
             on_plan=on_plan,
+            tracer=self._tracer,
         )
         out = agent.run(
             f"Competition: {self.competition.slug}\n\n{pack.as_prompt_block(max_chars_per_section=3000)}"

@@ -132,6 +132,7 @@ def make_code_agent(
     *,
     plan_text: str = "",
     log: Callable[[str], None] | None = None,
+    tracer: Any | None = None,
 ) -> StageAgent:
     tools, brief_path = build_code_tools(root, workspace, plan_text=plan_text)
     return StageAgent(
@@ -145,4 +146,5 @@ def make_code_agent(
         no_zen_sequence=["write_brief"],
         name="code",
         reject_msg="done rejected: write_brief first",
+        tracer=tracer,
     )

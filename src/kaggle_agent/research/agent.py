@@ -46,6 +46,7 @@ class ResearchAgent(StageAgent):
         *,
         log: LogFn | None = None,
         accept_done: Callable[[], bool] | None = None,
+        tracer: object | None = None,
     ) -> None:
         super().__init__(
             zen,
@@ -58,4 +59,5 @@ class ResearchAgent(StageAgent):
             no_zen_sequence=["harvest_cards", "deep_research"],
             name="research",
             reject_msg="done rejected: cards not ready",
+            tracer=tracer,
         )
