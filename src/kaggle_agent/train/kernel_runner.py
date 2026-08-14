@@ -81,21 +81,33 @@ def run_kernel_phase(
 
     try:
         push_resp = client.kernels_push(package.folder)
-        result.pushed = True
-        result.status = "pushed"
-        result.message = str(push_resp)[:300]
-        job = KernelJob(
-            kernel_ref=package.kernel_ref,
-            folder=str(package.folder),
-            status="pushed",
-            competition=competition,
-            exp_id=exp_id,
-        )
-        save_kernel_job(job, root)
     except Exception as exc:  # noqa: BLE001
-        result.ok = False
-        result.errors.append(f"push: {exc}")
-        return result
+        from kaggle_agent.heal.pins import apply_pin_heal, is_pin_error
+
+        if is_pin_error(str(exc)) and root is not None:
+            workspace = package.folder.parent.parent
+            apply_pin_heal(workspace, package.folder)
+            try:
+                push_resp = client.kernels_push(package.folder)
+            except Exception as exc2:  # noqa: BLE001
+                result.ok = False
+                result.errors.append(f"push: {exc2}")
+                return result
+        else:
+            result.ok = False
+            result.errors.append(f"push: {exc}")
+            return result
+    result.pushed = True
+    result.status = "pushed"
+    result.message = str(push_resp)[:300]
+    job = KernelJob(
+        kernel_ref=package.kernel_ref,
+        folder=str(package.folder),
+        status="pushed",
+        competition=competition,
+        exp_id=exp_id,
+    )
+    save_kernel_job(job, root)
 
     return _poll_and_maybe_pull(
         client,

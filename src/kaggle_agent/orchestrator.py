@@ -1274,8 +1274,24 @@ class Orchestrator:
             e.startswith(("code:", "smoke:", "kernel:", "validate:"))
             for e in result.errors
         )
-        if result.validate_ok and not result.submit_ok and not result.dry_run:
-            # Waiting on human approve is not a model failure
+        from kaggle_agent.heal.pins import apply_pin_heal, is_pin_error, should_wait_approve
+
+        pin_errs = [e for e in result.errors if is_pin_error(e)]
+        if pin_errs and result.kernel_path:
+            workspace = self.root / self.competition.workspace_relative
+            healed = apply_pin_heal(workspace, Path(result.kernel_path))
+            append_daily_log(
+                f"heal pin strip changed={healed.get('changed')} "
+                f"models={healed.get('model_sources')} datasets={healed.get('dataset_sources')}",
+                self.root,
+            )
+        if should_wait_approve(
+            validate_ok=result.validate_ok,
+            submit_ok=result.submit_ok,
+            dry_run=result.dry_run,
+            assume_approved=self._assume_approved,
+            errors=result.errors,
+        ):
             heal.decision_next = "wait_approve"
             heal.note = "submit blocked — need /approve"
             save_heal(heal, self.root)

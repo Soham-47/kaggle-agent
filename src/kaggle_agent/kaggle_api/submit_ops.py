@@ -66,7 +66,17 @@ def submit_notebook(
     try:
         push = api.kernels_push(str(kernel_folder))
     except Exception as exc:  # noqa: BLE001
-        raise RuntimeError(f"kernels_push failed: {http_detail(exc)}") from exc
+        from kaggle_agent.heal.pins import apply_pin_heal, is_pin_error
+
+        detail = http_detail(exc)
+        if is_pin_error(str(detail)) or is_pin_error(str(exc)):
+            apply_pin_heal(kernel_folder.parent.parent, kernel_folder)
+            try:
+                push = api.kernels_push(str(kernel_folder))
+            except Exception as exc2:  # noqa: BLE001
+                raise RuntimeError(f"kernels_push failed: {http_detail(exc2)}") from exc2
+        else:
+            raise RuntimeError(f"kernels_push failed: {detail}") from exc
 
     ref = normalize_kernel_ref(get_str(push, "ref", default=kernel_ref or ""))
     if not ref:

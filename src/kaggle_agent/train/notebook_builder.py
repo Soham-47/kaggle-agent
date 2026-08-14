@@ -192,9 +192,11 @@ def write_kernel_package(
     )
     nb_path.write_text(json.dumps(notebook, indent=1) + "\n", encoding="utf-8")
 
+    from kaggle_agent.heal.pins import sanitize_datasets, sanitize_models
+
     methods = _load_methods(root, competition)
-    datasets = [str(x) for x in (methods.get("dataset_sources") or []) if x][:6]
-    models = [str(x) for x in (methods.get("model_sources") or []) if x][:3]
+    datasets = sanitize_datasets([str(x) for x in (methods.get("dataset_sources") or []) if x])[:6]
+    models = sanitize_models([str(x) for x in (methods.get("model_sources") or []) if x])[:3]
 
     # Official template fields from kernels_initialize (kaggle API).
     # Source: KaggleApi.kernels_initialize / https://www.kaggle.com/docs/api
