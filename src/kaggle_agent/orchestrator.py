@@ -764,7 +764,10 @@ class Orchestrator:
                 f"The research judge said: {reason}. "
                 "Call read_cards, then write_card to improve the weakest card, "
                 "then judge_cards. Call done only after write_card succeeded "
-                "or the judge approves."
+                "or the judge approves. "
+                "Card body format (write_card rejects bodies missing these):\n"
+                "- copyable next step: <one implementable change>\n"
+                "- do not copy: <anti-patterns to avoid>\n"
             ),
             log=lambda msg: append_daily_log(msg, self.root),
             accept_done=lambda: judge_state["ready"] is True
