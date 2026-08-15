@@ -4,13 +4,16 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 
+from kaggle_agent.config import load_dotenv
 from kaggle_agent.orchestrator import run_daily
 from kaggle_agent.paths import repo_root
 
 
 def main(argv: list[str] | None = None) -> int:
+    load_dotenv(repo_root())
     argv = list(sys.argv[1:] if argv is None else argv)
     if argv and argv[0] == "dashboard":
         return _dashboard(argv[1:])
@@ -27,12 +30,23 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Treat this live cycle as already approved (Telegram /run).",
     )
+    p.add_argument(
+        "--skip",
+        default=None,
+        help="Comma-separated phases to skip, e.g. research,plan,code. "
+        "Also read from KAGGLE_AGENT_SKIP_PHASES.",
+    )
     args = p.parse_args(argv)
+    skip = args.skip or os.environ.get("KAGGLE_AGENT_SKIP_PHASES", "")
+    skip_phases = frozenset(
+        s.strip().upper() for s in skip.split(",") if s.strip()
+    )
 
     r = run_daily(
         args.competition,
         dry_run=args.dry_run,
         assume_approved=args.assume_approved,
+        skip_phases=skip_phases or None,
     )
     if r.skipped:
         print(f"skipped: {r.skip_reason}")

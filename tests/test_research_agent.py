@@ -107,7 +107,7 @@ def test_no_zen_harvests_once_then_done():
         ResearchAgentConfig(max_minutes=5, max_tool_turns=10),
     )
     out = agent.run("contest")
-    assert out.stop_reason == "done"
+    assert out.stop_reason == "no_llm"
     assert seen == ["harvest"]
     assert out.turns == 1
 
@@ -130,7 +130,7 @@ def test_no_zen_harvests_then_deep():
         ResearchAgentConfig(max_minutes=5, max_tool_turns=10),
     )
     out = agent.run("contest")
-    assert out.stop_reason == "done"
+    assert out.stop_reason == "no_llm"
     assert seen == ["harvest"]
 
 

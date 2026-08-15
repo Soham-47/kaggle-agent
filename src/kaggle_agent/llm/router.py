@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Any
 
 from kaggle_agent.config import CompetitionConfig, Settings
+from kaggle_agent.llm.fallback import build_llm_client
 from kaggle_agent.llm.zen_client import ZenClient
 
 
@@ -12,16 +14,14 @@ from kaggle_agent.llm.zen_client import ZenClient
 class ModelRouter:
     settings: Settings
     competition: CompetitionConfig
-    client: ZenClient | None
+    client: Any
 
     @classmethod
     def build(cls, settings: Settings, competition: CompetitionConfig) -> ModelRouter:
-        zen = settings.raw.get("zen", {})
-        base = str(zen.get("base_url", "https://opencode.ai/zen/v1"))
         return cls(
             settings=settings,
             competition=competition,
-            client=ZenClient.from_env(base_url=base),
+            client=build_llm_client(settings),
         )
 
     def model(self, role: str) -> str:
@@ -33,7 +33,7 @@ class ModelRouter:
 
     def _client(self) -> ZenClient:
         if self.client is None:
-            raise RuntimeError("OPENCODE_API_KEY not set")
+            raise RuntimeError("No LLM API key set (DEEPSEEK_API_KEY in .env)")
         return self.client
 
     def plan(self, system: str, user: str) -> str:

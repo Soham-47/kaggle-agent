@@ -46,6 +46,35 @@ def submit_file(api: Any, competition: str, path: Path, message: str) -> SubmitR
     )
 
 
+def _fix_metadata_owner(api: Any, kernel_folder: Path) -> None:
+    """Rewrite kernel-metadata.json id owner to the authenticated user.
+
+    A stale owner (e.g. "local-user") makes the API treat the re-push as a
+    new kernel and fail with 409 title conflict.
+    """
+    meta = kernel_folder / "kernel-metadata.json"
+    if not meta.is_file():
+        return
+    owner = getattr(api, "username", None) or ""
+    if not owner:
+        cfg = getattr(api, "config_values", None) or {}
+        owner = str(cfg.get("username") or "")
+    if not owner:
+        return
+    try:
+        import json
+
+        data = json.loads(meta.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return
+    k_id = str(data.get("id") or "")
+    if "/" not in k_id:
+        return
+    if k_id.split("/", 1)[0] != owner:
+        data["id"] = f"{owner}/{k_id.split('/', 1)[1]}"
+        meta.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+
+
 def submit_notebook(
     api: Any,
     *,
@@ -63,6 +92,7 @@ def submit_notebook(
         return SubmitResult(
             dry_run=False, message=f"kernel folder missing: {kernel_folder}", success=False
         )
+    _fix_metadata_owner(api, kernel_folder)
     try:
         push = api.kernels_push(str(kernel_folder))
     except Exception as exc:  # noqa: BLE001

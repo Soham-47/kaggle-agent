@@ -50,6 +50,9 @@ _NOT_A_DATASET_OWNER = {
     "output",
     "dataset",
     "model",
+    "dinov2",
+    "pytorch",
+    "transformers",
 }
 
 _JUNK_REFS = frozenset(
@@ -66,6 +69,15 @@ _CARD_SYSTEM = (
     "Use only facts in the source text. Never invent dataset slugs. "
     "A Kaggle model pin is owner/model-slug/framework/instance/version. "
     "Never write dataset/model as a path."
+)
+
+_CARD_JUDGE_SYSTEM = (
+    "You are the method-cards judge for one Kaggle experiment cycle. "
+    "Return JSON {\"ready\": bool, \"reason\": str}. "
+    "ready=false when the steps are generic (\"improve the model\"), "
+    "refs are fake dataset/model slugs, or inference IDs are missing. "
+    "ready=true when the cards give a coding agent concrete copyable steps "
+    "with real kernel/dataset refs."
 )
 
 
@@ -105,8 +117,15 @@ def _valid_attach_ref(ref: str) -> bool:
         return False
     if "competitions/" in ref:
         return False
-    owner = ref.split("/", 1)[0].lower()
-    return owner not in _NOT_A_DATASET_OWNER
+    parts = [p for p in ref.split("/") if p]
+    if not parts:
+        return False
+    owner = parts[0].lower()
+    if owner in _NOT_A_DATASET_OWNER:
+        return False
+    if len(parts) == 2 and parts[1].lower() in {"dinov2", "pytorch", "transformers", "model"}:
+        return False
+    return True
 
 
 def valid_model_pin(ref: str) -> bool:
@@ -122,6 +141,34 @@ def step_is_junk(step: str) -> bool:
     if re.search(r"attach datasets \['dataset/", low):
         return True
     return False
+
+
+_STOP_TOKENS = frozenset(
+    "a an the of for with and or in on to from at by is are was were be been it its "
+    "this that these those use using used new our we you your as per via vs do does "
+    "not no so but then then next then next".split()
+)
+
+
+def plan_tokens(text: str) -> set[str]:
+    words = re.findall(r"[a-z0-9][a-z0-9\-_/]*", (text or "").lower())
+    return {w for w in words if len(w) > 1 and w not in _STOP_TOKENS}
+
+
+_plan_tokens = plan_tokens  # legacy alias
+
+
+def steps_implemented(steps_text: str, methods: dict[str, Any]) -> bool:
+    """True when the plan steps are already covered by methods.json steps."""
+    plan_tokens = _plan_tokens(steps_text)
+    if not plan_tokens:
+        return False
+    impl_steps = [s for s in (methods.get("implement_steps") or []) if not step_is_junk(s)]
+    impl_tokens = _plan_tokens(" ".join(impl_steps))
+    if not impl_tokens:
+        return False
+    overlap = len(plan_tokens & impl_tokens)
+    return overlap >= 0.5 * len(plan_tokens) or plan_tokens <= impl_tokens
 
 
 def extract_infer_hints(text: str) -> list[str]:
@@ -286,13 +333,17 @@ def write_methods_sidecar(cards: list[Path], workspace: Path) -> Path:
             raw_step = step_m.group(1).strip()[:240]
             if not step_is_junk(raw_step):
                 steps.append(raw_step)
-    payload = {
-        "dataset_sources": datasets[:6],
-        "model_sources": models[:3],
-        "infer_hints": hints,
-        "implement_steps": steps[:6],
-        "n_cards": len(cards),
-    }
+    from kaggle_agent.heal.pins import sanitize_methods_payload
+
+    payload = sanitize_methods_payload(
+        {
+            "dataset_sources": datasets[:6],
+            "model_sources": models[:3],
+            "infer_hints": hints,
+            "implement_steps": steps[:6],
+            "n_cards": len(cards),
+        }
+    )
     out = workspace / "pipeline" / "methods.json"
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
@@ -368,7 +419,7 @@ def judge_cards_ready(
         return False, "no actionable step"
     if zen is None:
         return True, "deterministic"
-    joined = "\n\n".join(t[:2000] for t in texts[:8])
+    joined = "\n\n".join(t[:400] for t in texts[:2])
     user = (
         f"our_public_best={our_score}\n"
         "Are these method cards good enough for a coding agent to change a kernel "
@@ -378,7 +429,7 @@ def judge_cards_ready(
         f"{joined}"
     )
     try:
-        parsed = _json_completion(zen, model, _CARD_SYSTEM, user, max_tokens=400)
+        parsed = _json_completion(zen, model, _CARD_JUDGE_SYSTEM, user, max_tokens=400)
     except Exception:  # noqa: BLE001
         return True, "judge-fail-open"
     ready = bool(parsed.get("ready"))

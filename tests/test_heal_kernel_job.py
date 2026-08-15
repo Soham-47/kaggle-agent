@@ -8,7 +8,10 @@ from kaggle_agent.train.kernel_job import (
     load_kernel_job,
     save_kernel_job,
 )
-from kaggle_agent.train.kernel_runner import run_kernel_phase
+from kaggle_agent.train.kernel_runner import (
+    package_matches_existing,
+    run_kernel_phase,
+)
 from kaggle_agent.train.notebook_builder import write_kernel_package
 from kaggle_agent.config import load_competition
 from kaggle_agent.paths import repo_root
@@ -146,6 +149,68 @@ def test_kernel_retries_cpu_after_p100_ban(tmp_path: Path):
     assert meta2["enable_gpu"] is False
     pushes = [c for c in api.submit_calls if c and c[0] == "kernels_push"]
     assert len(pushes) == 2
+
+
+def test_kernel_job_enum_repr_status_is_done():
+    job = KernelJob(
+        kernel_ref="u/k",
+        folder="/tmp/x",
+        status="KernelWorkerStatus.COMPLETE",
+    )
+    assert job.is_active is False
+
+
+def test_kernel_job_plain_running_status_is_active():
+    job = KernelJob(
+        kernel_ref="u/k",
+        folder="/tmp/x",
+        status="running",
+    )
+    assert job.is_active is True
+
+
+def test_package_matches_existing_identical(tmp_path: Path):
+    import shutil
+
+    root = tmp_path / "ka"
+    real = repo_root()
+    shutil.copytree(real / "config", root / "config")
+    (root / "competitions" / "rsna_knee").mkdir(parents=True)
+    (root / "memory").mkdir()
+    if (real / "data").is_dir():
+        shutil.copytree(real / "data", root / "data")
+    comp = load_competition("rsna_knee", root)
+    pkg1 = write_kernel_package(comp, root=root, username="tester", exp_id="e1")
+    pkg2 = write_kernel_package(comp, root=root, username="tester", exp_id="e2")
+    job = KernelJob(
+        kernel_ref=pkg1.kernel_ref,
+        folder=str(pkg1.folder),
+        status="COMPLETE",
+    )
+    assert package_matches_existing(pkg2, job) is True
+
+
+def test_package_matches_existing_true_when_only_methods_change(tmp_path: Path):
+    import shutil
+
+    root = tmp_path / "ka"
+    real = repo_root()
+    shutil.copytree(real / "config", root / "config")
+    (root / "competitions" / "rsna_knee").mkdir(parents=True)
+    (root / "memory").mkdir()
+    if (real / "data").is_dir():
+        shutil.copytree(real / "data", root / "data")
+    comp = load_competition("rsna_knee", root)
+    pkg1 = write_kernel_package(comp, root=root, username="tester", exp_id="e1")
+    pkg2 = write_kernel_package(comp, root=root, username="tester", exp_id="e2")
+    (pkg1.folder / "methods.json").write_text('{"implement_steps": ["old step"]}')
+    (pkg2.folder / "methods.json").write_text('{"implement_steps": ["new step"]}')
+    job = KernelJob(
+        kernel_ref=pkg1.kernel_ref,
+        folder=str(pkg1.folder),
+        status="COMPLETE",
+    )
+    assert package_matches_existing(pkg2, job) is True
 
 
 def test_heal_persist(tmp_path: Path):

@@ -1,4 +1,4 @@
-"""Adaptive inner-loop count and persist memory/loop.md."""
+"""Adaptive inner-loop count, stored on memory/state.md."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 
 from kaggle_agent.paths import memory_dir
-from kaggle_agent.state_md import format_kv_markdown, parse_kv_markdown
+from kaggle_agent.state_md import load_state, parse_kv_markdown, save_state
 
 
 @dataclass
@@ -30,22 +30,31 @@ class LoopState:
         )
 
 
-def loop_path(root: Path | None = None) -> Path:
-    return memory_dir(root) / "loop.md"
-
-
 def load_loop(root: Path | None = None) -> LoopState:
-    path = loop_path(root)
-    if not path.is_file():
-        return LoopState()
-    return LoopState.from_dict(parse_kv_markdown(path.read_text(encoding="utf-8")))
+    st = load_state(root)
+    legacy = memory_dir(root) / "loop.md"
+    if legacy.is_file() and st.loop_last_score == "none" and st.loop_next_n == "3":
+        old = LoopState.from_dict(parse_kv_markdown(legacy.read_text(encoding="utf-8")))
+        save_loop(old, root)
+        legacy.unlink(missing_ok=True)
+        st = load_state(root)
+    return LoopState(
+        last_score=st.loop_last_score,
+        prev_score=st.loop_prev_score,
+        last_n=st.loop_last_n,
+        next_n=st.loop_next_n,
+        note=st.loop_note,
+    )
 
 
 def save_loop(state: LoopState, root: Path | None = None) -> Path:
-    path = loop_path(root)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(format_kv_markdown("loop", state.to_dict()), encoding="utf-8")
-    return path
+    st = load_state(root)
+    st.loop_last_score = state.last_score
+    st.loop_prev_score = state.prev_score
+    st.loop_last_n = state.last_n
+    st.loop_next_n = state.next_n
+    st.loop_note = state.note
+    return save_state(st, root)
 
 
 def next_loop_count(
@@ -63,6 +72,16 @@ def next_loop_count(
     denom = 1.0 + (gain / typical_gain if typical_gain > 0 else 0.0)
     n = round(n_min + (n_max - n_min) / denom)
     return int(min(n_max, max(n_min, n)))
+
+
+def score_is_better(new: object, old: object, direction: str = "max") -> bool:
+    n = parse_loop_score(new)
+    if n is None:
+        return False
+    o = parse_loop_score(old)
+    if o is None:
+        return True
+    return n < o if str(direction).lower() == "min" else n > o
 
 
 def parse_loop_score(raw: object) -> float | None:

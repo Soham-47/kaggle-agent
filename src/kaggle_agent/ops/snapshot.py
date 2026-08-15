@@ -75,8 +75,17 @@ STAGE_TOOLS = {
         "judge_cards",
         "done",
     ],
-    "plan": ["read_memory", "read_cards", "read_methods", "write_plan", "done"],
-    "code": ["read_cards", "read_plan", "write_brief", "write_methods", "done"],
+    "plan": ["read_memory", "read_cards", "read_methods", "retrieve", "write_plan", "done"],
+    "code": [
+        "read_cards",
+        "read_plan",
+        "retrieve",
+        "read_file",
+        "write_brief",
+        "write_methods",
+        "write_custom_infer",
+        "done",
+    ],
 }
 
 
@@ -120,7 +129,7 @@ def _card_summaries(root: Path) -> list[dict[str, str]]:
 
 
 def _memory_view(root: Path) -> dict[str, Any]:
-    pack = build_context_pack(root)
+    pack = build_context_pack(root, view="plan")
     sections = []
     for name, text in pack.sections.items():
         sections.append(
@@ -136,11 +145,12 @@ def _memory_view(root: Path) -> dict[str, Any]:
         "not_in_pack": list(NOT_IN_PACK),
         "missing": pack.missing,
         "sections": sections,
+        "view": pack.view,
         "notes": [
-            "PLAN/CODE only see the last 2 source cards by mtime.",
-            "StageAgent keeps the last 8 transcript turns.",
-            "heal.md and daily logs are never in the prompt pack.",
-            "CODE writes a brief then always runs apply_recipe (metadata-ranker).",
+            "Stage views: research / plan / code. retrieve is on-demand.",
+            "StageAgent pins turn-0 pack plus last 12 observations.",
+            "daily/ is never in the LLM pack. heal.md is PLAN-only.",
+            "CODE may splice CUSTOM_INFER; apply_recipe still fits the ranker floor.",
         ],
     }
 

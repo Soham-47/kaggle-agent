@@ -52,6 +52,11 @@ models:
   distill: null
   vision: null    # set a multimodal Zen model for screenshot / image research
 
+research:
+  # Parallel per-source research fleet (one StageAgent loop per source).
+  # A roster list enables the fleet; `true` uses the settings default roster.
+  fleet: [notebooks, papers, github, web, discussions, datasets]
+
 train:
   backend: kaggle_kernel
   local_smoke_only: true  # full DICOM train stays on Kaggle

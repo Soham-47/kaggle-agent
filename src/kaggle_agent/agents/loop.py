@@ -15,6 +15,18 @@ StageAgentConfig = ResearchAgentSettings
 LogFn = Callable[[str], None]
 ToolFn = Callable[..., str]
 
+WRITE_TOOLS = frozenset(
+    {
+        "harvest_cards",
+        "write_card",
+        "write_plan",
+        "write_methods",
+        "write_custom_infer",
+        "write_kernel_recipe",
+        "write_brief",
+    }
+)
+
 
 @dataclass
 class StageAgentResult:
@@ -66,6 +78,12 @@ class StageAgent:
         tracer: Any | None = None,
         max_invalid: int = 2,
         fallback_tool: str | None = None,
+        tool_schemas: dict[str, dict[str, Any]] | None = None,
+        stall_after: int | None = None,
+        stall_nudge: str = "",
+        stall_force: tuple[str, dict[str, Any]]
+        | Callable[[int], tuple[str, dict[str, Any]] | None]
+        | None = None,
     ) -> None:
         self._zen = zen
         self._model = model
@@ -82,6 +100,14 @@ class StageAgent:
         self._max_invalid = max(1, int(max_invalid))
         self._fallback_tool = fallback_tool
         self._invalid_streak = 0
+        self._tool_schemas = dict(tool_schemas or {})
+        self._stall_after = stall_after
+        self._stall_nudge = stall_nudge
+        self._stall_force = stall_force
+        self._stall_forced = False
+        self._stall_force_count = 0
+        self._last_force_turn = -(stall_after or 0)
+        self._nudges: list[str] = []
 
     def _logmsg(self, msg: str) -> None:
         if self._log is not None:
@@ -92,6 +118,7 @@ class StageAgent:
         transcript: list[str] = [context]
         observations: list[str] = []
         turns = 0
+        last_write_turn = 0
         while True:
             if time.monotonic() >= deadline:
                 self._logmsg(f"{self._name} agent stop: time")
@@ -101,6 +128,59 @@ class StageAgent:
                 self._logmsg(f"{self._name} agent stop: turn_cap")
                 self._trace("agent_stop", reason="turn_cap", turns=turns)
                 return StageAgentResult("turn_cap", turns, observations)
+            stalled = (
+                self._stall_after is not None
+                and turns - last_write_turn >= self._stall_after
+            )
+            if stalled:
+                if (
+                    self._stall_force is not None
+                    and not self._stall_forced
+                    and turns - self._last_force_turn >= self._stall_after + 2
+                ):
+                    self._stall_forced = True
+                    self._stall_force_count += 1
+                    self._last_force_turn = turns
+                    forced = self._force_for(self._stall_force_count)
+                    if forced is None:
+                        self._logmsg(f"{self._name} agent stop: stalled")
+                        self._trace("agent_stop", reason="stalled", turns=turns)
+                        return StageAgentResult("stalled", turns, observations)
+                    name, fargs = forced
+                    if name == "done":
+                        if self._accept_done is None or self._accept_done():
+                            self._logmsg(f"{self._name} agent stop: done (forced) {fargs}")
+                            self._trace("agent_stop", reason="done")
+                            return StageAgentResult("done", turns, observations)
+                        obs = self._reject_msg
+                    else:
+                        fn = self._tools.get(name)
+                        if fn is None:
+                            obs = f"unknown tool {name}"
+                        else:
+                            try:
+                                obs = str(fn(**fargs))
+                            except Exception as exc:  # noqa: BLE001
+                                obs = f"tool error: {exc}"
+                    turns += 1
+                    observations.append(obs[:4000])
+                    transcript.append(f"tool={name} args={fargs} result={obs[:2000]}")
+                    self._logmsg(f"{self._name} agent forced tool={name} turns={turns}")
+                    if name in WRITE_TOOLS:
+                        last_write_turn = turns
+                    self._stall_forced = False
+                    continue
+                self._logmsg(f"{self._name} agent nudge: stall turns={turns}")
+                nudge = (
+                    self._stall_nudge
+                    or f"Stall: you have read enough. Call a write tool or done now. "
+                    f"Tools used so far: {sorted(self._used_tools(transcript))}"
+                )
+                if nudge not in self._nudges:
+                    self._nudges.append(nudge)
+                transcript.append(f"nudge: {nudge}")
+                turns += 1
+                continue
             tool, args = self._next_action(transcript)
             self._trace("tool", tool=tool, turn=turns + 1, args_keys=sorted(args.keys()))
             if tool == "no_llm":
@@ -135,6 +215,18 @@ class StageAgent:
             observations.append(obs[:4000])
             transcript.append(f"tool={tool} args={args} result={obs[:2000]}")
             self._logmsg(f"{self._name} agent turn={turns} tool={tool}")
+            if obs.startswith(("rejected:", "tool error:")):
+                self._logmsg(f"{self._name} agent turn={turns} result={obs[:300]}")
+            if tool in WRITE_TOOLS:
+                last_write_turn = turns
+                self._stall_forced = False
+
+    def _force_for(
+        self, episode: int
+    ) -> tuple[str, dict[str, Any]] | None:
+        if callable(self._stall_force):
+            return self._stall_force(episode)
+        return self._stall_force
 
     def _used_tools(self, transcript: list[str]) -> set[str]:
         return {t.split(" ", 1)[0][5:] for t in transcript if t.startswith("tool=")}
@@ -149,21 +241,37 @@ class StageAgent:
     def _user_blob(self, transcript: list[str]) -> str:
         pack = transcript[0] if transcript else ""
         tail = [t for t in transcript[1:] if t.startswith("tool=")][-12:]
-        return "Context:\n" + pack + "\n\nTranscript:\n" + "\n---\n".join(tail)
+        head = ("\n".join(self._nudges) + "\n\n" if self._nudges else "")
+        return (
+            head
+            + "Context:\n"
+            + pack
+            + "\n\nTranscript:\n"
+            + "\n---\n".join(tail)
+        )
 
     def _schemas(self) -> list[dict[str, Any]]:
         names = list(self._tools) + (["done"] if "done" not in self._tools else [])
-        return [
-            {
-                "type": "function",
-                "function": {
-                    "name": name,
-                    "description": name,
-                    "parameters": {"type": "object", "additionalProperties": True},
-                },
+        out: list[dict[str, Any]] = []
+        for name in names:
+            spec = self._tool_schemas.get(name) or {}
+            fn: dict[str, Any] = {
+                "name": name,
+                "description": spec.get("description") or name,
             }
-            for name in names
-        ]
+            props = spec.get("properties") or {}
+            if props:
+                fn["parameters"] = {
+                    "type": "object",
+                    "properties": props,
+                    "additionalProperties": False,
+                }
+                if spec.get("required"):
+                    fn["parameters"]["required"] = list(spec["required"])
+            else:
+                fn["parameters"] = {"type": "object", "additionalProperties": True}
+            out.append({"type": "function", "function": fn})
+        return out
 
     def _reset_invalid_streak(self) -> None:
         self._invalid_streak = 0
@@ -181,8 +289,7 @@ class StageAgent:
             return "no_llm", {}
         if self._zen is None or not hasattr(self._zen, "chat"):
             return "no_llm", {}
-        writes = {"harvest_cards", "write_card", "write_plan", "write_methods", "write_custom_infer"}
-        choice = "auto" if used & writes else "required"
+        choice = "auto" if used & WRITE_TOOLS else "required"
         raw = self._zen.chat(
             self._model,
             [
@@ -194,7 +301,7 @@ class StageAgent:
                 },
             ],
             temperature=0.2,
-            max_tokens=2048,
+            max_tokens=getattr(self._config, "max_tokens", 2048),
             tools=self._schemas(),
             tool_choice=choice,
         )
@@ -225,7 +332,7 @@ class StageAgent:
                 },
             ],
             temperature=0.0,
-            max_tokens=2048,
+            max_tokens=getattr(self._config, "max_tokens", 2048),
             tools=self._schemas(),
             tool_choice=choice,
         )

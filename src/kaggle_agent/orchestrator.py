@@ -12,6 +12,13 @@ from typing import Any
 from kaggle_agent.code.workspace import ensure_pipeline_ready
 from kaggle_agent.config import CompetitionConfig, Settings, load_competition, load_settings
 from kaggle_agent.kaggle_api import KaggleClient
+from kaggle_agent.judge import (
+    judge_kernel,
+    judge_plan,
+    judge_train_llm,
+    new_judge_state,
+    record_verdict,
+)
 from kaggle_agent.llm.router import ModelRouter
 from kaggle_agent.memory.ingest import build_context_pack
 from kaggle_agent.memory.write import (
@@ -47,6 +54,7 @@ from kaggle_agent.research.source_cards import (
     _PULL_LOCK,
     cards_feasible,
     judge_cards_ready,
+    load_methods,
     merge_digest,
     run_source_card_research,
     write_methods_sidecar,
@@ -122,6 +130,7 @@ class CycleResult:
     kernel_ok: bool | None = None
     kernel_ref: str | None = None
     kernel_path: str | None = None
+    kernel_judge_ok: bool | None = None
     validate_ok: bool | None = None
     candidate_csv: str | None = None
     approve_ok: bool | None = None
@@ -152,17 +161,6 @@ def _parse_plan_lines(text: str) -> tuple[str, str]:
         elif low.startswith("approach:"):
             approach = line.split(":", 1)[1].strip()
     return hypothesis, approach
-
-
-def _record_verdict(judge_state: dict[str, Any], ready: bool, reason: str) -> None:
-    """Track judge verdicts; the streak counts consecutive identical verdicts."""
-    verdict = (bool(ready), reason)
-    judge_state["streak"] = (
-        judge_state["streak"] + 1 if verdict == judge_state.get("last_verdict") else 1
-    )
-    judge_state["last_verdict"] = verdict
-    judge_state["ready"] = bool(ready)
-    judge_state["last_reason"] = reason
 
 
 def _first_existing(*paths: Path) -> Path | None:
@@ -216,6 +214,8 @@ class Orchestrator:
         lock = RunLock(self.root)
         if not lock.acquire():
             return self._skip(result, "lock_held", now)
+        if lock.took_over:
+            append_daily_log("run lock stale; taken over", self.root)
 
         try:
             state = self._begin(state, dry, now, result)
@@ -513,12 +513,12 @@ class Orchestrator:
         deep_ran = {"n": 0}
         dest = memory_dir(self.root) / "research-deep"
         our = str(load_state(self.root).public_best or "unknown")
-        judge_state: dict[str, Any] = {"ready": None, "streak": 0, "last_reason": ""}
+        judge_state = new_judge_state()
 
         def _judge_now() -> None:
             cards = sorted(dest.glob("source-*.md")) if dest.is_dir() else []
             ready, reason = judge_cards_ready(zen, model, cards, our)
-            _record_verdict(judge_state, ready, reason)
+            record_verdict(judge_state, ready, reason)
 
         def _research_done() -> bool:
             if not cards_feasible(workspace, research_md):
@@ -722,7 +722,7 @@ class Orchestrator:
         zen = self.router.client if self.router is not None else None
         model = self.competition.model_for("distill", self.settings)
         cfg = self.settings.research_fleet_config()
-        judge_state: dict[str, Any] = {"ready": None, "streak": 0, "last_reason": ""}
+        judge_state = new_judge_state()
         wrote = {"n": 0}
         base_write = make_write_card(dest, "polish")
 
@@ -741,7 +741,7 @@ class Orchestrator:
         def judge_cards(**_: Any) -> str:
             cards = sorted(dest.glob("source-*.md")) if dest.is_dir() else []
             ready, r = judge_cards_ready(zen, model, cards, our)
-            _record_verdict(judge_state, ready, r)
+            record_verdict(judge_state, ready, r)
             feasible = cards_feasible(workspace, research_md)
             return f"ready={ready} feasible={feasible} {r}"
 
@@ -888,7 +888,7 @@ class Orchestrator:
             cards = sorted(dest.glob("source-*.md")) if dest.is_dir() else []
             ready, reason = judge_cards_ready(zen, model, cards, our)
             if judge_state is not None:
-                _record_verdict(judge_state, ready, reason)
+                record_verdict(judge_state, ready, reason)
             feasible = cards_feasible(workspace, memory_dir(self.root) / "research.md")
             return f"ready={ready} feasible={feasible} {reason}"
 
@@ -1131,7 +1131,11 @@ class Orchestrator:
                 source="written" if result.wrote_custom_infer else "identity",
                 recipe="written" if result.wrote_recipe else "static",
             )
-        append_daily_log(f"code agent stop={out.stop_reason} turns={out.turns}", self.root)
+        append_daily_log(
+            f"code agent stop={out.stop_reason} turns={out.turns} "
+            f"wrote_recipe={result.wrote_recipe} wrote_custom_infer={result.wrote_custom_infer}",
+            self.root,
+        )
         try:
             import sys
 
@@ -1323,6 +1327,51 @@ class Orchestrator:
         else:
             result.errors.extend(f"validate:{e}" for e in check.errors[:5])
             append_daily_log(f"validate failed: {check.errors[:3]}", self.root)
+
+        kernel_judge = new_judge_state()
+        kernel_csv = (
+            Path(result.kernel_path) / "output" / "submission.csv"
+            if result.kernel_path
+            else None
+        )
+        if kernel_csv is not None and kernel_csv.is_file():
+            job = load_kernel_job(self.root)
+
+            def judge_log(msg: str) -> None:
+                append_daily_log(msg, self.root)
+
+            ready, _reason = judge_kernel(job.status, check, state=kernel_judge, log=judge_log)
+            result.kernel_judge_ok = ready
+            if ready and self.settings.judge_train:
+                zen = self.router.client if self.router is not None else None
+                if zen is not None:
+                    ready, _reason = judge_train_llm(
+                        zen,
+                        self.competition.model_for("train", self.settings),
+                        job.status,
+                        path,
+                        self.competition.labels,
+                        str(load_state(self.root).public_best or "unknown"),
+                        state=kernel_judge,
+                        log=judge_log,
+                    )
+                    result.kernel_judge_ok = ready
+            if kernel_judge.get("last_reason"):
+                patch_experiment(
+                    result.experiment_id or "unknown",
+                    judge=f"kernel {kernel_judge['ready']}: {kernel_judge['last_reason']}",
+                    root=self.root,
+                )
+        elif self.settings.judge_train:
+            append_daily_log("judge train skipped: no kernel output", self.root)
+        elif kernel_csv is None:
+            append_daily_log("judge kernel skipped: no kernel path", self.root)
+        else:
+            job = load_kernel_job(self.root)
+            append_daily_log(
+                f"judge kernel skipped: no kernel output (status={job.status})",
+                self.root,
+            )
         return state
 
     def _plan(self, state: AgentState, dry: bool, result: CycleResult) -> None:
@@ -1337,6 +1386,23 @@ class Orchestrator:
             hypothesis, approach = h, a
             result.plan_text = write_plan_text(h, a, steps)
 
+        judge_state = new_judge_state()
+
+        def plan_judge(h: str, a: str, steps: str) -> tuple[bool, str]:
+            try:
+                methods = load_methods(workspace)
+            except Exception:  # noqa: BLE001
+                methods = {}
+            return judge_plan(
+                zen,
+                model,
+                write_plan_text(h, a, steps),
+                methods,
+                str(state.public_best or "unknown"),
+                state=judge_state,
+                log=lambda msg: append_daily_log(msg, self.root),
+            )
+
         agent, _state = make_plan_agent(
             zen,
             model,
@@ -1345,6 +1411,7 @@ class Orchestrator:
             workspace=workspace,
             log=lambda msg: append_daily_log(msg, self.root),
             on_plan=on_plan,
+            judge=plan_judge,
             tracer=self._tracer,
         )
         out = agent.run(
@@ -1352,8 +1419,6 @@ class Orchestrator:
         )
         append_daily_log(f"plan agent stop={out.stop_reason} turns={out.turns}", self.root)
         if result.plan_text is None:
-            from kaggle_agent.research.source_cards import load_methods
-
             methods = load_methods(workspace)
             steps = [
                 s
@@ -1376,6 +1441,12 @@ class Orchestrator:
             notes=notes + ("; dry_run" if dry else ""),
             root=self.root,
         )
+        if judge_state.get("last_reason"):
+            patch_experiment(
+                result.experiment_id or "unknown",
+                judge=f"plan {judge_state['ready']}: {judge_state['last_reason']}",
+                root=self.root,
+            )
 
     def _tg(self) -> SupportsTelegram | None:
         if self._telegram is not None:

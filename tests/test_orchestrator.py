@@ -91,3 +91,240 @@ def test_dropped_submit_phase_is_skipped(tmp_path: Path):
     assert result.phases_run.index("RESEARCH") < result.phases_run.index("PLAN")
     assert "VALIDATE_SUB" in result.phases_run
     assert "REPORT" in result.phases_run
+
+
+def _judge_orch(root: Path, zen=None):  # noqa: ANN001
+    from kaggle_agent.config import load_competition, load_settings
+    from kaggle_agent.orchestrator import Orchestrator
+
+    settings = load_settings(root)
+    comp = load_competition("rsna_knee", root)
+
+    class _Router:
+        def __init__(self, client) -> None:  # noqa: ANN001
+            self.client = client
+
+    return Orchestrator(settings, comp, root=root, router=_Router(zen))
+
+
+def _write_kernel_output(root: Path, comp, exp_id: str) -> Path:  # noqa: ANN001
+    kernel_dir = root / "competitions" / "rsna_knee" / "notebooks" / exp_id
+    (kernel_dir / "output").mkdir(parents=True)
+    header = ",".join([comp.id_column, *comp.labels])
+    (kernel_dir / "output" / "submission.csv").write_text(
+        header + "\ns1," + ",".join(["0.5"] * len(comp.labels)) + "\n",
+        encoding="utf-8",
+    )
+    return kernel_dir
+
+
+def _write_exp(root: Path, exp_id: str) -> None:
+    (root / "memory" / "experiments" / f"{exp_id}.md").write_text(
+        f"# {exp_id}\n\n- hypothesis: h\n- approach: tune\n- notes: none\n",
+        encoding="utf-8",
+    )
+
+
+def _daily_text(root: Path) -> str:
+    return "\n".join(
+        p.read_text(encoding="utf-8") for p in (root / "memory" / "daily").glob("*.md")
+    )
+
+
+def test_validate_sub_kernel_judge_patches_experiment(tmp_path: Path):
+    from kaggle_agent.config import load_competition
+    from kaggle_agent.orchestrator import CycleResult
+
+    root = tmp_path / "kaggle-agent"
+    real = Path(__file__).resolve().parents[1]
+    _copy_min(root, real)
+    comp = load_competition("rsna_knee", root)
+    orch = _judge_orch(root)
+    exp_id = "20260815-000000"
+    kernel_dir = _write_kernel_output(root, comp, exp_id)
+    _write_exp(root, exp_id)
+    from kaggle_agent.state_md import format_kv_markdown
+
+    (root / "memory" / "kernel_job.md").write_text(
+        format_kv_markdown(
+            "kernel job",
+            {"kernel_ref": "k", "folder": str(kernel_dir), "status": "success"},
+        ),
+        encoding="utf-8",
+    )
+    result = CycleResult(
+        competition="rsna_knee", dry_run=True, kernel_path=str(kernel_dir), experiment_id=exp_id
+    )
+    orch._validate_sub(AgentState(), result)
+    assert result.validate_ok is True
+    assert result.kernel_judge_ok is True
+    assert "judge kernel ready=True" in _daily_text(root)
+    exp_text = (root / "memory" / "experiments" / f"{exp_id}.md").read_text(encoding="utf-8")
+    assert "- judge: kernel True: " in exp_text
+
+
+def test_validate_sub_kernel_judge_rejects_failed_job(tmp_path: Path):
+    from kaggle_agent.config import load_competition
+    from kaggle_agent.orchestrator import CycleResult
+    from kaggle_agent.state_md import format_kv_markdown
+
+    root = tmp_path / "kaggle-agent"
+    real = Path(__file__).resolve().parents[1]
+    _copy_min(root, real)
+    comp = load_competition("rsna_knee", root)
+    orch = _judge_orch(root)
+    exp_id = "20260815-000001"
+    kernel_dir = _write_kernel_output(root, comp, exp_id)
+    _write_exp(root, exp_id)
+    (root / "memory" / "kernel_job.md").write_text(
+        format_kv_markdown(
+            "kernel job",
+            {"kernel_ref": "k", "folder": str(kernel_dir), "status": "error"},
+        ),
+        encoding="utf-8",
+    )
+    result = CycleResult(
+        competition="rsna_knee", dry_run=True, kernel_path=str(kernel_dir), experiment_id=exp_id
+    )
+    orch._validate_sub(AgentState(), result)
+    assert result.validate_ok is True
+    assert result.kernel_judge_ok is False
+    assert "judge kernel ready=False" in _daily_text(root)
+    exp_text = (root / "memory" / "experiments" / f"{exp_id}.md").read_text(encoding="utf-8")
+    assert "- judge: kernel False: " in exp_text
+
+
+def test_validate_sub_train_judge_flag_runs_llm(tmp_path: Path):
+    import json
+
+    from kaggle_agent.config import load_competition
+    from kaggle_agent.orchestrator import CycleResult
+    from kaggle_agent.state_md import format_kv_markdown
+
+    root = tmp_path / "kaggle-agent"
+    real = Path(__file__).resolve().parents[1]
+    _copy_min(root, real)
+    comp = load_competition("rsna_knee", root)
+
+    class _ScriptedZen:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def chat(self, model, messages, **kwargs):  # noqa: ANN001
+            self.calls += 1
+            return json.dumps({"ready": True, "reason": "outputs plausible"})
+
+    zen = _ScriptedZen()
+    orch = _judge_orch(root, zen)
+    orch.settings.raw["judges"] = {"train": True}
+    exp_id = "20260815-000002"
+    kernel_dir = _write_kernel_output(root, comp, exp_id)
+    _write_exp(root, exp_id)
+    (root / "memory" / "kernel_job.md").write_text(
+        format_kv_markdown(
+            "kernel job",
+            {"kernel_ref": "k", "folder": str(kernel_dir), "status": "success"},
+        ),
+        encoding="utf-8",
+    )
+    result = CycleResult(
+        competition="rsna_knee", dry_run=True, kernel_path=str(kernel_dir), experiment_id=exp_id
+    )
+    orch._validate_sub(AgentState(), result)
+    assert result.kernel_judge_ok is True
+    assert zen.calls == 1
+    assert "judge train ready=True" in _daily_text(root)
+
+
+def test_validate_sub_kernel_judge_skipped_without_kernel_output(tmp_path: Path):
+    from kaggle_agent.orchestrator import CycleResult
+
+    root = tmp_path / "kaggle-agent"
+    real = Path(__file__).resolve().parents[1]
+    _copy_min(root, real)
+    orch = _judge_orch(root)
+    exp_id = "20260815-000004"
+    kernel_dir = root / "competitions" / "rsna_knee" / "notebooks" / exp_id
+    (kernel_dir / "output").mkdir(parents=True)
+    _write_exp(root, exp_id)
+    result = CycleResult(
+        competition="rsna_knee", dry_run=True, kernel_path=str(kernel_dir), experiment_id=exp_id
+    )
+    orch._validate_sub(AgentState(), result)
+    assert result.validate_ok is False
+    assert result.kernel_judge_ok is None
+    assert "judge kernel" not in _daily_text(root)
+    exp_text = (root / "memory" / "experiments" / f"{exp_id}.md").read_text(encoding="utf-8")
+    assert "judge" not in exp_text
+
+
+def test_validate_sub_logs_kernel_judge_skip_with_smoke_only(tmp_path: Path):
+    from kaggle_agent.config import load_competition
+    from kaggle_agent.orchestrator import CycleResult
+
+    root = tmp_path / "kaggle-agent"
+    real = Path(__file__).resolve().parents[1]
+    _copy_min(root, real)
+    orch = _judge_orch(root)
+    comp = load_competition("rsna_knee", root)
+    exp_id = "20260815-000005"
+    kernel_dir = root / "competitions" / "rsna_knee" / "notebooks" / exp_id
+    (kernel_dir / "output").mkdir(parents=True)
+    _write_exp(root, exp_id)
+    smoke_dir = root / "competitions" / "rsna_knee" / "submissions"
+    smoke_dir.mkdir(parents=True, exist_ok=True)
+    header = ",".join([comp.id_column, *comp.labels])
+    (smoke_dir / f"{exp_id}_smoke.csv").write_text(
+        header
+        + "\ns1,"
+        + ",".join(["0.5"] * len(comp.labels))
+        + "\ns2,"
+        + ",".join(["0.5"] * len(comp.labels))
+        + "\n",
+        encoding="utf-8",
+    )
+    result = CycleResult(
+        competition="rsna_knee", dry_run=True, kernel_path=str(kernel_dir), experiment_id=exp_id
+    )
+    orch._validate_sub(AgentState(), result)
+    assert result.validate_ok is True
+    assert result.kernel_judge_ok is None
+    assert "judge kernel skipped: no kernel output" in _daily_text(root)
+    exp_text = (root / "memory" / "experiments" / f"{exp_id}.md").read_text(encoding="utf-8")
+    assert "judge" not in exp_text
+
+
+def test_plan_judge_verdict_patched_to_experiment(tmp_path: Path):
+    import json
+
+    from kaggle_agent.orchestrator import CycleResult
+
+    root = tmp_path / "kaggle-agent"
+    real = Path(__file__).resolve().parents[1]
+    _copy_min(root, real)
+
+    class _ScriptedZen:
+        def __init__(self) -> None:
+            self.replies = [
+                {
+                    "tool": "write_plan",
+                    "args": {
+                        "hypothesis": "grouped cv",
+                        "approach": "tune",
+                        "steps": "grouped 5-fold CV over study IDs",
+                    },
+                },
+                {"ready": True, "reason": "novel"},
+                {"tool": "done", "args": {}},
+            ]
+
+        def chat(self, model, messages, **kwargs):  # noqa: ANN001
+            return json.dumps(self.replies.pop(0))
+
+    orch = _judge_orch(root, _ScriptedZen())
+    exp_id = "20260815-000003"
+    result = CycleResult(competition="rsna_knee", dry_run=True, experiment_id=exp_id)
+    orch._plan(AgentState(), dry=True, result=result)
+    exp_text = (root / "memory" / "experiments" / f"{exp_id}.md").read_text(encoding="utf-8")
+    assert "- judge: plan True: novel" in exp_text
+    assert result.plan_text and "grouped 5-fold CV" in result.plan_text

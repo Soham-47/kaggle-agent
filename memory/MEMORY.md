@@ -5,7 +5,7 @@ Durable facts only. Keep short. Contest-specific numbers live under Active conte
 ## User
 
 - Decision maker: Soham. Implement only approved slices unless autonomy is on for a run.
-- LLM: OpenCode Zen (`OPENCODE_API_KEY`). Models: text + multimodal when the contest needs images.
+- LLM: DeepSeek official only (`DEEPSEEK_API_KEY`, base_url https://api.deepseek.com). The router never uses `OPENCODE_API_KEY` / Zen. Models: text + multimodal when the contest needs images.
 - Train: Kaggle Kernels. Local = smoke only.
 - Submit: Kaggle API. For notebooks-only contests use `kernels_push` + `competition_submit_code`. Keep `submit.mcp: false` unless you own a COMPLETE kernel the MCP can attach. Never browser-submit.
 - Real submit requires `memory/pending_submit.md` status=approved (`/yes` or `/approve <exp_id>`). Dry-run never spends quota.

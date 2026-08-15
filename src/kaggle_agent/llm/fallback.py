@@ -122,106 +122,14 @@ def _role_models(block: dict[str, Any]) -> dict[str, str]:
 
 
 def build_llm_client(settings: Any) -> FallbackClient | ZenClient | None:
+    """DeepSeek official only. Other providers stay in tests via explicit specs."""
     raw = getattr(settings, "raw", {}) or {}
-    provider = str((raw.get("llm") or {}).get("provider") or "auto").lower()
-    nvidia = raw.get("nvidia") or {}
-    zen = raw.get("zen") or {}
-    hetz = raw.get("hetznez") or {}
-    arouter = raw.get("agentrouter") or {}
     dseek = raw.get("deepseek") or {}
-    specs: list[ProviderSpec] = []
-    zen_only = provider == "zen"
-    deepseek_only = provider == "deepseek"
-
     ds_key = os.environ.get("DEEPSEEK_API_KEY", "").strip()
-    if deepseek_only:
-        if not ds_key:
-            return None
-        return ZenClient(
-            api_key=ds_key,
-            base_url=str(dseek.get("base_url", "https://api.deepseek.com")),
-            timeout_s=float(dseek.get("timeout_s", 180)),
-        )
-    if ds_key and not zen_only:
-        specs.append(
-            ProviderSpec(
-                "deepseek",
-                ZenClient(
-                    api_key=ds_key,
-                    base_url=str(dseek.get("base_url", "https://api.deepseek.com")),
-                    timeout_s=float(dseek.get("timeout_s", 180)),
-                ),
-                _role_models(dseek) or {"*": "deepseek-v4-flash"},
-            )
-        )
-
-    ar_key = os.environ.get("AGENTROUTER_API_KEY", "").strip()
-    if ar_key and not zen_only:
-        specs.append(
-            ProviderSpec(
-                "agentrouter",
-                ZenClient(
-                    api_key=ar_key,
-                    base_url=str(
-                        arouter.get("base_url", "https://agentrouter.org/v1")
-                    ),
-                    timeout_s=float(arouter.get("timeout_s", 90)),
-                ),
-                _role_models(arouter),
-            )
-        )
-
-    nv_key = os.environ.get("NVIDIA_API_KEY", "").strip()
-    zen_key = os.environ.get("OPENCODE_API_KEY", "").strip()
-    if zen_key and not deepseek_only:
-        zen_client = ZenClient(
-            api_key=zen_key,
-            base_url=str(zen.get("base_url", "https://opencode.ai/zen/v1")),
-            timeout_s=float(zen.get("timeout_s", 90)),
-        )
-        free = zen.get("free_models") or []
-        if zen_only and free:
-            for mid in free:
-                mid_s = str(mid).strip()
-                if not mid_s:
-                    continue
-                specs.append(ProviderSpec(f"zen:{mid_s}", zen_client, {"*": mid_s}))
-        else:
-            specs.append(ProviderSpec("zen", zen_client, _role_models(zen)))
-
-    if nv_key and not zen_only:
-        specs.append(
-            ProviderSpec(
-                "nvidia",
-                ZenClient(
-                    api_key=nv_key,
-                    base_url=str(nvidia.get("base_url", "https://integrate.api.nvidia.com/v1")),
-                    timeout_s=float(nvidia.get("timeout_s", 90)),
-                ),
-                _role_models(nvidia),
-            )
-        )
-
-    hz_key = os.environ.get("HETZNEZ_API_KEY", "").strip()
-    hz_url = (
-        os.environ.get("HETZNEZ_BASE_URL", "").strip()
-        or str(hetz.get("base_url") or "").strip()
-    )
-    if hz_key and hz_url and not zen_only:
-        specs.append(
-            ProviderSpec(
-                "hetznez",
-                ZenClient(
-                    api_key=hz_key,
-                    base_url=hz_url.rstrip("/"),
-                    timeout_s=float(hetz.get("timeout_s", 90)),
-                ),
-                _role_models(hetz),
-            )
-        )
-
-    if not specs:
+    if not ds_key:
         return None
-    if len(specs) == 1:
-        return specs[0].client
-    return FallbackClient(specs)
+    return ZenClient(
+        api_key=ds_key,
+        base_url=str(dseek.get("base_url", "https://api.deepseek.com")),
+        timeout_s=float(dseek.get("timeout_s", 180)),
+    )

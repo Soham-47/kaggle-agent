@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from kaggle_agent.agents.code import extract_recipe_string
 from kaggle_agent.memory.ingest import build_context_pack
 from kaggle_agent.ops.log_parse import parse_daily_log
 from kaggle_agent.ops.tracing import day_trace_path, read_jsonl
@@ -17,6 +18,8 @@ from kaggle_agent.research.source_cards import (
     load_methods,
     valid_model_pin,
 )
+
+DEFAULT_HYPOTHESIS = "dry-run default: schema-valid 0.5 baseline then improve"
 
 MAX_INVALID_JSON_RATE = 0.30
 RESEARCH_WRITE_TOOLS = frozenset({"write_card", "harvest_cards"})
@@ -52,9 +55,10 @@ def evaluate_cycle(
     ev = list(events) if events is not None else collect_events(root)
     tools = [e for e in ev if e.get("type") == "tool"]
     research_tools = [e for e in tools if e.get("stage") == "research"]
-    invalid = [e for e in research_tools if e.get("tool") == "invalid_json"]
+    invalid = [e for e in tools if e.get("tool") == "invalid_json"]
+    n_tools = len(tools)
     n_research = len(research_tools)
-    rate = (len(invalid) / n_research) if n_research else 0.0
+    rate = (len(invalid) / n_tools) if n_tools else 0.0
     wrote = any(e.get("tool") in RESEARCH_WRITE_TOOLS for e in research_tools)
 
     ws = workspace
@@ -75,7 +79,34 @@ def evaluate_cycle(
     ]
     research_md = memory_dir(root) / "research.md"
     feasible = cards_feasible(ws, research_md) if research_md.is_file() else False
-    pack = build_context_pack(root)
+    pack = build_context_pack(root, view="plan", workspace=ws if ws.is_dir() else None)
+    plan_ok = any(
+        e.get("stage") == "plan" and e.get("tool") == "write_plan" for e in tools
+    ) and not any(
+        DEFAULT_HYPOTHESIS.lower() in str(e.get("result") or "").lower()
+        for e in tools
+        if e.get("tool") == "write_plan"
+    )
+    code_changed = any(
+        e.get("stage") == "code" and e.get("tool") in {"write_methods", "write_custom_infer"}
+        for e in tools
+    )
+    recipe_path = ws / "pipeline" / "kernel_recipe.py"
+    hook_ok = not recipe_path.is_file()
+    if recipe_path.is_file():
+        try:
+            import ast
+
+            wrapper = recipe_path.read_text(encoding="utf-8")
+            extracted = extract_recipe_string(wrapper)
+            hook_ok = bool(
+                extracted
+                and "CUSTOM_INFER" in extracted
+                and ast.parse(wrapper)
+                and ast.parse(extracted)
+            )
+        except SyntaxError:
+            hook_ok = False
     pack_keys = list(pack.sections)
     has_cards = any(
         k.startswith("research-deep/") or "Method cards" in pack.sections.get("research.md", "")
@@ -86,7 +117,7 @@ def evaluate_cycle(
         _check(
             "invalid_json_rate",
             n_research == 0 or rate <= MAX_INVALID_JSON_RATE,
-            f"{len(invalid)}/{n_research} = {rate:.0%} (max {MAX_INVALID_JSON_RATE:.0%})",
+            f"{len(invalid)}/{n_tools} = {rate:.0%} (max {MAX_INVALID_JSON_RATE:.0%})",
         ),
         _check(
             "research_wrote_card",
@@ -106,6 +137,17 @@ def evaluate_cycle(
             has_cards,
             "method cards in pack" if has_cards else "no method cards in context pack",
         ),
+        _check(
+            "plan_shippable",
+            plan_ok or not any(e.get("stage") == "plan" for e in tools),
+            "write_plan shippable" if plan_ok else "no shippable write_plan",
+        ),
+        _check(
+            "code_changed_artifact",
+            code_changed or not any(e.get("stage") == "code" for e in tools),
+            "methods or hook written" if code_changed else "code wrote nothing",
+        ),
+        _check("code_hook_compiles", hook_ok, "hook compiles" if hook_ok else "hook missing or bad"),
     ]
     passed = all(c["ok"] for c in checks)
     return {

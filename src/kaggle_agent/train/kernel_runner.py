@@ -121,6 +121,40 @@ def run_kernel_phase(
     )
 
 
+def package_matches_existing(package: KernelPackage, existing: KernelJob) -> bool:
+    """True when the new package trains the same kernel as the last job.
+
+    Only training-relevant artifacts count: the notebook (the kernel body)
+    and the kernel env metadata. methods.json is agent-side bookkeeping and
+    must not block a resume of an identical notebook.
+    """
+    if existing.kernel_ref in {"none", ""} or existing.folder in {"none", ""}:
+        return False
+    folder = Path(existing.folder)
+    if not folder.is_dir():
+        return False
+    nb = "agent_baseline.ipynb"
+    if not (package.folder / nb).is_file() or not (folder / nb).is_file():
+        return False
+    if (package.folder / nb).read_bytes() != (folder / nb).read_bytes():
+        return False
+    meta = "kernel-metadata.json"
+    if (package.folder / meta).is_file() and (folder / meta).is_file():
+        import json
+
+        try:
+            new = json.loads((package.folder / meta).read_text(encoding="utf-8"))
+            old = json.loads((folder / meta).read_text(encoding="utf-8"))
+        except ValueError:
+            return False
+        for key in ("id", "title"):
+            new.pop(key, None)
+            old.pop(key, None)
+        if new != old:
+            return False
+    return True
+
+
 def _resume_job(
     client: KaggleClient,
     job: KernelJob,
@@ -167,10 +201,11 @@ def _poll_and_maybe_pull(
             st = client.kernels_status(kernel_ref)
             result.status = st
             result.message = f"status={st}"
+            plain_st = str(st).split(".")[-1]
             job = KernelJob(
                 kernel_ref=kernel_ref,
                 folder=str(folder) if folder else "none",
-                status=st,
+                status=plain_st,
                 competition=competition,
                 exp_id=exp_id,
             )

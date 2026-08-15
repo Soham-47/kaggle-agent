@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import os
 import re
+import time
 from dataclasses import dataclass, fields
+from datetime import datetime, timezone
 from pathlib import Path
 
 from kaggle_agent.paths import memory_dir
@@ -52,6 +55,11 @@ class AgentState:
     last_result: str = "none"
     last_error: str = "none"
     note: str = "none"
+    loop_last_score: str = "none"
+    loop_prev_score: str = "none"
+    loop_last_n: str = "none"
+    loop_next_n: str = "3"
+    loop_note: str = "none"
 
     @classmethod
     def from_dict(cls, d: dict[str, str]) -> AgentState:
@@ -97,17 +105,50 @@ def save_state(state: AgentState, root: Path | None = None) -> Path:
 
 
 class RunLock:
+    STALE_AGE_SECONDS = 12 * 3600
+
     def __init__(self, root: Path | None = None) -> None:
         self.path = memory_dir(root) / "run.lock"
         self._held = False
+        self.took_over = False
 
     def acquire(self) -> bool:
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        if self.path.exists():
+        if self.path.exists() and not self.is_stale():
             return False
-        self.path.write_text("locked\n", encoding="utf-8")
+        if self.path.exists():
+            self.took_over = True
+        self.path.write_text(
+            f"pid={os.getpid()} at={datetime.now(timezone.utc).isoformat()}\n",
+            encoding="utf-8",
+        )
         self._held = True
         return True
+
+    def is_stale(self) -> bool:
+        """True if the lock file cannot belong to a live run."""
+        text = self.path.read_text(encoding="utf-8").strip()
+        pid = self._read_pid(text)
+        if pid is not None:
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                return True
+            except PermissionError:
+                return False
+            return False
+        age = time.time() - self.path.stat().st_mtime
+        return age > self.STALE_AGE_SECONDS
+
+    @staticmethod
+    def _read_pid(text: str) -> int | None:
+        for tok in text.split():
+            if tok.startswith("pid="):
+                try:
+                    return int(tok[4:])
+                except ValueError:
+                    return None
+        return None
 
     def release(self) -> None:
         if self._held and self.path.exists():

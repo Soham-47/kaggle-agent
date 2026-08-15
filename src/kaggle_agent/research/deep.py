@@ -26,8 +26,10 @@ from typing import Any, Protocol
 from kaggle_agent.llm.zen_client import ZenClient
 from kaggle_agent.research.browser import (
     FetchFn,
+    SerpFn,
     fetch_via_http,
     merge_section_into_research_md,
+    search_via_ddg_http,
 )
 
 _DEEP_MARKER = "## Deep research digest"
@@ -265,45 +267,28 @@ class GithubSource:
 
 
 class WebSource:
-    """Generic web: DuckDuckGo HTML SERP + fetched page text."""
+    """Generic web: SERP search + fetched page text."""
 
     kind = "web"
 
-    def __init__(self, fetch: FetchFn | None = None) -> None:
+    def __init__(
+        self,
+        fetch: FetchFn | None = None,
+        serp: SerpFn | None = None,
+    ) -> None:
         self._fetch = fetch or fetch_via_http
+        self._serp = serp or search_via_ddg_http
 
     def search(self, query: str, limit: int = 5) -> list[SourceHit]:
-        url = "https://html.duckduckgo.com/html/?" + urllib.parse.urlencode({"q": query})
         try:
-            req = urllib.request.Request(
-                url,
-                headers={
-                    "User-Agent": (
-                        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-                        "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-                    )
-                },
-            )
-            with urllib.request.urlopen(req, timeout=20) as resp:
-                html = resp.read().decode("utf-8", errors="replace")
+            raw = self._serp(str(query), int(limit)) or []
         except Exception:  # noqa: BLE001
             return []
-        out: list[SourceHit] = []
-        for m in re.finditer(
-            r'<a[^>]+class="[^"]*result__a[^"]*"[^>]*href="([^"]+)"[^>]*>(.*?)</a>', html
-        ):
-            if len(out) >= limit:
-                break
-            href = m.group(1)
-            if "uddg=" in href:
-                url_text = urllib.parse.unquote(href.split("uddg=")[-1].split("&")[0])
-            else:
-                url_text = href
-            if not url_text.startswith("http"):
-                continue
-            title = re.sub(r"<[^>]+>", "", m.group(2)).strip()
-            out.append(SourceHit(url=url_text, title=title, kind="web"))
-        return out
+        return [
+            SourceHit(url=url_text, title=title, snippet=snippet, kind="web")
+            for title, url_text, snippet in raw
+            if url_text.startswith("http")
+        ]
 
     def content(self, hit: SourceHit, max_chars: int = _MAX_CONTENT_CHARS) -> str:
         try:
@@ -502,13 +487,23 @@ class DeepResearcher:
 
     def _distill(self, query: str, hits: list[SourceHit], num_learn: int, num_follow: int) -> dict[str, Any]:
         contents = self._fetch_all(hits)
-        if self._client is None or not contents:
+        if self._client is None:
             return {
                 "learnings": [
                     h.snippet for h in hits if h.snippet and self._relevant(h.snippet)
                 ][:num_learn],
                 "followUpQuestions": [],
             }
+        if not contents:
+            # Fetches were empty or filtered out: give the LLM titles + snippets
+            # instead of starving the distill step.
+            contents = [
+                f"{h.title}\n{h.snippet}"
+                for h in hits
+                if h.title or h.snippet
+            ]
+            if not contents:
+                return {"learnings": [], "followUpQuestions": []}
         blocks = "\n".join(f"<content>\n{c}\n</content>" for c in contents)
         user = (
             f"Given the search results for <query>{query}</query>, return up to "
@@ -567,27 +562,55 @@ class DeepResearcher:
         for item, hits, distilled in packed:
             visited.extend(h.url for h in hits)
             learnings = _dedupe(learnings + distilled["learnings"])
-            if depth - 1 > 0 and distilled["followUpQuestions"]:
-                follow = (
-                    f"Previous research goal: {item['researchGoal']}\n"
-                    "Follow-up directions: "
-                    + "\n".join(f"- {q}" for q in distilled["followUpQuestions"])
-                )
+            if depth - 1 > 0:
+                # Recurse while budget allows, even with no follow-up questions.
+                # Otherwise a single empty followUpQuestions list kills the run.
                 learnings, visited = self.research(
-                    follow, new_breadth, depth - 1, learnings, visited
+                    self._follow_up_text(item, distilled, learnings),
+                    new_breadth,
+                    depth - 1,
+                    learnings,
+                    visited,
                 )
         if self._client is not None and learnings and depth <= 1:
             if self._findings_enough(learnings):
                 self._logmsg("deep judge: enough implementable facts")
         return learnings, visited
 
+    def _follow_up_text(
+        self,
+        item: dict[str, str],
+        distilled: dict[str, Any],
+        learnings: list[str],
+    ) -> str:
+        """Build the next-level prompt from follow-ups, or from learnings."""
+        parts = [f"Previous research goal: {item['researchGoal']}"]
+        if distilled["followUpQuestions"]:
+            parts.append(
+                "Follow-up directions:\n"
+                + "\n".join(f"- {q}" for q in distilled["followUpQuestions"])
+            )
+        elif learnings:
+            parts.append(
+                "Explore related work for:\n"
+                + "\n".join(f"- {x}" for x in learnings[-3:])
+            )
+        return "\n".join(parts)
+
     def _gather_hits(self, query: str, limit: int) -> list[SourceHit]:
         hits: list[SourceHit] = []
         for src in self._sources:
             try:
-                hits.extend(src.search(query, limit))
+                found = src.search(query, limit)
             except Exception:  # noqa: BLE001
                 continue
+            if src.kind == "kaggle" or not self._relevance_terms:
+                hits.extend(found)
+                continue
+            for h in found:
+                blob = f"{h.title} {h.snippet}".lower()
+                if any(t in blob for t in self._relevance_terms):
+                    hits.append(h)
         return hits
 
     def _write_report(self, prompt: str, learnings: list[str], visited: list[str]) -> Path:
@@ -602,6 +625,12 @@ class DeepResearcher:
         return path
 
     def _report_markdown(self, prompt: str, learnings: list[str]) -> str:
+        if not learnings:
+            return (
+                f"# Deep research: {prompt[:80]}\n\n"
+                "No learnings distilled this run. Sources were searched but yielded "
+                "nothing usable. Check the daily log for the deep line."
+            )
         if self._client is None:
             return (
                 f"# Deep research: {prompt[:80]}\n\n"
@@ -627,7 +656,10 @@ class DeepResearcher:
 
     def digest_markdown(self, learnings: list[str], sources: list[str]) -> str:
         lines = [_DEEP_MARKER, "", "Distilled from articles, papers, notebooks, repos, web.", ""]
-        lines += [f"- {l}" for l in learnings[:20]]
+        if not learnings:
+            lines.append("No learnings distilled this run (deep research found nothing usable).")
+        else:
+            lines += [f"- {l}" for l in learnings[:20]]
         lines.append("")
         lines += [f"- source: {u}" for u in _prefer_primary_sources(sources)[:15]]
         return "\n".join(lines)
@@ -644,7 +676,7 @@ class DeepResearcher:
             result.learnings = learnings
             result.sources = list(dict.fromkeys(visited))
             result.queries_run = self._query_count
-            if learnings:
+            if learnings or visited or self._query_count:
                 result.report_path = self._write_report(prompt, learnings, visited)
                 if research_path is not None:
                     merge_section_into_research_md(
