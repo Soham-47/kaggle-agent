@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import threading
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
@@ -13,7 +14,12 @@ from kaggle_agent.config import CompetitionConfig, Settings, load_competition, l
 from kaggle_agent.kaggle_api import KaggleClient
 from kaggle_agent.llm.router import ModelRouter
 from kaggle_agent.memory.ingest import build_context_pack
-from kaggle_agent.memory.write import append_daily_log, write_experiment
+from kaggle_agent.memory.write import (
+    append_daily_log,
+    patch_experiment,
+    patch_memory_public_score,
+    write_experiment,
+)
 from kaggle_agent.notify.telegram import SupportsTelegram, TelegramClient
 from kaggle_agent.paths import memory_dir
 from kaggle_agent.pipeline.validate import validate_submission_csv
@@ -22,12 +28,23 @@ from kaggle_agent.research.browser import (
     BrowserResearcher,
     FetchFn,
     default_fetch,
+    default_serp,
     merge_browser_into_research_md,
 )
 from kaggle_agent.agents.code import make_code_agent
+from kaggle_agent.agents.loop import StageAgent, StageAgentConfig
 from kaggle_agent.agents.plan import make_plan_agent, write_plan_text
 from kaggle_agent.research.agent import ResearchAgent
+from kaggle_agent.research.fleet import (
+    AGENT_SPECS,
+    clone_client_for_agent,
+    make_fleet_tools,
+    make_write_card,
+    run_fleet,
+    subagent_system,
+)
 from kaggle_agent.research.source_cards import (
+    _PULL_LOCK,
     cards_feasible,
     judge_cards_ready,
     merge_digest,
@@ -62,10 +79,15 @@ from kaggle_agent.loop import (
     load_loop,
     next_loop_count,
     parse_loop_score,
+    score_is_better,
     update_loop_from_score,
 )
 from kaggle_agent.train.kernel_job import load_kernel_job
-from kaggle_agent.train.kernel_runner import run_kernel_phase
+from kaggle_agent.train.kernel_runner import (
+    KernelRunResult,
+    package_matches_existing,
+    run_kernel_phase,
+)
 from kaggle_agent.train.local_smoke import run_competition_smoke
 from kaggle_agent.train.notebook_builder import write_kernel_package
 from kaggle_agent.ops.evals import evaluate_cycle, persist_report
@@ -111,6 +133,8 @@ class CycleResult:
     kernel_resumed: bool | None = None
     train_slices: int = 0
     research_passes: int = 0
+    wrote_custom_infer: bool = False
+    wrote_recipe: bool = False
     errors: list[str] = field(default_factory=list)
 
     @property
@@ -128,6 +152,17 @@ def _parse_plan_lines(text: str) -> tuple[str, str]:
         elif low.startswith("approach:"):
             approach = line.split(":", 1)[1].strip()
     return hypothesis, approach
+
+
+def _record_verdict(judge_state: dict[str, Any], ready: bool, reason: str) -> None:
+    """Track judge verdicts; the streak counts consecutive identical verdicts."""
+    verdict = (bool(ready), reason)
+    judge_state["streak"] = (
+        judge_state["streak"] + 1 if verdict == judge_state.get("last_verdict") else 1
+    )
+    judge_state["last_verdict"] = verdict
+    judge_state["ready"] = bool(ready)
+    judge_state["last_reason"] = reason
 
 
 def _first_existing(*paths: Path) -> Path | None:
@@ -150,6 +185,7 @@ class Orchestrator:
         browser_submit: BrowserSubmitFn | None = None,
         mcp_submit_fn: Any | None = None,
         router: Any | None = None,
+        skip_phases: frozenset[str] | None = None,
     ) -> None:
         self.settings = settings
         self.competition = competition
@@ -163,6 +199,7 @@ class Orchestrator:
         self._assume_approved = False
         self._loop_n_used = 0
         self._tracer: Tracer | None = None
+        self._skip_phases = skip_phases or frozenset()
 
     def run_cycle(
         self, *, dry_run: bool | None = None, assume_approved: bool = False
@@ -281,7 +318,7 @@ class Orchestrator:
 
     def _enabled_phases(self, phases: tuple[str, ...]) -> tuple[str, ...]:
         allowed = set(self.settings.phases)
-        return tuple(p for p in phases if p in allowed)
+        return tuple(p for p in phases if p in allowed and p not in self._skip_phases)
 
     def _run_named_phases(
         self,
@@ -331,6 +368,8 @@ class Orchestrator:
         result.kernel_resumed = None
         result.validate_ok = None
         result.candidate_csv = None
+        result.wrote_custom_infer = False
+        result.wrote_recipe = False
 
     def _run_train_slices(
         self,
@@ -380,6 +419,8 @@ class Orchestrator:
                     "candidate_csv": csv,
                     "smoke_path": result.smoke_path,
                     "kernel_ok": result.kernel_ok,
+                    "wrote_custom_infer": result.wrote_custom_infer,
+                    "wrote_recipe": result.wrote_recipe,
                     "errors": prior + result.errors[err_before:],
                 }
         self._loop_n_used = used
@@ -391,6 +432,8 @@ class Orchestrator:
             result.candidate_csv = best["candidate_csv"]
             result.smoke_path = best["smoke_path"]
             result.kernel_ok = best["kernel_ok"]
+            result.wrote_custom_infer = bool(best.get("wrote_custom_infer"))
+            result.wrote_recipe = bool(best.get("wrote_recipe"))
             result.validate_ok = True
             result.errors = list(best["errors"])
             state.active_experiment = result.experiment_id
@@ -461,26 +504,66 @@ class Orchestrator:
             self._browser_research(result)
         zen = self.router.client if self.router is not None else None
         model = self.competition.model_for("distill", self.settings)
+        if self._fleet_enabled() and self._fleet_roster():
+            self._fleet_research(state, result)
+            if self.settings.deep_research_config().enabled:
+                self._deep_research(result)
+            return state
         thin = not cards_feasible(workspace, research_md)
         deep_ran = {"n": 0}
+        dest = memory_dir(self.root) / "research-deep"
+        our = str(load_state(self.root).public_best or "unknown")
+        judge_state: dict[str, Any] = {"ready": None, "streak": 0, "last_reason": ""}
+
+        def _judge_now() -> None:
+            cards = sorted(dest.glob("source-*.md")) if dest.is_dir() else []
+            ready, reason = judge_cards_ready(zen, model, cards, our)
+            _record_verdict(judge_state, ready, reason)
+
+        def _research_done() -> bool:
+            if not cards_feasible(workspace, research_md):
+                return False
+            _judge_now()
+            if judge_state["ready"] or judge_state["streak"] >= 2:
+                append_daily_log(
+                    "research judge ready="
+                    f"{judge_state['ready']} streak={judge_state['streak']} "
+                    f"{judge_state['last_reason']}",
+                    self.root,
+                )
+                return True
+            append_daily_log(
+                f"research judge reject reason={judge_state['last_reason']}",
+                self.root,
+            )
+            return False
+
         agent = ResearchAgent(
             zen,
             model,
-            self._research_tools(result, deep_ran),
+            self._research_tools(result, deep_ran, judge_state=judge_state),
             self.settings.research_agent_config(),
             log=lambda msg: append_daily_log(msg, self.root),
-            accept_done=lambda: cards_feasible(workspace, research_md),
+            accept_done=_research_done,
+            reject_msg="done rejected: judge says cards not ready; improve the cards",
             tracer=self._tracer,
             must_first=["harvest_cards"] if thin else [],
             must_first_args={"harvest_cards": {"reset": True}} if thin else None,
         )
-        pack = build_context_pack(self.root)
-        out = agent.run(pack.as_prompt_block(max_chars_per_section=1500) or self.competition.slug)
+        pack = build_context_pack(self.root, view="research")
+        out = agent.run(pack.as_prompt_block() or self.competition.slug)
         result.research_passes = max(1, out.turns)
         append_daily_log(
             f"research agent stop={out.stop_reason} turns={out.turns}",
             self.root,
         )
+        if out.stop_reason in ("turn_cap", "time"):
+            best = sorted(dest.glob("source-*.md")) if dest.is_dir() else []
+            append_daily_log(
+                f"research budget exhausted stop={out.stop_reason} "
+                f"best_so_far_cards={len(best)}",
+                self.root,
+            )
         harvested = any("wrote " in (o or "") and "card" in (o or "") for o in out.observations)
         if not cards_feasible(workspace, research_md) and not harvested:
             self._source_cards(result, reset=True)
@@ -497,13 +580,228 @@ class Orchestrator:
             self._deep_research(result)
         return state
 
-    def _research_tools(self, result: CycleResult, deep_ran: dict[str, int] | None = None) -> dict[str, Any]:
+    def _fleet_enabled(self) -> bool:
+        cfg = self.settings.research_fleet_config()
+        return bool(cfg.enabled or self.competition.fleet_enabled)
+
+    def _fleet_roster(self) -> list[str]:
+        comp = self.competition.fleet_agents
+        roster = comp if comp else list(self.settings.research_fleet_config().agents)
+        dropped = [a for a in roster if a not in AGENT_SPECS]
+        if dropped:
+            append_daily_log(f"research fleet unknown agents dropped: {dropped}", self.root)
+        return [a for a in roster if a in AGENT_SPECS]
+
+    def _fleet_research(self, state: AgentState, result: CycleResult) -> None:
+        """Run one StageAgent loop per source in parallel; then converge cards."""
         workspace = self.root / self.competition.workspace_relative
+        research_md = memory_dir(self.root) / "research.md"
         dest = memory_dir(self.root) / "research-deep"
-        cache = workspace / "research-cache"
         our = str(load_state(self.root).public_best or "unknown")
         zen = self.router.client if self.router is not None else None
         model = self.competition.model_for("distill", self.settings)
+        cfg = self.settings.research_fleet_config()
+        roster = self._fleet_roster()
+        agent_config = StageAgentConfig(
+            max_minutes=cfg.max_minutes,
+            max_tool_turns=cfg.max_tool_turns,
+            max_tokens=cfg.max_tokens,
+        )
+        pack = build_context_pack(self.root, view="research")
+        context = pack.as_prompt_block() or self.competition.slug
+        thin = not cards_feasible(workspace, research_md)
+        shared = self._source_tool_closures()
+        search_fn = shared["search"]
+        fetch_fn = shared["fetch_url"]
+        kernel_list_fn = shared["list_kernels"]
+        kernel_pull_fn = shared["pull_kernel"]
+        harvested = {"n": 0}
+        harvest_lock = threading.Lock()
+
+        def harvest_cards(reset: bool | None = None, **_: Any) -> str:
+            with harvest_lock:
+                if harvested["n"] >= 1:
+                    return "already harvested this run; call write_card or done"
+                harvested["n"] += 1
+            self._source_cards(result, reset=True)
+            cards = sorted(dest.glob("source-*.md")) if dest.is_dir() else []
+            return f"wrote {len(cards)} cards"
+
+        agents: list[tuple[str, StageAgent]] = []
+        for name in roster:
+            spec = AGENT_SPECS[name]
+            wrote = {"n": 0}
+            base_write = make_write_card(dest, spec.card_kind)
+
+            def _write(ref: str = "", markdown: str = "") -> str:
+                path = base_write(ref, markdown)
+                wrote["n"] += 1
+                return path
+
+            tools = make_fleet_tools(
+                spec,
+                search_fn=search_fn,
+                fetch_fn=fetch_fn,
+                write_fn=_write,
+                kernel_list_fn=(
+                    kernel_list_fn if "list_kernels" in spec.tools else None
+                ),
+                kernel_pull_fn=(
+                    kernel_pull_fn if "pull_kernel" in spec.tools else None
+                ),
+            )
+            tools["harvest_cards"] = harvest_cards
+            agents.append(
+                (
+                    name,
+                    StageAgent(
+                        clone_client_for_agent(zen),
+                        model,
+                        tools,
+                        agent_config,
+                        system=subagent_system(name, self.competition.slug, our),
+                        log=lambda msg: append_daily_log(msg, self.root),
+                        accept_done=lambda: wrote["n"] > 0,
+                        reject_msg="done rejected: write at least one card first",
+                        must_first=["harvest_cards"] if thin else [],
+                        must_first_args={"harvest_cards": {"reset": True}} if thin else None,
+                        stall_after=6,
+                        stall_nudge=(
+                            "Stall: you have read enough. Call write_card now with "
+                            "your single best finding (ref + markdown body). Call "
+                            "done only after write_card succeeded."
+                        ),
+                        stall_force=("done", {}),
+                        name="research",
+                        tracer=self._tracer,
+                    ),
+                )
+            )
+        out = run_fleet(agents, log=lambda msg: append_daily_log(msg, self.root))
+        result.research_passes = max(1, out.turns)
+        cards = sorted(dest.glob("source-*.md")) if dest.is_dir() else []
+        if cards:
+            merge_digest(cards, research_md, our)
+            write_methods_sidecar(cards, workspace)
+            result.deep_ok = True
+            result.deep_sources = max(result.deep_sources, len(cards))
+        if self._tracer is not None:
+            self._tracer.emit(
+                "tool",
+                stage="research",
+                tool="fleet",
+                agents=len(agents),
+                turns=out.turns,
+                errors=out.errors[:3],
+            )
+        append_daily_log(
+            f"research fleet agents={len(agents)} turns={out.turns} "
+            f"cards={len(cards)} errors={out.errors or 'none'}",
+            self.root,
+        )
+        if not cards_feasible(workspace, research_md) and not harvested["n"]:
+            self._source_cards(result, reset=True)
+        if cards_feasible(workspace, research_md):
+            append_daily_log("research cards feasible", self.root)
+            ready, reason = judge_cards_ready(zen, model, cards, our)
+            append_daily_log(
+                f"research judge post-fleet ready={ready} {reason}",
+                self.root,
+            )
+            if not ready:
+                self._fleet_polish(result, reason)
+        else:
+            append_daily_log("research cards still thin; continuing", self.root)
+
+    def _fleet_polish(self, result: CycleResult, reason: str) -> None:
+        """One bounded StageAgent pass: judge, rewrite the weakest card, re-judge."""
+        workspace = self.root / self.competition.workspace_relative
+        research_md = memory_dir(self.root) / "research.md"
+        dest = memory_dir(self.root) / "research-deep"
+        our = str(load_state(self.root).public_best or "unknown")
+        zen = self.router.client if self.router is not None else None
+        model = self.competition.model_for("distill", self.settings)
+        cfg = self.settings.research_fleet_config()
+        judge_state: dict[str, Any] = {"ready": None, "streak": 0, "last_reason": ""}
+        wrote = {"n": 0}
+        base_write = make_write_card(dest, "polish")
+
+        def read_cards(**_: Any) -> str:
+            cards = sorted(dest.glob("source-*.md")) if dest.is_dir() else []
+            parts = []
+            for p in cards[-6:]:
+                parts.append(f"### {p.name}\n{p.read_text(encoding='utf-8')[:2000]}")
+            return "\n\n".join(parts) or "no cards"
+
+        def write_card(ref: str = "", markdown: str = "", **_: Any) -> str:
+            path = base_write(ref, markdown)
+            wrote["n"] += 1
+            return path
+
+        def judge_cards(**_: Any) -> str:
+            cards = sorted(dest.glob("source-*.md")) if dest.is_dir() else []
+            ready, r = judge_cards_ready(zen, model, cards, our)
+            _record_verdict(judge_state, ready, r)
+            feasible = cards_feasible(workspace, research_md)
+            return f"ready={ready} feasible={feasible} {r}"
+
+        agent = StageAgent(
+            clone_client_for_agent(zen),
+            model,
+            {
+                "read_cards": read_cards,
+                "write_card": write_card,
+                "judge_cards": judge_cards,
+            },
+            StageAgentConfig(
+                max_minutes=cfg.max_minutes,
+                max_tool_turns=min(cfg.max_tool_turns, 12),
+                max_tokens=cfg.max_tokens,
+            ),
+            system=(
+                "You polish one Kaggle contest's research cards. "
+                "Call one tool per turn. "
+                f"The research judge said: {reason}. "
+                "Call read_cards, then write_card to improve the weakest card, "
+                "then judge_cards. Call done only after write_card succeeded "
+                "or the judge approves."
+            ),
+            log=lambda msg: append_daily_log(msg, self.root),
+            accept_done=lambda: judge_state["ready"] is True
+            or judge_state["streak"] >= 2
+            or wrote["n"] > 0,
+            reject_msg="done rejected: judge says not ready; rewrite a weaker card",
+            must_first=["read_cards"],
+            stall_after=4,
+            stall_nudge=(
+                "Stall: call write_card with an improved card addressing the "
+                "judge, then judge_cards."
+            ),
+            stall_force=("done", {}),
+            name="research",
+            tracer=self._tracer,
+        )
+        pack = build_context_pack(self.root, view="research")
+        out = agent.run(pack.as_prompt_block() or self.competition.slug)
+        result.research_passes = max(result.research_passes, out.turns)
+        append_daily_log(
+            f"research polish stop={out.stop_reason} turns={out.turns} "
+            f"wrote={wrote['n']}",
+            self.root,
+        )
+        cards = sorted(dest.glob("source-*.md")) if dest.is_dir() else []
+        if cards:
+            merge_digest(cards, research_md, our)
+            write_methods_sidecar(cards, workspace)
+        ready, r = judge_cards_ready(zen, model, cards, our)
+        append_daily_log(
+            f"research judge post-polish ready={ready} {r}",
+            self.root,
+        )
+
+    def _source_tool_closures(self) -> dict[str, Callable[..., str]]:
+        """Source closures shared by the sequential research loop and the fleet."""
+        cache = (self.root / self.competition.workspace_relative) / "research-cache"
 
         def list_kernels(query: str = "", limit: int = 6, **_: Any) -> str:
             if self._kaggle is None:
@@ -521,7 +819,8 @@ class Orchestrator:
             from kaggle_agent.research.deep import SourceHit
 
             hit = SourceHit(url=ref, title=ref, kind="kaggle")
-            return src.content(hit)[:12000]
+            with _PULL_LOCK:
+                return src.content(hit)[:12000]
 
         def fetch_url(url: str = "", **_: Any) -> str:
             if url and not url.lower().startswith(("http://", "https://")):
@@ -541,13 +840,37 @@ class Orchestrator:
                 ),
                 "arxiv": ArxivSource(),
                 "github": GithubSource(),
-                "web": WebSource(),
+                "web": WebSource(serp=default_serp(self.settings.browser_prefer_harness)),
             }
             src = sources.get(str(kind), sources["web"])
             if src is None:
                 return "no source"
             hits = src.search(str(query), int(limit))
             return "\n".join(f"{h.kind}\t{h.url}\t{h.title}" for h in hits) or "none"
+
+        return {
+            "list_kernels": list_kernels,
+            "pull_kernel": pull_kernel,
+            "fetch_url": fetch_url,
+            "search": search,
+        }
+
+    def _research_tools(
+        self,
+        result: CycleResult,
+        deep_ran: dict[str, int] | None = None,
+        judge_state: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        workspace = self.root / self.competition.workspace_relative
+        dest = memory_dir(self.root) / "research-deep"
+        our = str(load_state(self.root).public_best or "unknown")
+        zen = self.router.client if self.router is not None else None
+        model = self.competition.model_for("distill", self.settings)
+        shared = self._source_tool_closures()
+        list_kernels = shared["list_kernels"]
+        pull_kernel = shared["pull_kernel"]
+        fetch_url = shared["fetch_url"]
+        search = shared["search"]
 
         def write_card(ref: str = "", markdown: str = "", **_: Any) -> str:
             dest.mkdir(parents=True, exist_ok=True)
@@ -564,15 +887,21 @@ class Orchestrator:
         def judge_cards(**_: Any) -> str:
             cards = sorted(dest.glob("source-*.md")) if dest.is_dir() else []
             ready, reason = judge_cards_ready(zen, model, cards, our)
+            if judge_state is not None:
+                _record_verdict(judge_state, ready, reason)
             feasible = cards_feasible(workspace, memory_dir(self.root) / "research.md")
             return f"ready={ready} feasible={feasible} {reason}"
 
+        harvested = {"n": 0}
 
         def harvest_cards(reset: bool | None = None, **_: Any) -> str:
+            if harvested["n"] >= 1:
+                return "already harvested this run; call judge_cards or done"
             research_md = memory_dir(self.root) / "research.md"
             if reset is None:
                 reset = not cards_feasible(workspace, research_md)
             self._source_cards(result, reset=bool(reset))
+            harvested["n"] += 1
             cards = sorted(dest.glob("source-*.md")) if dest.is_dir() else []
             return f"wrote {len(cards)} cards"
 
@@ -706,6 +1035,7 @@ class Orchestrator:
             web_fetch = self._browser_fetch or default_fetch(
                 self.settings.browser_prefer_harness
             )
+            web_serp = default_serp(self.settings.browser_prefer_harness)
             terms = tuple(
                 dict.fromkeys(
                     [self.competition.slug] + self.competition.slug.split("-")[:2]
@@ -719,7 +1049,7 @@ class Orchestrator:
                     KaggleSource(self._kaggle, self.competition.slug, cache),
                     ArxivSource(),
                     GithubSource(),
-                    WebSource(fetch=web_fetch),
+                    WebSource(fetch=web_fetch, serp=web_serp),
                 ],
                 root=self.root,
                 log=lambda msg: append_daily_log(msg, self.root),
@@ -772,7 +1102,7 @@ class Orchestrator:
             return state
         zen = self.router.client if self.router is not None else None
         model = self.competition.model_for("code", self.settings)
-        agent = make_code_agent(
+        agent, code_state = make_code_agent(
             zen,
             model,
             self.root,
@@ -782,10 +1112,25 @@ class Orchestrator:
             log=lambda msg: append_daily_log(msg, self.root),
             tracer=self._tracer,
         )
-        pack = build_context_pack(self.root)
-        out = agent.run(
-            f"Competition: {self.competition.slug}\n\n{pack.as_prompt_block(max_chars_per_section=1200)}"
+        pack = build_context_pack(
+            self.root,
+            view="code",
+            workspace=workspace,
+            plan_text=result.plan_text or "",
         )
+        out = agent.run(
+            f"Competition: {self.competition.slug}\n\n{pack.as_prompt_block()}"
+        )
+        result.wrote_custom_infer = bool(code_state.get("wrote_custom_infer"))
+        result.wrote_recipe = bool(code_state.get("wrote_recipe"))
+        if self._tracer is not None:
+            self._tracer.emit(
+                "tool",
+                stage="code",
+                tool="code_hook",
+                source="written" if result.wrote_custom_infer else "identity",
+                recipe="written" if result.wrote_recipe else "static",
+            )
         append_daily_log(f"code agent stop={out.stop_reason} turns={out.turns}", self.root)
         try:
             import sys
@@ -889,6 +1234,8 @@ class Orchestrator:
                     exp_id=exp_id,
                 )
             else:
+                if should_push and self._kaggle is None:
+                    self._kaggle = KaggleClient().connect()
                 package = write_kernel_package(
                     self.competition,
                     root=self.root,
@@ -898,18 +1245,29 @@ class Orchestrator:
                 )
                 result.kernel_path = str(package.folder)
                 result.kernel_ref = package.kernel_ref
-                if should_push and self._kaggle is None:
-                    self._kaggle = KaggleClient().connect()
                 out_dir = package.folder / "output"
-                run = run_kernel_phase(
-                    self._kaggle if should_push else None,
-                    package,
-                    push=should_push,
-                    pull_output_dir=out_dir if should_push else None,
-                    root=self.root,
-                    competition=self.competition.slug,
-                    exp_id=exp_id,
-                )
+                if should_push and package_matches_existing(package, existing):
+                    # Completed kernel with identical artifact: reuse it, no new push.
+                    result.kernel_ref = existing.kernel_ref
+                    result.kernel_path = existing.folder
+                    run = KernelRunResult(
+                        ok=True,
+                        package=package,
+                        resumed=True,
+                        kernel_ref=existing.kernel_ref,
+                        message=f"reused identical kernel {existing.kernel_ref}",
+                        status=existing.status,
+                    )
+                else:
+                    run = run_kernel_phase(
+                        self._kaggle if should_push else None,
+                        package,
+                        push=should_push,
+                        pull_output_dir=out_dir if should_push else None,
+                        root=self.root,
+                        competition=self.competition.slug,
+                        exp_id=exp_id,
+                    )
 
             result.kernel_ok = run.ok
             result.kernel_resumed = run.resumed
@@ -930,21 +1288,21 @@ class Orchestrator:
 
     def _validate_sub(self, state: AgentState, result: CycleResult) -> AgentState:
         """Validate best local candidate CSV (kernel output preferred, else smoke)."""
-        # This slice only — do not pick leftover smoke from other experiments.
         candidates: list[Path] = []
         if result.kernel_path:
             candidates.append(Path(result.kernel_path) / "output" / "submission.csv")
-        if result.smoke_path:
-            candidates.append(Path(result.smoke_path))
-        exp_id = result.experiment_id
-        if exp_id:
-            same = (
-                self.root
-                / self.competition.workspace_relative
-                / "submissions"
-                / f"{exp_id}_smoke.csv"
-            )
-            candidates.append(same)
+        if not result.wrote_custom_infer:
+            if result.smoke_path:
+                candidates.append(Path(result.smoke_path))
+            exp_id = result.experiment_id
+            if exp_id:
+                same = (
+                    self.root
+                    / self.competition.workspace_relative
+                    / "submissions"
+                    / f"{exp_id}_smoke.csv"
+                )
+                candidates.append(same)
 
         path = next((p for p in candidates if p.is_file()), None)
         if path is None:
@@ -969,8 +1327,8 @@ class Orchestrator:
 
     def _plan(self, state: AgentState, dry: bool, result: CycleResult) -> None:
         hypothesis, approach, notes = DEFAULT_HYPOTHESIS, "baseline", "plan agent"
-        pack = build_context_pack(self.root)
         workspace = self.root / self.competition.workspace_relative
+        pack = build_context_pack(self.root, view="plan", workspace=workspace)
         zen = self.router.client if self.router is not None else None
         model = self.competition.model_for("plan", self.settings)
 
@@ -990,14 +1348,26 @@ class Orchestrator:
             tracer=self._tracer,
         )
         out = agent.run(
-            f"Competition: {self.competition.slug}\n\n{pack.as_prompt_block(max_chars_per_section=3000)}"
+            f"Competition: {self.competition.slug}\n\n{pack.as_prompt_block()}"
         )
         append_daily_log(f"plan agent stop={out.stop_reason} turns={out.turns}", self.root)
         if result.plan_text is None:
-            result.plan_text = write_plan_text(hypothesis, approach, "")
+            from kaggle_agent.research.source_cards import load_methods
+
+            methods = load_methods(workspace)
+            steps = [
+                s
+                for s in (methods.get("implement_steps") or [])
+                if s and "dry-run default" not in str(s).lower()
+            ]
+            if steps:
+                hypothesis, approach = str(steps[0])[:240], "recipe"
+                result.plan_text = write_plan_text(hypothesis, approach, "; ".join(steps[:3]))
+            else:
+                result.plan_text = write_plan_text(hypothesis, approach, "")
         notes = f"plan agent {out.stop_reason}"
         if zen is None or not hasattr(zen, "chat"):
-            notes = "OPENCODE_API_KEY missing; offline plan"
+            notes = "DEEPSEEK_API_KEY missing; offline plan from cards"
 
         write_experiment(
             result.experiment_id or "unknown",
@@ -1150,6 +1520,26 @@ class Orchestrator:
             pending.kernel_ref = kernel_ref
         if pending.status == "approved":
             save_pending(pending, self.root)
+
+        if (
+            not dry
+            and self.settings.block_submit
+        ):
+            report = memory_dir(self.root) / "daily" / "eval_report.json"
+            try:
+                import json
+
+                ev = json.loads(report.read_text(encoding="utf-8")) if report.is_file() else {}
+            except Exception:  # noqa: BLE001
+                ev = {}
+            if ev.get("passed") is False:
+                result.submit_ok = False
+                result.submit_message = "eval gate closed"
+                heal = load_heal(self.root)
+                heal.note = "eval gate closed"
+                save_heal(heal, self.root)
+                append_daily_log("submit skipped: eval gate closed", self.root)
+                return state
 
         msg = f"agent {result.experiment_id}" + (" dry" if dry else "")
         fails: list[str] = []
@@ -1307,7 +1697,23 @@ class Orchestrator:
                     self.root,
                 )
                 if latest.public_score and latest.public_score not in {"", "none"}:
-                    state.public_best = latest.public_score
+                    pending = load_pending(self.root)
+                    exp_id = pending.exp_id if pending.exp_id not in {"", "none"} else result.experiment_id
+                    if exp_id and exp_id != "none":
+                        patch_experiment(
+                            exp_id,
+                            root=self.root,
+                            public_score=latest.public_score,
+                            submission=latest.status or "submitted",
+                            kernel=result.kernel_ref or pending.kernel_ref,
+                        )
+                    if score_is_better(
+                        latest.public_score,
+                        state.public_best,
+                        self.competition.metric_direction,
+                    ):
+                        state.public_best = latest.public_score
+                        patch_memory_public_score(str(latest.public_score), self.root)
             else:
                 append_daily_log("feedback: no submissions yet", self.root)
         except Exception as exc:  # noqa: BLE001
@@ -1399,6 +1805,8 @@ class Orchestrator:
                 _flag("CSV validate", result.validate_ok),
                 _flag("Approve step", result.approve_ok),
                 _flag("Submit", result.submit_ok),
+                _flag("CUSTOM_INFER hook", result.wrote_custom_infer),
+                _flag("Kernel recipe", result.wrote_recipe),
             ]
         )
         hard = result.hard_errors
@@ -1457,6 +1865,7 @@ def run_daily(
     telegram: SupportsTelegram | None = None,
     browser_submit: BrowserSubmitFn | None = None,
     mcp_submit_fn: Any | None = None,
+    skip_phases: frozenset[str] | None = None,
 ) -> CycleResult:
     settings = load_settings(root)
     cid = competition_id or settings.default_competition
@@ -1470,5 +1879,6 @@ def run_daily(
         telegram=telegram,
         browser_submit=browser_submit,
         mcp_submit_fn=mcp_submit_fn,
+        skip_phases=skip_phases,
     ).run_cycle(dry_run=dry_run, assume_approved=assume_approved)
 

@@ -22,6 +22,7 @@ _SYSTEM = (
     "Tools: list_kernels, pull_kernel, fetch_url, search, write_card, "
     "harvest_cards, deep_research, judge_cards, done. "
     "Prefer harvest_cards or write_card before done. "
+    "Call judge_cards before done. "
     "Call done when cards are implementable. Do not invent slugs. "
     'If you cannot call a tool, output {"tool": name, "args": {}}.'
 )
@@ -49,6 +50,7 @@ class ResearchAgent(StageAgent):
         tracer: object | None = None,
         must_first: list[str] | None = None,
         must_first_args: dict | None = None,
+        reject_msg: str = "done rejected: cards not ready",
     ) -> None:
         super().__init__(
             zen,
@@ -61,6 +63,6 @@ class ResearchAgent(StageAgent):
             must_first=must_first if must_first is not None else ["harvest_cards"],
             must_first_args=must_first_args,
             name="research",
-            reject_msg="done rejected: cards not ready",
+            reject_msg=reject_msg,
             tracer=tracer,
         )
