@@ -154,3 +154,4 @@ class RunLock:
         if self._held and self.path.exists():
             self.path.unlink(missing_ok=True)
         self._held = False
+        self.took_over = False

@@ -6,14 +6,20 @@ import ast
 import json
 from pathlib import Path
 
-from kaggle_agent.agents.loop import StageAgent, StageAgentConfig
+from kaggle_agent.agents.loop import StageAgent, StageAgentConfig, StallControl
 from kaggle_agent.agents.plan import build_plan_tools, make_plan_agent, plan_is_ready, write_plan_text
 from kaggle_agent.agents.code import (
+    ValidationPipeline,
+    calls_custom_infer,
     make_code_agent,
     methods_payload_ok,
+    min_length,
+    no_out_hook,
     plan_to_methods_args,
     replace_kernel_recipe,
     splice_custom_infer,
+    valid_python,
+    writes_submission_csv,
 )
 
 
@@ -342,6 +348,52 @@ def test_replace_kernel_recipe_auto_inserts_markers():
     ast.parse(out)
 
 
+def test_validation_pipeline_rules():
+    assert valid_python("def f(): pass") is None
+    assert valid_python("'''") == "recipe is not valid Python"
+    assert writes_submission_csv("sub.to_csv('submission.csv')") is None
+    assert writes_submission_csv("x = 1") == "recipe must write submission.csv"
+    assert no_out_hook("out = CUSTOM_INFER(sub, ctx)") == "do not hook Path out"
+    assert no_out_hook("sub = CUSTOM_INFER(sub, ctx)") is None
+    assert calls_custom_infer("sub = CUSTOM_INFER(sub, ctx)") is None
+    assert calls_custom_infer("sub = sub.copy()") == "recipe must call CUSTOM_INFER(sub, ctx)"
+
+
+def test_validation_pipeline_min_length_rule():
+    rule = min_length("x" * 100)
+    assert rule("x" * 31) is None
+    assert rule("x" * 30) is None
+    assert rule("x" * 29) == "recipe too short (29 chars vs 100 before)"
+    assert min_length("y" * 10)("y" * 3) is None
+
+
+def test_validation_pipeline_composition():
+    good = "sub = CUSTOM_INFER(sub, ctx)\nsub.to_csv('submission.csv')\n"
+    pipe = ValidationPipeline([calls_custom_infer, writes_submission_csv])
+    assert pipe(good) is None
+    assert pipe.run("sub.to_csv('submission.csv')\n") == "recipe must call CUSTOM_INFER(sub, ctx)"
+    assert pipe.run("sub = CUSTOM_INFER(sub, ctx)\n") == "recipe must write submission.csv"
+
+
+def test_splice_custom_infer_shared_rules():
+    wrapper = "KERNEL_RECIPE_SOURCE = r'''\n" "sub = CUSTOM_INFER(s,c)\n" "sub.to_csv('sub.csv')\n" "'''\n"
+    try:
+        splice_custom_infer(wrapper, "out = CUSTOM_INFER(sub, ctx)\nreturn sub")
+        raise AssertionError("should reject out hook")
+    except ValueError:
+        pass
+    try:
+        splice_custom_infer(wrapper, "return sub\nsub.to_csv('x.csv')")
+        raise AssertionError("should reject missing call")
+    except ValueError:
+        pass
+    try:
+        splice_custom_infer(wrapper, "'''")
+        raise AssertionError("should reject invalid python")
+    except ValueError:
+        pass
+
+
 def test_write_kernel_recipe_unlocks_done(tmp_path: Path):
     import json
 
@@ -430,3 +482,123 @@ def test_write_plan_judge_rejection_mentions_reason():
     assert "judge" in msg
     assert "re-run of implemented step" in msg
     assert state["wrote"] == ""
+
+
+# ---------------------------------------------------------------------------
+# StallControl unit tests — one seam, 7 scenarios
+# ---------------------------------------------------------------------------
+
+
+def _sc(*, stall_after: int = 3, stall_nudge: str = "", stall_force=None):
+    return StallControl(stall_after=stall_after, stall_nudge=stall_nudge, stall_force=stall_force)
+
+
+def test_stallcontrol_no_stall_returns_continue():
+    sc = StallControl(stall_after=None, stall_nudge="", stall_force=("done", {}))
+    d = sc.evaluate(turns=10)
+    assert d.action == "continue"
+
+
+def test_stallcontrol_within_window_returns_continue():
+    sc = _sc(stall_after=5)
+    sc.mark_write(turn=3)
+    d = sc.evaluate(turns=6)
+    assert d.action == "continue"
+
+
+def test_stallcontrol_stalled_forces_tool():
+    sc = _sc(stall_after=3, stall_force=("write_plan", {"steps": "a"}))
+    d = sc.evaluate(turns=5)
+    assert d.action == "force_tool"
+    assert d.tool_name == "write_plan"
+    assert d.tool_args == {"steps": "a"}
+    assert sc.force_count == 1
+    assert sc.stall_forced is True
+
+
+def test_stallcontrol_force_returns_none_stops():
+    sc = _sc(stall_after=2, stall_force=lambda ep: None)
+    d = sc.evaluate(turns=5)
+    assert d.action == "stop_stalled"
+    assert sc.stall_forced is True
+
+
+def test_stallcontrol_force_done():
+    sc = _sc(stall_after=2, stall_force=("done", {}))
+    d = sc.evaluate(turns=5)
+    assert d.action == "force_done"
+    assert d.tool_name == "done"
+
+
+def test_stallcontrol_force_exhausted_nudges():
+    sc = _sc(stall_after=2, stall_force=("write_plan", {"steps": "x"}))
+    sc.stall_forced = True
+    sc.last_force_turn = 4
+    sc.last_write_turn = 0
+    d = sc.evaluate(turns=6)
+    assert d.action == "nudge"
+
+
+def test_stallcontrol_second_force_after_gap():
+    sc = _sc(stall_after=3, stall_force=("write_plan", {"steps": "x"}))
+    sc.last_force_turn = 2
+    sc.last_write_turn = 0
+    d = sc.evaluate(turns=8)
+    assert d.action == "force_tool"
+    assert sc.force_count == 1
+    sc.stall_forced = False
+    sc.last_write_turn = 0
+    d = sc.evaluate(turns=14)
+    assert d.action == "force_tool"
+    assert sc.force_count == 2
+
+
+def test_stallcontrol_mark_write_resets_window():
+    sc = _sc(stall_after=3)
+    sc.stall_forced = True
+    sc.mark_write(turn=5)
+    assert sc.last_write_turn == 5
+    assert sc.stall_forced is False
+
+
+def test_stallcontrol_callable_receives_episode():
+    seen: list[int] = []
+
+    def force(ep: int):
+        seen.append(ep)
+        return ("write_plan", {"steps": str(ep)})
+
+    sc = _sc(stall_after=2, stall_force=force)
+    sc.evaluate(turns=5)
+    assert seen == [1]
+    sc.stall_forced = False
+    sc.last_write_turn = 0
+    sc.evaluate(turns=10)
+    assert seen == [1, 2]
+
+
+def test_stallcontrol_callable_returns_none_stops():
+    def force(ep: int):
+        return ("write_plan", {"steps": "x"}) if ep == 1 else None
+
+    sc = _sc(stall_after=2, stall_force=force)
+    d1 = sc.evaluate(turns=5)
+    assert d1.action == "force_tool"
+    sc.stall_forced = False
+    sc.last_write_turn = 0
+    d2 = sc.evaluate(turns=10)
+    assert d2.action == "stop_stalled"
+
+
+def test_stallcontrol_no_force_nudges():
+    sc = _sc(stall_after=2, stall_nudge="write now")
+    d = sc.evaluate(turns=5)
+    assert d.action == "nudge"
+    assert d.nudge_text == "write now"
+
+
+def test_stallcontrol_default_nudge_text():
+    sc = _sc(stall_after=2)
+    d = sc.evaluate(turns=5)
+    assert d.action == "nudge"
+    assert "stall" in d.nudge_text.lower()

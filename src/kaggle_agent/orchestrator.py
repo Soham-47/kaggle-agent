@@ -17,7 +17,6 @@ from kaggle_agent.judge import (
     judge_plan,
     judge_train_llm,
     new_judge_state,
-    record_verdict,
 )
 from kaggle_agent.llm.router import ModelRouter
 from kaggle_agent.memory.ingest import build_context_pack
@@ -59,6 +58,8 @@ from kaggle_agent.research.source_cards import (
     run_source_card_research,
     write_methods_sidecar,
 )
+from kaggle_agent.stages import Stage, build_stage_registry
+from kaggle_agent.state_access import DiskStateAccessor, StateAccessor
 from kaggle_agent.research.deep import (
     ArxivSource,
     DeepResearcher,
@@ -66,7 +67,7 @@ from kaggle_agent.research.deep import (
     KaggleSource,
     WebSource,
 )
-from kaggle_agent.state_md import AgentState, RunLock, load_state, save_state
+from kaggle_agent.state_md import AgentState
 from kaggle_agent.kaggle_api.mcp_submit import submit_via_mcp
 from kaggle_agent.kaggle_api.submit_ops import normalize_kernel_ref
 from kaggle_agent.submit.browser_submit import (
@@ -75,10 +76,8 @@ from kaggle_agent.submit.browser_submit import (
     submit_via_browser,
 )
 from kaggle_agent.submit.pending import (
-    load_pending,
     mark_submitted,
     request_approval,
-    save_pending,
     set_decision,
     usable_approval,
 )
@@ -90,7 +89,6 @@ from kaggle_agent.loop import (
     score_is_better,
     update_loop_from_score,
 )
-from kaggle_agent.train.kernel_job import load_kernel_job
 from kaggle_agent.train.kernel_runner import (
     KernelRunResult,
     package_matches_existing,
@@ -184,11 +182,13 @@ class Orchestrator:
         mcp_submit_fn: Any | None = None,
         router: Any | None = None,
         skip_phases: frozenset[str] | None = None,
+        state_access: StateAccessor | None = None,
     ) -> None:
         self.settings = settings
         self.competition = competition
         self.root = root if root is not None else settings.root
         self.router = router if router is not None else ModelRouter.build(settings, competition)
+        self._sa = state_access if state_access is not None else DiskStateAccessor(self.root)
         self._kaggle = kaggle
         self._browser_fetch = browser_fetch
         self._telegram = telegram
@@ -198,6 +198,7 @@ class Orchestrator:
         self._loop_n_used = 0
         self._tracer: Tracer | None = None
         self._skip_phases = skip_phases or frozenset()
+        self._stages: dict[str, Stage] = build_stage_registry(self)
 
     def run_cycle(
         self, *, dry_run: bool | None = None, assume_approved: bool = False
@@ -207,14 +208,13 @@ class Orchestrator:
         self._loop_n_used = 0
         result = CycleResult(competition=self.competition.id, dry_run=dry)
         now = datetime.now(timezone.utc)
-        state = load_state(self.root)
+        state = self._sa.load_state()
 
         if state.paused:
             return self._skip(result, "paused", now)
-        lock = RunLock(self.root)
-        if not lock.acquire():
+        if not self._sa.acquire_lock():
             return self._skip(result, "lock_held", now)
-        if lock.took_over:
+        if self._sa.lock_took_over():
             append_daily_log("run lock stale; taken over", self.root)
 
         try:
@@ -242,7 +242,7 @@ class Orchestrator:
         except Exception as exc:  # noqa: BLE001
             self._finish_error(result, exc)
         finally:
-            lock.release()
+            self._sa.release_lock()
         return result
 
     def _skip(self, result: CycleResult, reason: str, now: datetime) -> CycleResult:
@@ -266,7 +266,7 @@ class Orchestrator:
         state.last_result = "running"
         state.last_error = "none"
         state.note = "running"
-        save_state(state, self.root)
+        self._sa.save_state(state)
         append_daily_log(f"start {self.competition.id} dry={dry}", self.root, when=now)
         return state
 
@@ -286,7 +286,7 @@ class Orchestrator:
                 if result.waiting_approve
                 else "done"
             )
-        save_state(state, self.root)
+        self._sa.save_state(state)
         if result.hard_errors:
             msg = f"end errors={result.hard_errors}"
         elif result.waiting_approve:
@@ -298,13 +298,13 @@ class Orchestrator:
 
     def _finish_error(self, result: CycleResult, exc: Exception) -> None:
         result.errors.append(str(exc))
-        state = load_state(self.root)
+        state = self._sa.load_state()
         state.phase = "IDLE"
         state.lock_held = False
         state.last_result = "error"
         state.last_error = str(exc)[:200]
         state.note = "error"
-        save_state(state, self.root)
+        self._sa.save_state(state)
         append_daily_log(f"error: {exc}", self.root)
         self._ops_close(result, "error")
 
@@ -329,7 +329,7 @@ class Orchestrator:
     ) -> AgentState:
         for phase in phases:
             state.phase = phase
-            save_state(state, self.root)
+            self._sa.save_state(state)
             append_daily_log(phase, self.root)
             if self._tracer is not None:
                 self._tracer.emit("phase", phase=phase)
@@ -385,7 +385,7 @@ class Orchestrator:
         used = 0
         for i in range(1, n + 1):
             if i > 1:
-                if load_state(self.root).paused:
+                if self._sa.load_state().paused:
                     append_daily_log("train loop stop: paused", self.root)
                     break
                 limit = self.settings.loop_max_minutes
@@ -399,7 +399,7 @@ class Orchestrator:
             if n > 1:
                 result.experiment_id = f"{base_exp}-s{i}"
                 state.active_experiment = result.experiment_id
-                save_state(state, self.root)
+                self._sa.save_state(state)
             self._clear_slice_fields(result)
             err_before = len(result.errors)
             append_daily_log(f"train slice {i}/{n}", self.root)
@@ -473,22 +473,10 @@ class Orchestrator:
         result: CycleResult,
     ) -> AgentState:
         result.phases_run.append(phase)
-        handlers = {
-            "RESEARCH": lambda: self._research(state, result),
-            "PLAN": lambda: self._plan(state, dry, result) or state,
-            "CODE": lambda: self._code(state, result),
-            "LOCAL_SMOKE": lambda: self._local_smoke(state, result),
-            "KERNEL_TRAIN": lambda: self._kernel_train(state, dry, result),
-            "VALIDATE_SUB": lambda: self._validate_sub(state, result),
-            "TELEGRAM_APPROVE": lambda: self._telegram_approve(state, dry, result),
-            "SUBMIT": lambda: self._submit(state, dry, result),
-            "FEEDBACK": lambda: self._feedback(state, dry, result),
-            "REPORT": lambda: self._report(state, dry, result),
-            "HEAL": lambda: self._heal(state, result),
-        }
-        if phase in handlers:
-            return handlers[phase]()
-        return state
+        stage = self._stages.get(phase)
+        if stage is None:
+            return state
+        return stage.run(state, dry, result) or state
 
     def _merge_budget(self, state: AgentState, updated: AgentState) -> None:
         state.budget_date = updated.budget_date
@@ -512,13 +500,12 @@ class Orchestrator:
         thin = not cards_feasible(workspace, research_md)
         deep_ran = {"n": 0}
         dest = memory_dir(self.root) / "research-deep"
-        our = str(load_state(self.root).public_best or "unknown")
+        our = str(self._sa.load_state().public_best or "unknown")
         judge_state = new_judge_state()
 
         def _judge_now() -> None:
             cards = sorted(dest.glob("source-*.md")) if dest.is_dir() else []
-            ready, reason = judge_cards_ready(zen, model, cards, our)
-            record_verdict(judge_state, ready, reason)
+            judge_cards_ready(zen, model, cards, our, state=judge_state)
 
         def _research_done() -> bool:
             if not cards_feasible(workspace, research_md):
@@ -597,7 +584,7 @@ class Orchestrator:
         workspace = self.root / self.competition.workspace_relative
         research_md = memory_dir(self.root) / "research.md"
         dest = memory_dir(self.root) / "research-deep"
-        our = str(load_state(self.root).public_best or "unknown")
+        our = str(self._sa.load_state().public_best or "unknown")
         zen = self.router.client if self.router is not None else None
         model = self.competition.model_for("distill", self.settings)
         cfg = self.settings.research_fleet_config()
@@ -718,7 +705,7 @@ class Orchestrator:
         workspace = self.root / self.competition.workspace_relative
         research_md = memory_dir(self.root) / "research.md"
         dest = memory_dir(self.root) / "research-deep"
-        our = str(load_state(self.root).public_best or "unknown")
+        our = str(self._sa.load_state().public_best or "unknown")
         zen = self.router.client if self.router is not None else None
         model = self.competition.model_for("distill", self.settings)
         cfg = self.settings.research_fleet_config()
@@ -748,8 +735,7 @@ class Orchestrator:
 
         def judge_cards(**_: Any) -> str:
             cards = sorted(dest.glob("source-*.md")) if dest.is_dir() else []
-            ready, r = judge_cards_ready(zen, model, cards, our)
-            record_verdict(judge_state, ready, r)
+            ready, r = judge_cards_ready(zen, model, cards, our, state=judge_state)
             feasible = cards_feasible(workspace, research_md)
             return f"ready={ready} feasible={feasible} {r}"
 
@@ -874,7 +860,7 @@ class Orchestrator:
     ) -> dict[str, Any]:
         workspace = self.root / self.competition.workspace_relative
         dest = memory_dir(self.root) / "research-deep"
-        our = str(load_state(self.root).public_best or "unknown")
+        our = str(self._sa.load_state().public_best or "unknown")
         zen = self.router.client if self.router is not None else None
         model = self.competition.model_for("distill", self.settings)
         shared = self._source_tool_closures()
@@ -897,9 +883,7 @@ class Orchestrator:
 
         def judge_cards(**_: Any) -> str:
             cards = sorted(dest.glob("source-*.md")) if dest.is_dir() else []
-            ready, reason = judge_cards_ready(zen, model, cards, our)
-            if judge_state is not None:
-                record_verdict(judge_state, ready, reason)
+            ready, reason = judge_cards_ready(zen, model, cards, our, state=judge_state)
             feasible = cards_feasible(workspace, memory_dir(self.root) / "research.md")
             return f"ready={ready} feasible={feasible} {reason}"
 
@@ -986,7 +970,7 @@ class Orchestrator:
         cards = sorted(dest.glob("source-*.md")) if dest.is_dir() else []
         zen = self.router.client if self.router is not None else None
         model = self.competition.model_for("distill", self.settings)
-        our = str(load_state(self.root).public_best or "unknown")
+        our = str(self._sa.load_state().public_best or "unknown")
         ready, reason = judge_cards_ready(zen, model, cards, our)
         append_daily_log(f"research judge ready={ready} {reason}", self.root)
         return ready
@@ -996,7 +980,7 @@ class Orchestrator:
         if self._kaggle is None:
             return
         try:
-            our = str(load_state(self.root).public_best or "unknown")
+            our = str(self._sa.load_state().public_best or "unknown")
             cache = self.root / self.competition.workspace_relative / "research-cache"
             zen = self.router.client if self.router is not None else None
             model = self.competition.model_for("distill", self.settings)
@@ -1222,7 +1206,7 @@ class Orchestrator:
     ) -> AgentState:
         exp_id = result.experiment_id or "kernel"
         should_push = self.settings.kernel_push and not dry
-        existing = load_kernel_job(self.root)
+        existing = self._sa.load_kernel_job()
 
         try:
             package = None
@@ -1346,7 +1330,7 @@ class Orchestrator:
             else None
         )
         if kernel_csv is not None and kernel_csv.is_file():
-            job = load_kernel_job(self.root)
+            job = self._sa.load_kernel_job()
 
             def judge_log(msg: str) -> None:
                 append_daily_log(msg, self.root)
@@ -1362,7 +1346,7 @@ class Orchestrator:
                         job.status,
                         path,
                         self.competition.labels,
-                        str(load_state(self.root).public_best or "unknown"),
+                        str(self._sa.load_state().public_best or "unknown"),
                         state=kernel_judge,
                         log=judge_log,
                     )
@@ -1378,7 +1362,7 @@ class Orchestrator:
         elif kernel_csv is None:
             append_daily_log("judge kernel skipped: no kernel path", self.root)
         else:
-            job = load_kernel_job(self.root)
+            job = self._sa.load_kernel_job()
             append_daily_log(
                 f"judge kernel skipped: no kernel output (status={job.status})",
                 self.root,
@@ -1561,7 +1545,7 @@ class Orchestrator:
             append_daily_log("submit skipped: no csv", self.root)
             return state
 
-        pending = load_pending(self.root)
+        pending = self._sa.load_pending()
         if not dry and self.settings.require_telegram_approve and not self._assume_approved:
             if (
                 pending.status == "approved"
@@ -1601,7 +1585,7 @@ class Orchestrator:
         if kernel_ref and pending.kernel_ref in {"", "none"}:
             pending.kernel_ref = kernel_ref
         if pending.status == "approved":
-            save_pending(pending, self.root)
+            self._sa.save_pending(pending)
 
         if (
             not dry
@@ -1779,7 +1763,7 @@ class Orchestrator:
                     self.root,
                 )
                 if latest.public_score and latest.public_score not in {"", "none"}:
-                    pending = load_pending(self.root)
+                    pending = self._sa.load_pending()
                     exp_id = pending.exp_id if pending.exp_id not in {"", "none"} else result.experiment_id
                     if exp_id and exp_id != "none":
                         patch_experiment(

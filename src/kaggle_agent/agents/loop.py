@@ -6,7 +6,7 @@ import json
 import re
 import time
 from dataclasses import dataclass, field
-from typing import Any, Callable
+from typing import Any, Callable, Literal
 
 from kaggle_agent.config import ResearchAgentSettings
 from kaggle_agent.llm.zen_client import ZenClient
@@ -33,6 +33,85 @@ class StageAgentResult:
     stop_reason: str
     turns: int
     observations: list[str] = field(default_factory=list)
+
+
+@dataclass
+class StallDecision:
+    """One outcome of stall evaluation: continue, stop, force a tool, or nudge."""
+
+    action: Literal["continue", "stop_stalled", "force_tool", "force_done", "nudge"]
+    tool_name: str = ""
+    tool_args: dict[str, Any] = field(default_factory=dict)
+    nudge_text: str = ""
+
+
+@dataclass
+class StallControl:
+    """Stall detection, force exhaustion, and nudge logic extracted from the agent loop.
+
+    Call ``evaluate(turns)`` each turn.  The caller interprets the returned
+    ``StallDecision``: execute a forced tool, append a nudge, stop, or continue
+    to a normal LLM turn.  After any tool write (forced or LLM-driven), call
+    ``mark_write(turn)`` to reset the stall window.
+
+    The module is in-process and tested at its single seam.  All 7 parameters that
+    previously threaded through the while-true loop now live in one place.
+    """
+
+    stall_after: int | None
+    stall_nudge: str
+    stall_force: (
+        tuple[str, dict[str, Any]]
+        | Callable[[int], tuple[str, dict[str, Any]] | None]
+        | None
+    )
+    reject_msg: str = "done rejected"
+
+    # --- mutable evaluation state ---
+    stall_forced: bool = False
+    force_count: int = 0
+    last_force_turn: int | None = None
+    last_write_turn: int = 0
+
+    def __post_init__(self) -> None:
+        if self.last_force_turn is None:
+            self.last_force_turn = -(self.stall_after or 2)
+
+    # --- methods ---
+
+    def _force_for(self, episode: int) -> tuple[str, dict[str, Any]] | None:
+        if callable(self.stall_force):
+            return self.stall_force(episode)
+        return self.stall_force
+
+    def evaluate(self, turns: int) -> StallDecision:
+        if self.stall_after is None:
+            return StallDecision("continue")
+        if turns - self.last_write_turn < self.stall_after:
+            return StallDecision("continue")
+        if (
+            self.stall_force is not None
+            and not self.stall_forced
+            and turns - self.last_force_turn >= self.stall_after + 2
+        ):
+            self.stall_forced = True
+            self.force_count += 1
+            self.last_force_turn = turns
+            forced = self._force_for(self.force_count)
+            if forced is None:
+                return StallDecision("stop_stalled")
+            name, fargs = forced
+            if name == "done":
+                return StallDecision("force_done", tool_name=name, tool_args=fargs)
+            return StallDecision("force_tool", tool_name=name, tool_args=fargs)
+        nudge = self.stall_nudge or (
+            "Stall: you have read enough. Call a write tool or done now."
+        )
+        return StallDecision("nudge", nudge_text=nudge)
+
+    def mark_write(self, turn: int) -> None:
+        self.last_write_turn = turn
+        self.stall_forced = False
 
 
 def parse_tool_call(raw: str) -> tuple[str, dict[str, Any]]:
@@ -101,12 +180,12 @@ class StageAgent:
         self._fallback_tool = fallback_tool
         self._invalid_streak = 0
         self._tool_schemas = dict(tool_schemas or {})
-        self._stall_after = stall_after
-        self._stall_nudge = stall_nudge
-        self._stall_force = stall_force
-        self._stall_forced = False
-        self._stall_force_count = 0
-        self._last_force_turn = -(stall_after or 0)
+        self._stall = StallControl(
+            stall_after=stall_after,
+            stall_nudge=stall_nudge,
+            stall_force=stall_force,
+            reject_msg=reject_msg,
+        )
         self._nudges: list[str] = []
 
     def _logmsg(self, msg: str) -> None:
@@ -118,7 +197,7 @@ class StageAgent:
         transcript: list[str] = [context]
         observations: list[str] = []
         turns = 0
-        last_write_turn = 0
+        stall = self._stall
         while True:
             if time.monotonic() >= deadline:
                 self._logmsg(f"{self._name} agent stop: time")
@@ -128,57 +207,42 @@ class StageAgent:
                 self._logmsg(f"{self._name} agent stop: turn_cap")
                 self._trace("agent_stop", reason="turn_cap", turns=turns)
                 return StageAgentResult("turn_cap", turns, observations)
-            stalled = (
-                self._stall_after is not None
-                and turns - last_write_turn >= self._stall_after
-            )
-            if stalled:
-                if (
-                    self._stall_force is not None
-                    and not self._stall_forced
-                    and turns - self._last_force_turn >= self._stall_after + 2
-                ):
-                    self._stall_forced = True
-                    self._stall_force_count += 1
-                    self._last_force_turn = turns
-                    forced = self._force_for(self._stall_force_count)
-                    if forced is None:
-                        self._logmsg(f"{self._name} agent stop: stalled")
-                        self._trace("agent_stop", reason="stalled", turns=turns)
-                        return StageAgentResult("stalled", turns, observations)
-                    name, fargs = forced
-                    if name == "done":
-                        if self._accept_done is None or self._accept_done():
-                            self._logmsg(f"{self._name} agent stop: done (forced) {fargs}")
-                            self._trace("agent_stop", reason="done")
-                            return StageAgentResult("done", turns, observations)
-                        obs = self._reject_msg
+            decision = stall.evaluate(turns)
+            if decision.action == "stop_stalled":
+                self._logmsg(f"{self._name} agent stop: stalled")
+                self._trace("agent_stop", reason="stalled", turns=turns)
+                return StageAgentResult("stalled", turns, observations)
+            if decision.action in ("force_tool", "force_done"):
+                name, args = decision.tool_name, dict(decision.tool_args)
+                if decision.action == "force_done":
+                    if self._accept_done is None or self._accept_done():
+                        self._logmsg(f"{self._name} agent stop: done (forced) {args}")
+                        self._trace("agent_stop", reason="done")
+                        return StageAgentResult("done", turns, observations)
+                    obs = self._stall.reject_msg
+                else:
+                    fn = self._tools.get(name)
+                    if fn is None:
+                        obs = f"unknown tool {name}"
                     else:
-                        fn = self._tools.get(name)
-                        if fn is None:
-                            obs = f"unknown tool {name}"
-                        else:
-                            try:
-                                obs = str(fn(**fargs))
-                            except Exception as exc:  # noqa: BLE001
-                                obs = f"tool error: {exc}"
-                    turns += 1
-                    observations.append(obs[:4000])
-                    transcript.append(f"tool={name} args={fargs} result={obs[:2000]}")
-                    self._logmsg(f"{self._name} agent forced tool={name} turns={turns}")
-                    if name in WRITE_TOOLS:
-                        last_write_turn = turns
-                    self._stall_forced = False
-                    continue
+                        try:
+                            obs = str(fn(**args))
+                        except Exception as exc:  # noqa: BLE001
+                            obs = f"tool error: {exc}"
+                turns += 1
+                observations.append(obs[:4000])
+                transcript.append(f"tool={name} args={args} result={obs[:2000]}")
+                self._logmsg(f"{self._name} agent forced tool={name} turns={turns}")
+                if name in WRITE_TOOLS:
+                    stall.mark_write(turns)
+                stall.stall_forced = False
+                continue
+            if decision.action == "nudge":
+                nudge_text = decision.nudge_text
+                if nudge_text not in self._nudges:
+                    self._nudges.append(nudge_text)
                 self._logmsg(f"{self._name} agent nudge: stall turns={turns}")
-                nudge = (
-                    self._stall_nudge
-                    or f"Stall: you have read enough. Call a write tool or done now. "
-                    f"Tools used so far: {sorted(self._used_tools(transcript))}"
-                )
-                if nudge not in self._nudges:
-                    self._nudges.append(nudge)
-                transcript.append(f"nudge: {nudge}")
+                transcript.append(f"nudge: {nudge_text}")
                 turns += 1
                 continue
             tool, args = self._next_action(transcript)
@@ -218,15 +282,7 @@ class StageAgent:
             if obs.startswith(("rejected:", "tool error:")):
                 self._logmsg(f"{self._name} agent turn={turns} result={obs[:300]}")
             if tool in WRITE_TOOLS:
-                last_write_turn = turns
-                self._stall_forced = False
-
-    def _force_for(
-        self, episode: int
-    ) -> tuple[str, dict[str, Any]] | None:
-        if callable(self._stall_force):
-            return self._stall_force(episode)
-        return self._stall_force
+                stall.mark_write(turns)
 
     def _used_tools(self, transcript: list[str]) -> set[str]:
         return {t.split(" ", 1)[0][5:] for t in transcript if t.startswith("tool=")}

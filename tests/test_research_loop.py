@@ -27,15 +27,25 @@ class _ScriptedZen:
 
 
 def _fake_judge(monkeypatch, verdicts):  # noqa: ANN001
-    """Patch orchestrator.judge_cards_ready; verdicts is callable or iterable."""
+    """Patch orchestrator.judge_cards_ready; verdicts is callable or iterable.
+
+    Honors the interface: the real judge records each verdict into ``state``
+    (streak tracking lives in ``judge_stage``), so the double does the same.
+    """
+    from kaggle_agent.judge import record_verdict
+
     calls = {"n": 0}
 
-    def fake(zen, model, cards, our):  # noqa: ANN001
+    def fake(zen, model, cards, our, state=None, **kwargs):  # noqa: ANN001
         calls["n"] += 1
         if callable(verdicts):
-            return verdicts(calls["n"])
-        seq = iter(verdicts)
-        return next(seq, (False, f"reason {calls['n']}"))
+            v = verdicts(calls["n"])
+        else:
+            seq = iter(verdicts)
+            v = next(seq, (False, f"reason {calls['n']}"))
+        if state is not None:
+            record_verdict(state, *v)
+        return v
 
     monkeypatch.setattr("kaggle_agent.orchestrator.judge_cards_ready", fake)
     return calls

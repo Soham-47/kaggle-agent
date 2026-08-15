@@ -403,37 +403,52 @@ def judge_cards_ready(
     model: str,
     cards: list[Path],
     our_score: str,
+    *,
+    state: dict[str, Any] | None = None,
+    log: Callable[[str], None] | None = None,
 ) -> tuple[bool, str]:
-    """Waku-style gate: deterministic first, then optional LLM judge."""
+    """Cards judge: delegates to the shared ``judge_stage`` scaffold so streak
+    tracking and fail-open logic live in one seam with the other judges."""
+    from kaggle_agent.judge import judge_stage, new_judge_state  # noqa: PLC0415
+
     if not cards:
         return False, "no cards"
-    workspace_probe = cards[0].parent
-    # Deterministic: at least one non-junk step in the card bodies
     texts = [p.read_text(encoding="utf-8") for p in cards]
-    steps = []
-    for text in texts:
-        m = re.search(r"- copyable next step:\s*(.+)", text)
-        if m and not step_is_junk(m.group(1)):
-            steps.append(m.group(1))
-    if not steps:
-        return False, "no actionable step"
-    if zen is None:
+
+    def deterministic() -> tuple[bool, str]:
+        steps = []
+        for text in texts:
+            m = re.search(r"- copyable next step:\s*(.+)", text)
+            if m and not step_is_junk(m.group(1)):
+                steps.append(m.group(1))
+        if not steps:
+            return False, "no actionable step"
         return True, "deterministic"
-    joined = "\n\n".join(t[:1200] for t in texts[:2])
-    user = (
-        f"our_public_best={our_score}\n"
-        "Are these method cards good enough for a coding agent to change a kernel "
-        "without inventing dataset slugs? Return JSON "
-        '{"ready": bool, "reason": str}. ready=false if steps are generic, '
-        "refs are fake (dataset/model), or inference IDs are missing.\n\n"
-        f"{joined}"
+
+    def llm() -> tuple[bool, str]:
+        joined = "\n\n".join(t[:1200] for t in texts[:2])
+        user = (
+            f"our_public_best={our_score}\n"
+            "Are these method cards good enough for a coding agent to change a kernel "
+            "without inventing dataset slugs? Return JSON "
+            '{"ready": bool, "reason": str}. ready=false if steps are generic, '
+            "refs are fake (dataset/model), or inference IDs are missing.\n\n"
+            f"{joined}"
+        )
+        try:
+            parsed = _json_completion(zen, model, _CARD_JUDGE_SYSTEM, user, max_tokens=400)
+        except Exception:  # noqa: BLE001
+            return True, "judge-fail-open"
+        ready = bool(parsed.get("ready"))
+        return ready, str(parsed.get("reason") or ("ready" if ready else "not ready"))
+
+    return judge_stage(
+        "cards",
+        state=state if state is not None else new_judge_state(),
+        deterministic=deterministic,
+        llm=llm if zen is not None else None,
+        log=log,
     )
-    try:
-        parsed = _json_completion(zen, model, _CARD_JUDGE_SYSTEM, user, max_tokens=400)
-    except Exception:  # noqa: BLE001
-        return True, "judge-fail-open"
-    ready = bool(parsed.get("ready"))
-    return ready, str(parsed.get("reason") or ("ready" if ready else "not ready"))
 
 
 _PULL_LOCK = threading.Lock()

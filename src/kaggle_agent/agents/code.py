@@ -192,6 +192,74 @@ def _indent_body(source: str) -> str:
     return "\n".join("    " + ln if ln.strip() else ln for ln in text.splitlines())
 
 
+# ---------------------------------------------------------------------------
+# Recipe validation pipeline: ordered predicates, each independently testable.
+# A rule returns a failure reason or None on pass; the pipeline returns the
+# first failure.  splice_custom_infer and replace_kernel_recipe share the
+# syntactic/semantic rules, so a rule change fixes both callers at once.
+# ---------------------------------------------------------------------------
+
+RecipeRule = Callable[[str], str | None]
+
+
+class ValidationPipeline:
+    """Ordered recipe checks; ``run`` returns the first failure reason or None."""
+
+    def __init__(self, rules: list[RecipeRule]) -> None:
+        self._rules = list(rules)
+
+    def run(self, recipe: str) -> str | None:
+        for rule in self._rules:
+            reason = rule(recipe)
+            if reason is not None:
+                return reason
+        return None
+
+    def __call__(self, recipe: str) -> str | None:
+        return self.run(recipe)
+
+
+def valid_python(recipe: str) -> str | None:
+    try:
+        ast.parse(recipe)
+    except SyntaxError:
+        return "recipe is not valid Python"
+    return None
+
+
+def writes_submission_csv(recipe: str) -> str | None:
+    if "submission.csv" not in recipe:
+        return "recipe must write submission.csv"
+    return None
+
+
+def no_out_hook(recipe: str) -> str | None:
+    if "out = CUSTOM_INFER" in recipe:
+        return "do not hook Path out"
+    return None
+
+
+def calls_custom_infer(recipe: str) -> str | None:
+    if "sub = CUSTOM_INFER(sub, ctx)" not in recipe:
+        return "recipe must call CUSTOM_INFER(sub, ctx)"
+    return None
+
+
+def min_length(old: str) -> RecipeRule:
+    """Length guard against summarized/truncated recipe replacements."""
+
+    def rule(recipe: str) -> str | None:
+        if len(recipe) < len(old) * 0.3:
+            return f"recipe too short ({len(recipe)} chars vs {len(old)} before)"
+        return None
+
+    return rule
+
+
+_PRE_FIX_RULES: list[RecipeRule] = [valid_python, writes_submission_csv]
+_POST_FIX_RULES: list[RecipeRule] = [no_out_hook, calls_custom_infer]
+
+
 def splice_custom_infer(wrapper: str, source: str) -> str:
     m = _RECIPE_RE.search(wrapper)
     if not m:
@@ -206,14 +274,10 @@ def splice_custom_infer(wrapper: str, source: str) -> str:
     before, rest = recipe.split(HOOK_START, 1)
     _, after = rest.split(HOOK_END, 1)
     new_recipe = before + block + after
-    if "out = CUSTOM_INFER" in new_recipe:
-        raise ValueError("do not hook Path out")
-    if "sub = CUSTOM_INFER(sub, ctx)" not in new_recipe:
-        raise ValueError("need sub = CUSTOM_INFER(sub, ctx)")
-    if "submission.csv" not in new_recipe or "CUSTOM_INFER" not in new_recipe:
-        raise ValueError("extracted recipe missing submission.csv or CUSTOM_INFER")
+    reason = ValidationPipeline(_POST_FIX_RULES + [writes_submission_csv, valid_python])(new_recipe)
+    if reason is not None:
+        raise ValueError(reason)
     ast.parse(wrapper)
-    ast.parse(new_recipe)
     return wrapper[: m.start(3)] + new_recipe + wrapper[m.end(3) :]
 
 
@@ -233,19 +297,16 @@ def replace_kernel_recipe(wrapper: str, source: str) -> str:
         raise ValueError(f"recipe must not contain {quote}")
     old = m.group(3)
     new = source.strip()
-    ast.parse(new)
-    if "submission.csv" not in new:
-        raise ValueError("recipe must write submission.csv")
+    reason = ValidationPipeline(_PRE_FIX_RULES)(new)
+    if reason is not None:
+        raise ValueError(reason)
     if "def CUSTOM_INFER" in new and "sub = CUSTOM_INFER(sub, ctx)" not in new:
         new = new.rstrip() + "\nctx = {\"labels\": LABELS, \"id_col\": ID_COL, \"work\": str(WORK)}\nsub = CUSTOM_INFER(sub, ctx)\n"
-    if "out = CUSTOM_INFER" in new:
-        raise ValueError("do not hook Path out")
     if HOOK_START not in new or HOOK_END not in new:
         new = _wrap_markers(new)
-    if "sub = CUSTOM_INFER(sub, ctx)" not in new:
-        raise ValueError("recipe must call CUSTOM_INFER(sub, ctx)")
-    if len(new) < len(old) * 0.3:
-        raise ValueError(f"recipe too short ({len(new)} chars vs {len(old)} before)")
+    reason = ValidationPipeline(_POST_FIX_RULES + [min_length(old)])(new)
+    if reason is not None:
+        raise ValueError(reason)
     return wrapper[: m.start(3)] + new + wrapper[m.end(3) :]
 
 

@@ -14,6 +14,7 @@ from kaggle_agent.judge import (
     record_verdict,
 )
 from kaggle_agent.pipeline.validate import ValidationResult
+from kaggle_agent.research.source_cards import judge_cards_ready
 
 
 class _ScriptedZen:
@@ -224,3 +225,64 @@ def test_judge_train_llm_accepts_empty_labels(tmp_path: Path):
     ready, reason = judge_train_llm(None, "m", "success", csv, [], "0.526")
     assert ready is True
     assert reason == "judge-fail-open"
+
+
+# ---------------------------------------------------------------------------
+# Cards judge: unified with judge_stage — streak tracking, deterministic gate,
+# fail-open all in the one seam.
+# ---------------------------------------------------------------------------
+
+
+def _card(path: Path, *, step: str = "attach public weights") -> Path:
+    path.write_text(
+        "# t\n"
+        "- ref: u/r\n"
+        f"- copyable next step: {step} Our score=0.526.\n"
+        "- do not copy: H-flip\n",
+        encoding="utf-8",
+    )
+    return path
+
+
+def test_judge_cards_records_verdict_into_state(tmp_path: Path):
+    st = _state()
+    card = _card(tmp_path / "a.md")
+    ready, reason = judge_cards_ready(None, "m", [card], "0.526", state=st)
+    assert (ready, reason) == (True, "deterministic")
+    assert st["ready"] is True
+    assert st["streak"] == 1
+    assert st["last_reason"] == "deterministic"
+
+
+def test_judge_cards_no_actionable_step_rejects(tmp_path: Path):
+    st = _state()
+    card = _card(tmp_path / "a.md", step="use dataset/model refs")
+    ready, reason = judge_cards_ready(None, "m", [card], "0.526", state=st)
+    assert ready is False
+    assert "no actionable step" in reason
+    assert st["streak"] == 1
+    assert st["ready"] is False
+
+
+def test_judge_cards_empty_cards_reject():
+    ready, reason = judge_cards_ready(None, "m", [], "0.526")
+    assert (ready, reason) == (False, "no cards")
+
+
+def test_judge_cards_llm_rejects_generic(tmp_path: Path):
+    zen = _ScriptedZen([{"ready": False, "reason": "generic steps"}])
+    card = _card(tmp_path / "a.md", step="improve the model")
+    ready, reason = judge_cards_ready(zen, "m", [card], "0.526")
+    assert ready is False
+    assert reason == "generic steps"
+
+
+def test_judge_cards_fail_open_on_llm_error(tmp_path: Path):
+    class Boom:
+        def chat(self, model, messages, **kwargs):  # noqa: ANN001
+            raise RuntimeError("boom")
+
+    card = _card(tmp_path / "a.md")
+    ready, reason = judge_cards_ready(Boom(), "m", [card], "0.526")
+    assert ready is True
+    assert "fail-open" in reason
