@@ -99,11 +99,27 @@ def test_notebooks_agent_gets_kernel_tools_only():
 def test_write_card_namespaces_by_kind(tmp_path: Path):
     dest = tmp_path / "cards"
     web_card = make_write_card(dest, "web")
-    web_card("https://example.com/a", "# a\n- ref: https://example.com/a\n")
+    web_card(
+        "https://example.com/a",
+        "# a\n- ref: https://example.com/a\n"
+        "- copyable next step: attach a\n- do not copy: H-flip\n",
+    )
     github_card = make_write_card(dest, "github")
-    github_card("owner/repo", "# repo\n- ref: https://github.com/owner/repo\n")
+    github_card(
+        "owner/repo",
+        "# repo\n- ref: https://github.com/owner/repo\n"
+        "- copyable next step: pull repo\n- do not copy: P100\n",
+    )
     names = sorted(p.name for p in dest.glob("source-*.md"))
     assert names == ["source-github-owner-repo.md", "source-web-https-example-com-a.md"]
+
+
+def test_write_card_rejects_truncated_body(tmp_path: Path):
+    dest = tmp_path / "cards"
+    card = make_write_card(dest, "web")
+    out = card("https://example.com/a", "- inference: discover hidden test IDs from study folders, not")
+    assert "rejected" in out
+    assert not list(dest.glob("source-*.md"))
 
 
 def _stage_agent(zen, tools, accept_done=None):  # noqa: ANN001

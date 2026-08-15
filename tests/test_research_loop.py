@@ -373,7 +373,7 @@ def test_fleet_polish_improves_cards_when_judge_not_ready(tmp_path: Path, monkey
     zen = _ScriptedZen(
         [
             {"tool": "read_cards"},
-            {"tool": "write_card", "args": {"ref": "u/polish", "markdown": "# x\n- copyable next step: attach u/weights\n"}},
+            {"tool": "write_card", "args": {"ref": "u/polish", "markdown": "# x\n- copyable next step: attach u/weights\n- do not copy: H-flip\n"}},
             {"tool": "judge_cards"},
             {"tool": "done", "args": {"reason": "ok"}},
         ]

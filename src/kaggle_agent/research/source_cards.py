@@ -243,7 +243,7 @@ def card_from_source_llm(
         "model_sources must be full pins or [].\n\n"
         f"<source>\n{source_text[:18000]}\n</source>"
     )
-    parsed = _json_completion(zen, model, _CARD_SYSTEM, user, max_tokens=1400)
+    parsed = _json_completion(zen, model, _CARD_SYSTEM, user, max_tokens=2400)
     step = str(parsed.get("copyable_next_step") or "").strip()
     if not step or step_is_junk(step):
         return ""

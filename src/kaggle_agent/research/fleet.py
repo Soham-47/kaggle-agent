@@ -110,10 +110,16 @@ def make_write_card(dest: Path, kind: str) -> Callable[[str, str], str]:
     """write_card closure that namespaces files as source-<kind>-<slug>.md."""
 
     def write_card(ref: str = "", markdown: str = "") -> str:
+        body = (markdown or f"# {ref}\n- ref: {ref}\n").strip()
+        if "copyable next step:" not in body or "do not copy:" not in body:
+            return (
+                "rejected: card body must contain both a 'copyable next step:' line "
+                "and a 'do not copy:' line; write a shorter, complete card"
+            )
         dest.mkdir(parents=True, exist_ok=True)
         slug = re.sub(r"[^a-z0-9]+", "-", (ref or kind).lower()).strip("-")[:60] or "src"
         path = dest / f"source-{kind}-{slug}.md"
-        path.write_text(markdown or f"# {ref}\n- ref: {ref}\n", encoding="utf-8")
+        path.write_text(body + "\n", encoding="utf-8")
         return str(path)
 
     return write_card
