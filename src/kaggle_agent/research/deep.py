@@ -320,8 +320,14 @@ def _json_completion(
     *,
     max_tokens: int = 2048,
     retries: int = 1,
+    plain_wrap_key: str | None = None,
 ) -> dict[str, Any]:
-    """One strict-JSON LLM call; returns parsed dict. Raises on failure."""
+    """One strict-JSON LLM call; returns a dict. Raises on failure.
+
+    If every attempt returns prose (flash models do this) and plain_wrap_key
+    is set, return {plain_wrap_key: raw} instead of raising. Used for the
+    final report, where prose is still a usable report.
+    """
     raw = client.chat(
         model,
         [
@@ -342,8 +348,16 @@ def _json_completion(
         pass
     if retries > 0:
         return _json_completion(
-            client, model, system, user, max_tokens=max_tokens, retries=retries - 1
+            client,
+            model,
+            system,
+            user,
+            max_tokens=max_tokens,
+            retries=retries - 1,
+            plain_wrap_key=plain_wrap_key,
         )
+    if plain_wrap_key is not None:
+        return {plain_wrap_key: (raw or "").strip()}
     raise ResearchSourceError(f"LLM returned invalid JSON: {raw[:200]!r}")
 
 
@@ -395,6 +409,7 @@ class DeepResearcher:
         root: Path,
         *,
         log: Any = None,
+        relevance_terms: tuple[str, ...] = (),
     ) -> None:
         self._client = client
         self._model = model
@@ -402,6 +417,7 @@ class DeepResearcher:
         self._sources = sources
         self._root = root
         self._log = log
+        self._relevance_terms = tuple(t.lower() for t in relevance_terms if t)
         self._deadline = time.monotonic() + config.max_minutes * 60
         self._query_count = 0
         self._fetch_count = 0
@@ -452,6 +468,13 @@ class DeepResearcher:
                 out.append({"query": q, "researchGoal": str(it.get("researchGoal", ""))})
         return out or [{"query": query, "researchGoal": query}]
 
+    def _relevant(self, text: str) -> bool:
+        """Keep fetched content that mentions at least one relevance term."""
+        if not self._relevance_terms:
+            return True
+        low = text.lower()
+        return any(t in low for t in self._relevance_terms)
+
     def _fetch_all(self, hits: list[SourceHit]) -> list[str]:
         out: list[str] = []
         if not hits:
@@ -470,8 +493,10 @@ class DeepResearcher:
                     text = fut.result()
                 except Exception:  # noqa: BLE001
                     text = ""
-                if text:
-                    self._fetch_count += 1
+                if not text:
+                    continue
+                self._fetch_count += 1
+                if self._relevant(text):
                     out.append(text[: _MAX_CONTENT_CHARS])
         return out
 
@@ -479,7 +504,9 @@ class DeepResearcher:
         contents = self._fetch_all(hits)
         if self._client is None or not contents:
             return {
-                "learnings": [h.snippet for h in hits if h.snippet][:num_learn],
+                "learnings": [
+                    h.snippet for h in hits if h.snippet and self._relevant(h.snippet)
+                ][:num_learn],
                 "followUpQuestions": [],
             }
         blocks = "\n".join(f"<content>\n{c}\n</content>" for c in contents)
@@ -566,7 +593,7 @@ class DeepResearcher:
     def _write_report(self, prompt: str, learnings: list[str], visited: list[str]) -> Path:
         report_dir = self._root / self._config.report_dir
         report_dir.mkdir(parents=True, exist_ok=True)
-        stamp = time.strftime("%Y%m%d-%H%M%S")
+        stamp = time.strftime("%Y%m%d-%H%M%S", time.gmtime())
         path = report_dir / f"deep-{stamp}.md"
 
         body = self._report_markdown(prompt, learnings)
@@ -587,7 +614,15 @@ class DeepResearcher:
             "Return JSON: {\"reportMarkdown\": str}\n\n"
             f"<prompt>{prompt}</prompt>\n\n<learnings>\n{learn}\n</learnings>"
         )
-        parsed = _json_completion(self._client, self._model, _SYSTEM, user, max_tokens=8192)
+        parsed = _json_completion(
+            self._client,
+            self._model,
+            _SYSTEM,
+            user,
+            max_tokens=8192,
+            retries=2,
+            plain_wrap_key="reportMarkdown",
+        )
         return str(parsed.get("reportMarkdown") or "").strip() or "# Deep research report"
 
     def digest_markdown(self, learnings: list[str], sources: list[str]) -> str:

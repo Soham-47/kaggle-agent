@@ -200,6 +200,11 @@ def _default_fetch(prefer_browser_harness: bool) -> FetchFn:
     return smart_fetch
 
 
+def default_fetch(prefer_browser_harness: bool = True) -> FetchFn:
+    """Browser-harness fetch with an HTTP fallback; safe outside tests."""
+    return _default_fetch(prefer_browser_harness)
+
+
 @dataclass
 class BrowserResearcher:
     fetch: FetchFn
@@ -207,7 +212,7 @@ class BrowserResearcher:
 
     @classmethod
     def default(cls, *, prefer_browser_harness: bool = True) -> BrowserResearcher:
-        return cls(fetch=_default_fetch(prefer_browser_harness))
+        return cls(fetch=default_fetch(prefer_browser_harness))
 
     def collect(
         self, slug: str, *, pages: tuple[str, ...] = ("overview", "discussion")

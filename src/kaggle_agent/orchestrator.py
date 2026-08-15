@@ -21,6 +21,7 @@ from kaggle_agent.research.apply_snapshot import apply_kaggle_research
 from kaggle_agent.research.browser import (
     BrowserResearcher,
     FetchFn,
+    default_fetch,
     merge_browser_into_research_md,
 )
 from kaggle_agent.agents.code import make_code_agent
@@ -461,10 +462,11 @@ class Orchestrator:
         zen = self.router.client if self.router is not None else None
         model = self.competition.model_for("distill", self.settings)
         thin = not cards_feasible(workspace, research_md)
+        deep_ran = {"n": 0}
         agent = ResearchAgent(
             zen,
             model,
-            self._research_tools(result),
+            self._research_tools(result, deep_ran),
             self.settings.research_agent_config(),
             log=lambda msg: append_daily_log(msg, self.root),
             accept_done=lambda: cards_feasible(workspace, research_md),
@@ -490,9 +492,12 @@ class Orchestrator:
             append_daily_log("research cards feasible", self.root)
         else:
             append_daily_log("research cards still thin; continuing", self.root)
+        deep = self.settings.deep_research_config()
+        if deep.enabled and not deep_ran["n"]:
+            self._deep_research(result)
         return state
 
-    def _research_tools(self, result: CycleResult) -> dict[str, Any]:
+    def _research_tools(self, result: CycleResult, deep_ran: dict[str, int] | None = None) -> dict[str, Any]:
         workspace = self.root / self.competition.workspace_relative
         dest = memory_dir(self.root) / "research-deep"
         cache = workspace / "research-cache"
@@ -562,6 +567,7 @@ class Orchestrator:
             feasible = cards_feasible(workspace, memory_dir(self.root) / "research.md")
             return f"ready={ready} feasible={feasible} {reason}"
 
+
         def harvest_cards(reset: bool | None = None, **_: Any) -> str:
             research_md = memory_dir(self.root) / "research.md"
             if reset is None:
@@ -571,6 +577,8 @@ class Orchestrator:
             return f"wrote {len(cards)} cards"
 
         def deep_research(**_: Any) -> str:
+            if deep_ran is not None:
+                deep_ran["n"] += 1
             self._deep_research(result)
             return f"deep_ok={result.deep_ok} sources={result.deep_sources}"
 
@@ -690,11 +698,19 @@ class Orchestrator:
                 self._kaggle = KaggleClient().connect()
             zen = self.router.client if self.router is not None else None
             if zen is None:
-                append_daily_log("deep research skipped: no OPENCODE_API_KEY", self.root)
+                append_daily_log("deep research skipped: no DEEPSEEK_API_KEY", self.root)
                 return
             model = self.competition.model_for("distill", self.settings)
             cache = self.root / self.competition.workspace_relative / "research-cache"
             prompt = self._deep_prompt()
+            web_fetch = self._browser_fetch or default_fetch(
+                self.settings.browser_prefer_harness
+            )
+            terms = tuple(
+                dict.fromkeys(
+                    [self.competition.slug] + self.competition.slug.split("-")[:2]
+                )
+            )
             researcher = DeepResearcher(
                 zen,
                 model,
@@ -703,10 +719,11 @@ class Orchestrator:
                     KaggleSource(self._kaggle, self.competition.slug, cache),
                     ArxivSource(),
                     GithubSource(),
-                    WebSource(),
+                    WebSource(fetch=web_fetch),
                 ],
                 root=self.root,
                 log=lambda msg: append_daily_log(msg, self.root),
+                relevance_terms=terms,
             )
             out = researcher.run(prompt, memory_dir(self.root) / "research.md")
             result.deep_ok = bool(out.learnings) and not out.error

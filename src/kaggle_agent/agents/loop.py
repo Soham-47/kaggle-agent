@@ -64,6 +64,8 @@ class StageAgent:
         name: str = "stage",
         reject_msg: str = "done rejected",
         tracer: Any | None = None,
+        max_invalid: int = 2,
+        fallback_tool: str | None = None,
     ) -> None:
         self._zen = zen
         self._model = model
@@ -77,6 +79,9 @@ class StageAgent:
         self._name = name
         self._reject_msg = reject_msg
         self._tracer = tracer
+        self._max_invalid = max(1, int(max_invalid))
+        self._fallback_tool = fallback_tool
+        self._invalid_streak = 0
 
     def _logmsg(self, msg: str) -> None:
         if self._log is not None:
@@ -98,6 +103,10 @@ class StageAgent:
                 return StageAgentResult("turn_cap", turns, observations)
             tool, args = self._next_action(transcript)
             self._trace("tool", tool=tool, turn=turns + 1, args_keys=sorted(args.keys()))
+            if tool == "no_llm":
+                self._logmsg(f"{self._name} agent stop: no_llm")
+                self._trace("agent_stop", reason="no_llm", turns=turns)
+                return StageAgentResult("no_llm", turns, observations)
             if tool == "done":
                 if self._accept_done is None or self._accept_done():
                     self._logmsg(f"{self._name} agent stop: done {args}")
@@ -156,14 +165,23 @@ class StageAgent:
             for name in names
         ]
 
+    def _reset_invalid_streak(self) -> None:
+        self._invalid_streak = 0
+
     def _next_action(self, transcript: list[str]) -> tuple[str, dict[str, Any]]:
+        used = self._used_tools(transcript)
         forced = self._forced_next(transcript)
         if forced is not None:
+            self._reset_invalid_streak()
             return forced
+        if self._invalid_streak >= self._max_invalid:
+            self._reset_invalid_streak()
+            if self._fallback_tool and self._fallback_tool in self._tools:
+                return self._fallback_tool, {}
+            return "no_llm", {}
         if self._zen is None or not hasattr(self._zen, "chat"):
-            return "done", {"reason": "no_zen"}
+            return "no_llm", {}
         writes = {"harvest_cards", "write_card", "write_plan", "write_methods", "write_custom_infer"}
-        used = self._used_tools(transcript)
         choice = "auto" if used & writes else "required"
         raw = self._zen.chat(
             self._model,
@@ -190,9 +208,11 @@ class StageAgent:
         )
         native = list(getattr(self._zen, "last_tool_calls", None) or [])
         if native:
+            self._reset_invalid_streak()
             return native[0]
         tool, args = parse_tool_call(raw)
         if tool != "invalid_json":
+            self._reset_invalid_streak()
             return tool, args
         raw2 = self._zen.chat(
             self._model,
@@ -211,8 +231,14 @@ class StageAgent:
         )
         native = list(getattr(self._zen, "last_tool_calls", None) or [])
         if native:
+            self._reset_invalid_streak()
             return native[0]
-        return parse_tool_call(raw2)
+        tool2, args2 = parse_tool_call(raw2)
+        if tool2 != "invalid_json":
+            self._reset_invalid_streak()
+            return tool2, args2
+        self._invalid_streak += 1
+        return tool2, args2
 
     def _trace(self, kind: str, **fields: Any) -> None:
         if self._tracer is None:

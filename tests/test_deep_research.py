@@ -7,6 +7,7 @@ from pathlib import Path
 
 from kaggle_agent.research.deep import (
     ArxivSource,
+    DeepResearchConfig,
     DeepResearcher,
     GithubSource,
     KaggleSource,
@@ -135,6 +136,135 @@ def test_research_respects_depth_zero():
     learnings, visited = r.research("q", 2, 0, ["seed"], [])
     assert learnings == ["seed"]
     assert visited == []
+
+
+def test_run_writes_report_and_digest(tmp_path: Path):
+    llm = FakeLLM(
+        [
+            {"queries": [{"query": "q1", "researchGoal": "g1"}]},
+            {"learnings": ["key insight"], "followUpQuestions": []},
+            {"reportMarkdown": "# Deep report\n\nInsights here."},
+        ]
+    )
+    hits = [SourceHit(url="https://x.com/1", title="x1", kind="fake")]
+    r = _researcher(llm, hits, tmp_path)
+    research_md = tmp_path / "memory" / "research.md"
+    out = r.run("research the competition", research_md)
+    assert not out.error
+    assert out.learnings == ["key insight"]
+    assert out.report_path is not None
+    assert "# Deep report" in out.report_path.read_text()
+    assert research_md.is_file()
+    text = research_md.read_text()
+    assert "## Deep research digest" in text
+    assert "key insight" in text
+
+
+class _ProseReportLLM:
+    """Returns strict JSON for queries/distill, prose for the final report."""
+
+    last_tool_calls: list = []
+
+    def __init__(self, plan: list[dict]) -> None:
+        self._plan = iter(plan)
+
+    def chat(self, model, messages, **kwargs):  # noqa: ANN001
+        if kwargs.get("max_tokens") == 8192:
+            return "We need answer final JSON with reportMarkdown string. No prose."
+        return json.dumps(next(self._plan))
+
+
+def test_report_accepts_plain_markdown_when_json_fails():
+    llm = _ProseReportLLM([])
+    r = _researcher(llm, [], Path("/tmp"))
+    md = r._report_markdown("research the competition", ["key insight"])
+    assert "We need answer final JSON with reportMarkdown" in md
+
+
+def test_run_writes_report_when_report_call_returns_prose(tmp_path: Path):
+    llm = _ProseReportLLM(
+        [
+            {"queries": [{"query": "q1", "researchGoal": "g1"}]},
+            {"learnings": ["key insight"], "followUpQuestions": []},
+        ]
+    )
+    hits = [SourceHit(url="u1", title="t1", kind="fake")]
+    r = _researcher(llm, hits, tmp_path)
+    out = r.run("research the competition", tmp_path / "memory" / "research.md")
+    assert not out.error
+    assert out.learnings == ["key insight"]
+    assert out.report_path is not None
+    assert "We need answer final JSON with reportMarkdown" in out.report_path.read_text()
+
+
+def test_fetch_all_filters_irrelevant_content():
+    class VariedSource(FakeSource):
+        def content(self, hit, max_chars=25000):  # noqa: ANN001
+            return {
+                "knee": "MRI knee osteoarthritis analysis with DINOv2",
+                "other": "general web content without any relevant keyword",
+            }[hit.title]
+
+    hits = [
+        SourceHit(url="u1", title="knee", kind="fake"),
+        SourceHit(url="u2", title="other", kind="fake"),
+    ]
+    config = DeepResearchConfig(depth=1, breadth=1, max_queries=5, max_fetches=10)
+    r = DeepResearcher(
+        None,
+        "gpt-5.5",
+        config,
+        [VariedSource(hits)],
+        Path("/tmp"),
+        relevance_terms=("knee",),
+    )
+    out = r._fetch_all(hits)
+    assert len(out) == 1
+    assert "knee" in out[0]
+
+
+def test_fetch_all_keeps_everything_without_relevance_terms():
+    class VariedSource(FakeSource):
+        def content(self, hit, max_chars=25000):  # noqa: ANN001
+            return f"content of {hit.title}"
+
+    hits = [SourceHit(url="u1", title="a", kind="fake"), SourceHit(url="u2", title="b", kind="fake")]
+    r = _researcher(None, hits, Path("/tmp"))
+    out = r._fetch_all(hits)
+    assert len(out) == 2
+
+
+def test_web_source_uses_injected_fetch():
+    seen: dict[str, str] = {}
+
+    def fetch(url: str, max_chars: int = 12000) -> str:
+        seen["url"] = url
+        return "BROWSER TEXT"
+
+    src = WebSource(fetch=fetch)
+    hit = SourceHit(url="https://example.com/a", title="t", kind="web")
+    assert src.content(hit) == "BROWSER TEXT"
+    assert seen["url"] == "https://example.com/a"
+
+
+def test_report_file_stamp_is_utc(tmp_path: Path):
+    llm = FakeLLM(
+        [
+            {"queries": [{"query": "q1", "researchGoal": "g1"}]},
+            {"learnings": ["key insight"], "followUpQuestions": []},
+            {"reportMarkdown": "# Deep report"},
+        ]
+    )
+    hits = [SourceHit(url="u1", title="t1", kind="fake")]
+    r = _researcher(llm, hits, tmp_path)
+    out = r.run("q", tmp_path / "memory" / "research.md")
+    assert out.report_path is not None
+    import time as time_mod
+
+    before = time_mod.strftime("%Y%m%d-%H%M%S", time_mod.gmtime())
+    run_name = out.report_path.name
+    after = time_mod.strftime("%Y%m%d-%H%M%S", time_mod.gmtime())
+    assert run_name in {f"deep-{before}.md", f"deep-{after}.md"}
 
 
 def test_run_writes_report_and_digest(tmp_path: Path):
