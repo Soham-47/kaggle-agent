@@ -724,6 +724,7 @@ class Orchestrator:
         cfg = self.settings.research_fleet_config()
         judge_state = new_judge_state()
         wrote = {"n": 0}
+        reads = {"n": 0}
         base_write = make_write_card(dest, "polish")
 
         def read_cards(**_: Any) -> str:
@@ -731,7 +732,14 @@ class Orchestrator:
             parts = []
             for p in cards[-6:]:
                 parts.append(f"### {p.name}\n{p.read_text(encoding='utf-8')[:2000]}")
-            return "\n\n".join(parts) or "no cards"
+            text = "\n\n".join(parts) or "no cards"
+            if reads["n"] > 0:
+                text += (
+                    "\n\nYou already read the cards. Call write_card now with an "
+                    "improved card; do not read again."
+                )
+            reads["n"] += 1
+            return text
 
         def write_card(ref: str = "", markdown: str = "", **_: Any) -> str:
             path = base_write(ref, markdown)

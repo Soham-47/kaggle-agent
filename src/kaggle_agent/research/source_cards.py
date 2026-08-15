@@ -419,7 +419,7 @@ def judge_cards_ready(
         return False, "no actionable step"
     if zen is None:
         return True, "deterministic"
-    joined = "\n\n".join(t[:400] for t in texts[:2])
+    joined = "\n\n".join(t[:1200] for t in texts[:2])
     user = (
         f"our_public_best={our_score}\n"
         "Are these method cards good enough for a coding agent to change a kernel "
