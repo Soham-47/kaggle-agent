@@ -32,6 +32,17 @@ def package_fingerprint(folder: Path) -> str:
     return digest.hexdigest()
 
 
+def package_recipe_hash(folder: Path) -> str:
+    """Read the recipe hash from a kernel package manifest."""
+    path = folder / "kernel-metadata.json"
+    try:
+        metadata = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return ""
+    manifest = metadata.get("experiment_manifest")
+    return str(manifest.get("recipe_sha256") or "") if isinstance(manifest, dict) else ""
+
+
 @contextmanager
 def kernel_push_lock(root: Path | None) -> Iterator[None]:
     """Serialize duplicate checks and pushes for one workspace."""
@@ -62,13 +73,51 @@ def seen_kernel(root: Path | None, fingerprint: str) -> bool:
     return False
 
 
-def record_kernel(root: Path | None, kernel_ref: str, fingerprint: str) -> Path:
+def seen_recipe(root: Path | None, recipe_hash: str) -> bool:
+    """Detect a recipe that already reached Kaggle, including old records."""
+    if root is None or not recipe_hash:
+        return False
+    history = history_path(root)
+    refs: set[str] = set()
+    if history.is_file():
+        for line in history.read_text(encoding="utf-8").splitlines():
+            try:
+                row = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(row, dict):
+                continue
+            if row.get("recipe_hash") == recipe_hash:
+                return True
+            ref = str(row.get("kernel_ref") or "")
+            if ref:
+                refs.add(ref)
+    for metadata_path in root.glob("competitions/*/notebooks/*/kernel-metadata.json"):
+        try:
+            metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if str(metadata.get("id") or "") not in refs:
+            continue
+        manifest = metadata.get("experiment_manifest")
+        if isinstance(manifest, dict) and manifest.get("recipe_sha256") == recipe_hash:
+            return True
+    return False
+
+
+def record_kernel(
+    root: Path | None, kernel_ref: str, fingerprint: str, recipe_hash: str = ""
+) -> Path:
     path = history_path(root)
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", encoding="utf-8") as handle:
         handle.write(
             json.dumps(
-                {"kernel_ref": kernel_ref, "fingerprint": fingerprint},
+                {
+                    "kernel_ref": kernel_ref,
+                    "fingerprint": fingerprint,
+                    "recipe_hash": recipe_hash,
+                },
                 sort_keys=True,
             )
             + "\n"

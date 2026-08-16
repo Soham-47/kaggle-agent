@@ -20,8 +20,10 @@ from kaggle_agent.train.kernel_job import (
 from kaggle_agent.train.kernel_history import (
     kernel_push_lock,
     package_fingerprint,
+    package_recipe_hash,
     record_kernel,
     seen_kernel,
+    seen_recipe,
 )
 from kaggle_agent.train.notebook_builder import KernelPackage
 
@@ -90,10 +92,17 @@ def run_kernel_phase(
     try:
         with kernel_push_lock(root):
             package_fp = package_fingerprint(package.folder)
+            recipe_fp = package_recipe_hash(package.folder)
             if root is not None and seen_kernel(root, package_fp):
                 result.ok = False
                 result.errors.append(
                     "duplicate kernel package: identical package was already recorded"
+                )
+                return result
+            if root is not None and seen_recipe(root, recipe_fp):
+                result.ok = False
+                result.errors.append(
+                    "duplicate recipe: identical recipe was already submitted"
                 )
                 return result
             try:
@@ -107,7 +116,7 @@ def run_kernel_phase(
                 apply_pin_heal(workspace, package.folder)
                 push_resp = client.kernels_push(package.folder)
             if root is not None:
-                record_kernel(root, package.kernel_ref, package_fp)
+                record_kernel(root, package.kernel_ref, package_fp, recipe_fp)
     except Exception as exc:  # noqa: BLE001
         result.ok = False
         result.errors.append(f"push: {exc}")
