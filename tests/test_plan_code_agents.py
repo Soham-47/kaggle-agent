@@ -206,6 +206,7 @@ def test_code_agent_stops_on_second_stall_episode(tmp_path: Path):
         "def CUSTOM_INFER(sub, ctx):\n"
         "    return sub\n"
         "# === CUSTOM_INFER END ===\n"
+        "T.Resize((224, 224))\n"
         "sub = CUSTOM_INFER(sub, ctx)\n"
         "sub.to_csv('submission.csv')\n"
         "'''\n",
@@ -299,6 +300,7 @@ def test_done_ok_rejects_when_wrote_methods_but_no_recipe_word(tmp_path: Path):
         "def CUSTOM_INFER(sub, ctx):\n"
         "    return sub\n"
         "# === CUSTOM_INFER END ===\n"
+        "T.Resize((224, 224))\n"
         "sub = CUSTOM_INFER(sub, ctx)\n"
         "sub.to_csv('submission.csv')\n"
         "'''\n",
@@ -333,6 +335,7 @@ def test_code_stall_force_writes_distinct_recipe_variant(tmp_path: Path):
         "def CUSTOM_INFER(sub, ctx):\n"
         "    return sub\n"
         "# === CUSTOM_INFER END ===\n"
+        "T.Resize((224, 224))\n"
         "sub = CUSTOM_INFER(sub, ctx)\n"
         "sub.to_csv('submission.csv')\n"
         "'''\n",
@@ -351,16 +354,16 @@ def test_code_stall_force_writes_distinct_recipe_variant(tmp_path: Path):
         {"tool": "read_plan", "args": {}},
         {"tool": "read_plan", "args": {}},
     ])
-    plan = "steps: train a convnext model writing submission; enable gpu"
+    plan = "steps: raise DINOv2 input resolution to 336px; write submission"
     agent, _ = make_code_agent(
         zen, "m", root, workspace=ws,
         config=StageAgentConfig(max_minutes=5, max_tool_turns=20),
         plan_text=plan,
     )
     out = agent.run("test")
-    assert out.stop_reason == "stalled"
+    assert out.stop_reason == "done"
     recipe = (pipe / "kernel_recipe.py").read_text(encoding="utf-8")
-    assert "EXPERIMENT_VARIANT" not in recipe
+    assert "T.Resize((336, 336))" in recipe
 
 
 def test_replace_kernel_recipe_auto_inserts_glue():

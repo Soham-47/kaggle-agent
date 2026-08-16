@@ -514,12 +514,22 @@ def plan_to_methods_args(
 
 
 def _variant_recipe_source(workspace: Path, plan_text: str) -> str:
-    """Create a distinct recipe when the code model stalls after planning."""
+    """Apply one safe, concrete recipe change when the code model stalls."""
     recipe = _recipe_text(workspace)
     if not recipe:
         return ""
     variant = recipe_hash(plan_text or "baseline")[:16]
-    return f"EXPERIMENT_VARIANT = {variant!r}\n" + recipe
+    changed = recipe
+    # Use the researched 336px DINO path as the deterministic fallback.
+    if "T.Resize((224, 224))" in changed:
+        changed = changed.replace("T.Resize((224, 224))", "T.Resize((336, 336))", 1)
+    elif "files[:40]" in changed:
+        changed = changed.replace("files[:40]", "files[:48]", 1)
+    elif "][:3]" in changed:
+        changed = changed.replace("][:3]", "][:5]", 1)
+    if changed == recipe:
+        return f"EXPERIMENT_VARIANT = {variant!r}\n" + recipe
+    return f"EXPERIMENT_VARIANT = {variant!r}\n" + changed
 
 
 def make_code_agent(
