@@ -174,6 +174,10 @@ class Settings:
         return bool(self.raw.get("kernel", {}).get("enable_gpu", False))
 
     @property
+    def kernel_enable_internet(self) -> bool:
+        return bool(self.raw.get("kernel", {}).get("enable_internet", False))
+
+    @property
     def kernel_poll_seconds(self) -> int:
         return max(5, int(self.raw.get("kernel", {}).get("poll_seconds", 30)))
 

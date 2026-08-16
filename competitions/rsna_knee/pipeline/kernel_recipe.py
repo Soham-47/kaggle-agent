@@ -743,7 +743,7 @@ def rank_mean_mounted(test_ids, pred):
 
 pred = rank_mean_mounted(test_ids, pred)
 
-# --- optional DINOv2 imaging (beats metadata if weights + GPU exist) ---
+# --- optional DINOv2 imaging (pretrained weights, CPU or GPU) ---
 def try_dinov2(test_ids, pred):
     try:
         import torch
@@ -752,21 +752,16 @@ def try_dinov2(test_ids, pred):
     except Exception as e:
         print("no torch", e)
         return pred
-    if not torch.cuda.is_available():
-        print("skip dinov2: cpu only (do not blend random embeddings)")
-        return pred
+    device = "cuda" if torch.cuda.is_available() else "cpu"
     weight_paths = list(Path("/kaggle/input").rglob("*.pth")) + list(Path("/kaggle/input").rglob("*.pt"))
     dino_dirs = [p for p in Path("/kaggle/input").glob("*dino*") if p.is_dir()] if Path("/kaggle/input").is_dir() else []
     print("dino dirs", dino_dirs[:6], "weight files", len(weight_paths))
-    if not dino_dirs and not weight_paths:
-        print("skip dinov2: no weights")
-        return pred
     try:
         model = torch.hub.load("facebookresearch/dinov2", "dinov2_vits14", pretrained=True)
     except Exception as e:
         print("dinov2 load failed without usable pretrained weights", e)
         return pred
-    device = "cuda" if torch.cuda.is_available() else "cpu"
+    print("running dinov2 on", device)
     model = model.to(device).eval()
     tfm = T.Compose([
         T.Resize((224, 224)),

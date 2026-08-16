@@ -1255,6 +1255,7 @@ class Orchestrator:
                     username=self._kernel_username(),
                     exp_id=exp_id,
                     enable_gpu=self.settings.kernel_enable_gpu,
+                    enable_internet=self.settings.kernel_enable_internet,
                     plan_text=result.plan_text or "",
                 )
                 result.kernel_path = str(package.folder)
@@ -1281,6 +1282,8 @@ class Orchestrator:
                         root=self.root,
                         competition=self.competition.slug,
                         exp_id=exp_id,
+                        poll_seconds=self.settings.kernel_poll_seconds,
+                        poll_attempts=self.settings.kernel_poll_attempts,
                     )
 
             result.kernel_ok = run.ok
@@ -1690,7 +1693,9 @@ class Orchestrator:
                             kernel_ref=kernel_ref,
                             output_file=self.competition.submit_output_file,
                             poll_seconds=30 if nb else 15,
-                            poll_attempts=40 if nb else 10,
+                            poll_attempts=(
+                                self.settings.kernel_poll_attempts if nb else 10
+                            ),
                         )
                         result.submit_ok = sr.success
                         result.submit_message = f"api: {sr.message}"
