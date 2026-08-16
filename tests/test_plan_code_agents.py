@@ -358,9 +358,9 @@ def test_code_stall_force_writes_distinct_recipe_variant(tmp_path: Path):
         plan_text=plan,
     )
     out = agent.run("test")
-    assert out.stop_reason == "done"
+    assert out.stop_reason == "stalled"
     recipe = (pipe / "kernel_recipe.py").read_text(encoding="utf-8")
-    assert "EXPERIMENT_VARIANT" in recipe
+    assert "EXPERIMENT_VARIANT" not in recipe
 
 
 def test_replace_kernel_recipe_auto_inserts_glue():

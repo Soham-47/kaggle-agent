@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import ast
 import json
 from pathlib import Path
 from typing import Any
@@ -27,6 +28,23 @@ def recipe_hash(recipe: str) -> str:
         lines.pop()
     normalized = "\n".join(line.rstrip() for line in lines)
     return _digest(normalized)
+
+
+def recipe_logic_hash(recipe: str) -> str:
+    """Hash executable recipe logic while ignoring comments and variant markers."""
+    tree = ast.parse(recipe)
+    tree.body = [
+        node
+        for node in tree.body
+        if not (
+            isinstance(node, ast.Assign)
+            and any(
+                isinstance(target, ast.Name) and target.id == "EXPERIMENT_VARIANT"
+                for target in node.targets
+            )
+        )
+    ]
+    return _digest(ast.dump(tree, annotate_fields=True, include_attributes=False))
 
 
 def experiment_fingerprint(

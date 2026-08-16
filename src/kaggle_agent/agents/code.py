@@ -9,7 +9,11 @@ from pathlib import Path
 from typing import Any, Callable
 
 from kaggle_agent.agents.loop import StageAgent, StageAgentConfig
-from kaggle_agent.experiment_fingerprint import canonical_hash, recipe_hash
+from kaggle_agent.experiment_fingerprint import (
+    canonical_hash,
+    recipe_hash,
+    recipe_logic_hash,
+)
 from kaggle_agent.heal.pins import sanitize_methods_payload
 from kaggle_agent.memory.ingest import build_context_pack, retrieve
 from kaggle_agent.research.source_cards import (
@@ -431,10 +435,12 @@ def build_code_tools(
             text = splice_custom_infer(before, source or "return sub")
         except (ValueError, SyntaxError) as exc:
             return f"rejected: {exc}"
-        if recipe_hash(_recipe_text_from_wrapper(before)) == recipe_hash(
-            _recipe_text_from_wrapper(text)
-        ):
+        old_recipe = _recipe_text_from_wrapper(before)
+        new_recipe = _recipe_text_from_wrapper(text)
+        if recipe_hash(old_recipe) == recipe_hash(new_recipe):
             return "rejected: recipe is identical to the previous experiment"
+        if recipe_logic_hash(old_recipe) == recipe_logic_hash(new_recipe):
+            return "rejected: recipe has no semantic logic change"
         path.write_text(text, encoding="utf-8")
         state["wrote_custom_infer"] = "1"
         return "hook written"
@@ -448,10 +454,12 @@ def build_code_tools(
             text = replace_kernel_recipe(before, source)
         except ValueError as exc:
             return f"rejected: {exc}"
-        if recipe_hash(_recipe_text_from_wrapper(before)) == recipe_hash(
-            _recipe_text_from_wrapper(text)
-        ):
+        old_recipe = _recipe_text_from_wrapper(before)
+        new_recipe = _recipe_text_from_wrapper(text)
+        if recipe_hash(old_recipe) == recipe_hash(new_recipe):
             return "rejected: recipe is identical to the previous experiment"
+        if recipe_logic_hash(old_recipe) == recipe_logic_hash(new_recipe):
+            return "rejected: recipe has no semantic logic change"
         path.write_text(text, encoding="utf-8")
         state["wrote_recipe"] = "1"
         return "recipe written"
