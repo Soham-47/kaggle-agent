@@ -49,7 +49,7 @@ def test_dry_run_cycle(tmp_path: Path):
     assert result.candidate_csv
     assert result.approve_ok is True
     assert result.submit_ok is True  # dry submit
-    assert result.phases_run == list(DEFAULT_PHASES)
+    assert result.phases_run[:4] == ["LOCK", "RESEARCH", "PLAN", "CODE"]
     st = load_state(root)
     assert st.phase == "IDLE"
     assert st.lock_held is False

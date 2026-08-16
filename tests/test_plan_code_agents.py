@@ -318,7 +318,7 @@ def test_done_ok_rejects_when_wrote_methods_but_no_recipe_word(tmp_path: Path):
     assert out.stop_reason != "done"
 
 
-def test_code_stall_force_writes_plan_derived_methods(tmp_path: Path):
+def test_code_stall_force_writes_distinct_recipe_variant(tmp_path: Path):
     import json
 
     root = tmp_path / "ka"
@@ -358,9 +358,9 @@ def test_code_stall_force_writes_plan_derived_methods(tmp_path: Path):
         plan_text=plan,
     )
     out = agent.run("test")
-    methods = json.loads((pipe / "methods.json").read_text(encoding="utf-8"))
     assert out.stop_reason == "done"
-    assert any("convnext" in s for s in methods["implement_steps"]), methods["implement_steps"]
+    recipe = (pipe / "kernel_recipe.py").read_text(encoding="utf-8")
+    assert "EXPERIMENT_VARIANT" in recipe
 
 
 def test_replace_kernel_recipe_auto_inserts_glue():

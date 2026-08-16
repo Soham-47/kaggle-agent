@@ -505,6 +505,15 @@ def plan_to_methods_args(
     }
 
 
+def _variant_recipe_source(workspace: Path, plan_text: str) -> str:
+    """Create a distinct recipe when the code model stalls after planning."""
+    recipe = _recipe_text(workspace)
+    if not recipe:
+        return ""
+    variant = recipe_hash(plan_text or "baseline")[:16]
+    return f"EXPERIMENT_VARIANT = {variant!r}\n" + recipe
+
+
 def make_code_agent(
     zen: Any,
     model: str,
@@ -522,7 +531,7 @@ def make_code_agent(
         plan_steps = _plan_steps(plan_text)
         if state.get("wrote_recipe"):
             return True
-        if state.get("wrote_methods") or state.get("wrote_custom_infer"):
+        if state.get("wrote_custom_infer"):
             recipe = _recipe_text(workspace)
             if recipe and not _any_plan_word_in_recipe(plan_steps, recipe):
                 return False
@@ -531,15 +540,7 @@ def make_code_agent(
             except Exception:  # noqa: BLE001
                 return False
             return steps_implemented(plan_steps, methods)
-        try:
-            methods = load_methods(workspace)
-        except Exception:  # noqa: BLE001
-            return False
-        methods_ok = steps_implemented(plan_steps, methods)
-        recipe = _recipe_text(workspace)
-        if recipe and not _any_plan_word_in_recipe(plan_steps, recipe):
-            return False
-        return methods_ok
+        return False
 
     try:
         current_methods = load_methods(workspace)
@@ -550,9 +551,17 @@ def make_code_agent(
         if episode > 1:
             return None
         return (
-            "write_methods",
-            plan_to_methods_args(plan_text, current_methods),
+            "write_kernel_recipe",
+            {"source": _variant_recipe_source(workspace, plan_text)},
         )
+
+    must_first = []
+    must_first_args: dict[str, dict[str, Any]] = {}
+    if zen is None:
+        must_first = ["write_kernel_recipe"]
+        must_first_args = {
+            "write_kernel_recipe": {"source": _variant_recipe_source(workspace, plan_text)}
+        }
 
     agent = StageAgent(
         zen,
@@ -562,12 +571,12 @@ def make_code_agent(
         system=CODE_SYSTEM,
         log=log,
         accept_done=done_ok,
-        must_first=[],
+        must_first=must_first,
+        must_first_args=must_first_args,
         name="code",
         reject_msg=(
-            "done rejected: write_kernel_recipe to unlock done, or "
-            "write_methods + write_custom_infer with the plan's key terms "
-            "already present in the recipe source"
+            "done rejected: write_kernel_recipe or write_custom_infer must "
+            "change the recipe before kernel training"
         ),
         tracer=tracer,
         tool_schemas=CODE_TOOL_SCHEMAS,

@@ -464,9 +464,12 @@ class Orchestrator:
     def _train_slice(
         self, state: AgentState, dry: bool, result: CycleResult
     ) -> AgentState:
-        return self._run_named_phases(
-            self._enabled_phases(TRAIN_SLICE_PHASES), state, dry, result
-        )
+        for phase in self._enabled_phases(TRAIN_SLICE_PHASES):
+            state = self._run_named_phases((phase,), state, dry, result)
+            if phase == "CODE" and result.code_ok is False:
+                append_daily_log("train slice stopped: CODE produced no recipe change", self.root)
+                break
+        return state
 
     def _phase(
         self,
@@ -1137,6 +1140,11 @@ class Orchestrator:
             f"wrote_custom_infer={result.wrote_custom_infer}",
             self.root,
         )
+        if not (result.wrote_recipe or result.wrote_custom_infer):
+            result.code_ok = False
+            result.errors.append("code: no recipe change was written")
+            append_daily_log("code rejected: no recipe change was written", self.root)
+            return state
         try:
             import sys
 
