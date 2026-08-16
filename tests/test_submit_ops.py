@@ -1,4 +1,4 @@
-"""submit_ops notebook-submit: submit the completed train kernel output."""
+"""submit_ops notebook-submit: push internet-off variant, explicit version."""
 
 import json
 
@@ -27,7 +27,7 @@ def _write_meta(folder, **overrides):
     )
 
 
-def test_submit_notebook_no_repush_submits_completed_kernel(tmp_path):
+def test_submit_notebook_pushes_offline_variant_and_passes_version(tmp_path):
     folder = tmp_path / "pkg"
     _write_meta(folder)
     api = FakeKaggleApi()
@@ -46,13 +46,43 @@ def test_submit_notebook_no_repush_submits_completed_kernel(tmp_path):
 
     assert result.success
     pushes = [c for c in api.submit_calls if c and c[0] == "kernels_push"]
-    assert pushes == []
+    assert len(pushes) == 1
     subs = [c for c in api.submit_calls if c and c[0] == "submit_code"]
     assert len(subs) == 1
     _, file_name, message, competition, kernel, version = subs[0]
     assert file_name == "submission.csv"
-    assert kernel == "tester/kernel"
-    assert version is None
-    meta = json.loads((folder / "kernel-metadata.json").read_text(encoding="utf-8"))
-    assert meta["enable_internet"] is True
+    assert kernel == "tester/fake-kernel"  # ref from the variant push response
+    assert version == 1
+
+    # The variant folder (not the original) has internet off
+    variant = folder.parent / "pkg-submit-offline"
+    assert variant.is_dir()
+    meta = json.loads((variant / "kernel-metadata.json").read_text(encoding="utf-8"))
+    assert meta["enable_internet"] is False
     assert meta["machine_shape"] == "NvidiaTeslaT4"
+    # original train package untouched
+    orig = json.loads((folder / "kernel-metadata.json").read_text(encoding="utf-8"))
+    assert orig["enable_internet"] is True
+
+
+def test_submit_notebook_uses_existing_version_when_already_offline(tmp_path):
+    folder = tmp_path / "pkg"
+    _write_meta(folder, enable_internet=False)
+    api = FakeKaggleApi()
+
+    result = submit_notebook(
+        api,
+        competition="rsna-knee-abnormality-detection",
+        message="agent test",
+        kernel_folder=folder,
+        kernel_ref="tester/kernel",
+        output_file="submission.csv",
+        status_fn=lambda ref: "COMPLETE",
+        poll_seconds=1,
+        poll_attempts=3,
+    )
+
+    assert result.success
+    subs = [c for c in api.submit_calls if c and c[0] == "submit_code"]
+    assert len(subs) == 1
+    assert subs[0][5] == 1

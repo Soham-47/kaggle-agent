@@ -1,3 +1,4 @@
+import os
 from pathlib import Path
 
 from fakes import FakeKaggleApi
@@ -153,14 +154,19 @@ def test_approve_then_second_live_submits(tmp_path: Path):
     assert load_pending(root).status == "approved"
     approved_csv = load_pending(root).csv_path
 
-    r2 = run_daily(
-        "rsna_knee",
-        root=root,
-        dry_run=False,
-        kaggle=kaggle,
-        browser_fetch=_fake_browser,
-        telegram=tg,
-    )
+    # rsna public test CSV is 3 rows that never change; allow identical output
+    os.environ["KAGGLE_AGENT_ALLOW_DUPLICATE_OUTPUT"] = "1"
+    try:
+        r2 = run_daily(
+            "rsna_knee",
+            root=root,
+            dry_run=False,
+            kaggle=kaggle,
+            browser_fetch=_fake_browser,
+            telegram=tg,
+        )
+    finally:
+        os.environ.pop("KAGGLE_AGENT_ALLOW_DUPLICATE_OUTPUT", None)
     assert r2.waiting_approve is False
     assert r2.submit_ok is True, r2.errors
     assert load_pending(root).status == "submitted"

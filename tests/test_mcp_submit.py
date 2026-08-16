@@ -263,5 +263,5 @@ def test_live_submit_uses_api_not_mcp(tmp_path: Path):
     assert mcp_hits == []
     kinds = [c[0] for c in api.submit_calls if isinstance(c, tuple) and c]
     assert "submit_code" in kinds
-    assert "kernels_push" not in kinds
+    assert "kernels_push" in kinds  # variant push (internet-off) + explicit version
     assert load_pending(root).status == "submitted"

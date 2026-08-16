@@ -4,7 +4,8 @@ This file is inlined into the submitted notebook. It may use pandas/sklearn
 (Kaggle has them). Do not import this module from local agent smoke paths.
 """
 
-KERNEL_RECIPE_SOURCE = r'''
+KERNEL_RECIPE_SOURCE = r'''EXPERIMENT_VARIANT = '39757f04a5beace2'
+
 
 # RSNA Knee recipe: report labels + series/DICOM metadata ranker + optional DINOv2
 from pathlib import Path
@@ -753,18 +754,49 @@ def try_dinov2(test_ids, pred):
         print("no torch", e)
         return pred
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    weight_paths = list(Path("/kaggle/input").rglob("*.pth")) + list(Path("/kaggle/input").rglob("*.pt"))
-    dino_dirs = [p for p in Path("/kaggle/input").glob("*dino*") if p.is_dir()] if Path("/kaggle/input").is_dir() else []
+    kin = Path("/kaggle/input")
+    weight_paths = list(kin.rglob("*.pth")) + list(kin.rglob("*.pt")) if kin.is_dir() else []
+    dino_dirs = [p for p in kin.glob("*dino*") if p.is_dir()] if kin.is_dir() else []
     print("dino dirs", dino_dirs[:6], "weight files", len(weight_paths))
+    import sys
+    import zipfile
+    hub_dir = WORK / "dinov2_hub"
+    hub_dir.mkdir(parents=True, exist_ok=True)
+    loaded = False
     try:
-        model = torch.hub.load("facebookresearch/dinov2", "dinov2_vits14", pretrained=True)
+        ckpt = None
+        repo = None
+        if kin.is_dir():
+            for p in kin.rglob("dinov2_vits14_pretrain.pth"):
+                if p.is_file():
+                    ckpt = p
+                    break
+            for p in kin.rglob("dinov2/hub/backbones.py"):
+                if p.is_file():
+                    repo = p.parents[2]
+                    break
+        if ckpt is not None and repo is not None:
+            sys.path.insert(0, str(repo))
+            from dinov2.hub.backbones import dinov2_vits14
+            model = dinov2_vits14(pretrained=False)
+            state = torch.load(str(ckpt), map_location="cpu")
+            model.load_state_dict(state, strict=True)
+            print("dinov2 loaded from dataset", ckpt, device)
+            loaded = True
+        else:
+            print("dataset dinov2 not found", ckpt, repo)
     except Exception as e:
-        print("dinov2 load failed without usable pretrained weights", e)
-        return pred
+        print("dataset dinov2 load failed", e)
+    if not loaded:
+        try:
+            model = torch.hub.load("facebookresearch/dinov2", "dinov2_vits14", pretrained=True)
+        except Exception as e:
+            print("dinov2 load failed without usable pretrained weights", e)
+            return pred
     print("running dinov2 on", device)
     model = model.to(device).eval()
     tfm = T.Compose([
-        T.Resize((224, 224)),
+        T.Resize((336, 336)),
         T.ToTensor(),
         T.Normalize(mean=(0.485, 0.456, 0.406), std=(0.229, 0.224, 0.225)),
     ])

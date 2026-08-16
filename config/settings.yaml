@@ -150,7 +150,7 @@ kernel:
   # The runner still retries CPU if the host bans the requested accelerator.
   enable_gpu: true
   machine_shape: NvidiaTeslaT4
-  enable_internet: true  # fetch pretrained DINOv2 weights; submit reuses the run's output
+  enable_internet: true  # train run may download; submit variant disables it and loads DINOv2 from the attached dataset
   poll_seconds: 30
   poll_attempts: 120  # allow up to 60 minutes for a CPU kernel
   # username: null  # default: from ~/.kaggle/kaggle.json

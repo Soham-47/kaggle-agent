@@ -7,6 +7,7 @@ Primary remains API (file or notebook). Inject ``run_fn`` in tests.
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 from collections.abc import Callable
@@ -48,8 +49,22 @@ def submit_via_browser(
     return _run_harness(req, timeout_sec=timeout_sec)
 
 
+def _harness_cli() -> str | None:
+    """Locate the browser-harness CLI even when ~/.local/bin is off PATH."""
+    cli = shutil.which("browser-use") or shutil.which("browser-harness")
+    if cli:
+        return cli
+    home = Path.home() / ".local" / "bin"
+    for name in ("browser-use", "browser-harness"):
+        candidate = home / name
+        if candidate.is_file() and os.access(candidate, os.X_OK):
+            return str(candidate)
+    return None
+
+
 def _run_harness(req: BrowserSubmitRequest, *, timeout_sec: int) -> SubmitResult:
-    if not shutil.which("browser-harness"):
+    cli = _harness_cli()
+    if not cli:
         return SubmitResult(
             dry_run=False,
             message="browser fallback: browser-harness not on PATH",
@@ -77,7 +92,7 @@ def _run_harness(req: BrowserSubmitRequest, *, timeout_sec: int) -> SubmitResult
 
     try:
         proc = subprocess.run(
-            ["browser-harness"],
+            [cli],
             input=script,
             capture_output=True,
             text=True,

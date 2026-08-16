@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import re
 import threading
 from dataclasses import dataclass, field, replace
@@ -1363,7 +1364,7 @@ class Orchestrator:
                 prior_exp = seen_output(
                     self.root, out_hash, exp_id=result.experiment_id or ""
                 )
-                if prior_exp:
+                if prior_exp and not os.environ.get("KAGGLE_AGENT_ALLOW_DUPLICATE_OUTPUT"):
                     result.output_duplicate = True
                     result.validate_ok = False
                     result.errors.append(
