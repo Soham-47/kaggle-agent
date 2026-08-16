@@ -2,12 +2,18 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
 
 from kaggle_agent.config import CompetitionConfig
+from kaggle_agent.experiment_fingerprint import (
+    canonical_hash,
+    experiment_fingerprint,
+    recipe_hash,
+)
 
 
 def _cell(kind: str, source: str) -> dict:
@@ -46,6 +52,8 @@ def build_baseline_notebook(
     study_ids: list[str] | None = None,
     recipe_source: str | None = None,
     id_column: str = "StudyInstanceUID",
+    manifest: dict[str, object] | None = None,
+    seed: int = 42,
 ) -> dict:
     """Notebook that writes submission.csv from mounted data or embedded IDs.
 
@@ -71,6 +79,14 @@ Path("submission.csv").write_text(out.to_csv(index=False))
 print("fallback constant wrote", len(out))
 """
     recipe = recipe_source if recipe_source and "submission.csv" in recipe_source else fallback
+    recipe = recipe.replace("SEED = 42", f"SEED = {int(seed)}", 1)
+    if manifest:
+        manifest_source = (
+            "EXPERIMENT_MANIFEST = "
+            + repr(manifest)
+            + "\nprint('EXPERIMENT_MANIFEST', EXPERIMENT_MANIFEST)\n"
+        )
+        recipe = manifest_source + recipe
     cells = [
         _cell(
             "markdown",
@@ -168,6 +184,7 @@ def write_kernel_package(
     enable_gpu: bool = False,
     is_private: bool = True,
     enable_internet: bool = False,
+    plan_text: str = "",
 ) -> KernelPackage:
     """Write notebook + kernel-metadata.json under competitions/<id>/notebooks/<exp_id>/."""
     prefix = competition.id.replace("_", "-")
@@ -183,18 +200,39 @@ def write_kernel_package(
     nb_path = folder / nb_name
     meta_path = folder / "kernel-metadata.json"
 
+    methods = _load_methods(root, competition)
+    recipe_source = _recipe_source(root, competition) or ""
+    seed = 42
+    if plan_text.strip():
+        seed += int.from_bytes(hashlib.sha256(exp_id.encode("utf-8")).digest()[:2], "big") % 10000
+    manifest = {
+        "experiment_id": exp_id,
+        "experiment_fingerprint": experiment_fingerprint(
+            plan_text,
+            methods,
+            recipe_source,
+            root / competition.workspace_relative / "pipeline" / "code_brief.md",
+            seed=seed,
+        ),
+        "plan_sha256": canonical_hash(plan_text.strip()),
+        "recipe_sha256": recipe_hash(recipe_source),
+        "methods_sha256": canonical_hash(methods),
+        "seed": seed,
+        "seed_sha256": canonical_hash(seed),
+    }
     notebook = build_baseline_notebook(
         competition_slug=competition.slug,
         labels=competition.labels,
         study_ids=_load_study_ids(root, competition),
-        recipe_source=_recipe_source(root, competition),
+        recipe_source=recipe_source,
         id_column=competition.id_column,
+        manifest=manifest,
+        seed=seed,
     )
     nb_path.write_text(json.dumps(notebook, indent=1) + "\n", encoding="utf-8")
 
     from kaggle_agent.heal.pins import sanitize_datasets, sanitize_models
 
-    methods = _load_methods(root, competition)
     datasets = sanitize_datasets([str(x) for x in (methods.get("dataset_sources") or []) if x])[:6]
     models = sanitize_models([str(x) for x in (methods.get("model_sources") or []) if x])[:3]
 
@@ -214,6 +252,7 @@ def write_kernel_package(
         "competition_sources": [competition.slug],
         "kernel_sources": [],
         "model_sources": models,
+        "experiment_manifest": manifest,
     }
     meta_path.write_text(json.dumps(meta, indent=2) + "\n", encoding="utf-8")
     _bundle_recipe_files(root, competition, folder)

@@ -50,6 +50,9 @@ def test_write_kernel_package(tmp_path: Path):
     assert meta["competition_sources"] == ["rsna-knee-abnormality-detection"]
     assert meta["id"].startswith("tester/")
     assert "Baker's" in pkg.notebook_path.read_text(encoding="utf-8")
+    notebook = pkg.notebook_path.read_text(encoding="utf-8")
+    assert "EXPERIMENT_MANIFEST" in notebook
+    assert "20260101-test" in notebook
 
 
 def test_run_kernel_phase_local_only(tmp_path: Path):
@@ -73,6 +76,20 @@ def test_run_kernel_phase_push_fake(tmp_path: Path):
     assert run.pushed is True
     assert run.status == "COMPLETE"
     assert (out / "submission.csv").is_file()
+
+
+def test_run_kernel_phase_rejects_recorded_duplicate(tmp_path: Path):
+    root = _root_with_data(tmp_path)
+    comp = load_competition("rsna_knee", root)
+    pkg = write_kernel_package(comp, root=root, username="tester", exp_id="duplicate")
+    client = KaggleClient(api=FakeKaggleApi()).connect()
+
+    first = run_kernel_phase(client, pkg, push=True, root=root)
+    second = run_kernel_phase(client, pkg, push=True, root=root)
+
+    assert first.ok
+    assert second.ok is False
+    assert any("duplicate kernel package" in error for error in second.errors)
 
 
 def test_write_kernel_package_uses_methods_json(tmp_path: Path):

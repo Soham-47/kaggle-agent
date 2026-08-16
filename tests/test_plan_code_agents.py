@@ -318,6 +318,51 @@ def test_done_ok_rejects_when_wrote_methods_but_no_recipe_word(tmp_path: Path):
     assert out.stop_reason != "done"
 
 
+def test_code_stall_force_writes_plan_derived_methods(tmp_path: Path):
+    import json
+
+    root = tmp_path / "ka"
+    (root / "memory").mkdir(parents=True)
+    (root / "memory" / "state.md").write_text("# state\n- phase: IDLE\n")
+    ws = root / "competitions" / "rsna_knee"
+    pipe = ws / "pipeline"
+    pipe.mkdir(parents=True)
+    (pipe / "kernel_recipe.py").write_text(
+        "KERNEL_RECIPE_SOURCE = r'''\n"
+        "# === CUSTOM_INFER START ===\n"
+        "def CUSTOM_INFER(sub, ctx):\n"
+        "    return sub\n"
+        "# === CUSTOM_INFER END ===\n"
+        "sub = CUSTOM_INFER(sub, ctx)\n"
+        "sub.to_csv('submission.csv')\n"
+        "'''\n",
+        encoding="utf-8",
+    )
+    (pipe / "methods.json").write_text(
+        json.dumps({"implement_steps": ["old: copy ID discovery + rank-average"]}),
+        encoding="utf-8",
+    )
+
+    from kaggle_agent.agents.loop import StageAgentConfig
+
+    zen = _ScriptedZen([
+        {"tool": "read_plan", "args": {}},
+        {"tool": "read_plan", "args": {}},
+        {"tool": "read_plan", "args": {}},
+        {"tool": "read_plan", "args": {}},
+    ])
+    plan = "steps: train a convnext model writing submission; enable gpu"
+    agent, _ = make_code_agent(
+        zen, "m", root, workspace=ws,
+        config=StageAgentConfig(max_minutes=5, max_tool_turns=20),
+        plan_text=plan,
+    )
+    out = agent.run("test")
+    methods = json.loads((pipe / "methods.json").read_text(encoding="utf-8"))
+    assert out.stop_reason == "done"
+    assert any("convnext" in s for s in methods["implement_steps"]), methods["implement_steps"]
+
+
 def test_replace_kernel_recipe_auto_inserts_glue():
     wrapper = "KERNEL_RECIPE_SOURCE = r'''\n" "sub = CUSTOM_INFER(s,c)\n" "sub.to_csv('sub.csv')\n" "'''\n"
     body = (
@@ -436,6 +481,42 @@ def test_write_kernel_recipe_unlocks_done(tmp_path: Path):
     assert out.stop_reason == "done"
     assert state.get("wrote_recipe") == "1"
     assert "rank" in (pipe / "kernel_recipe.py").read_text(encoding="utf-8")
+
+
+def test_write_kernel_recipe_rejects_identical_recipe(tmp_path: Path):
+    root = tmp_path / "ka"
+    (root / "memory").mkdir(parents=True)
+    (root / "memory" / "state.md").write_text("# state\n- phase: IDLE\n")
+    ws = root / "competitions" / "rsna_knee"
+    pipe = ws / "pipeline"
+    pipe.mkdir(parents=True)
+    wrapper = (
+        "KERNEL_RECIPE_SOURCE = r'''\n"
+        "# === CUSTOM_INFER START ===\n"
+        "def CUSTOM_INFER(sub, ctx):\n"
+        "    return sub\n"
+        "# === CUSTOM_INFER END ===\n"
+        "sub = CUSTOM_INFER(sub, ctx)\n"
+        "sub.to_csv('submission.csv')\n"
+        "'''\n"
+    )
+    (pipe / "kernel_recipe.py").write_text(wrapper, encoding="utf-8")
+
+    from kaggle_agent.agents.code import build_code_tools
+
+    tools, _, _ = build_code_tools(root, ws, plan_text="steps: keep baseline")
+    result = tools["write_kernel_recipe"](
+        source=(
+            "# === CUSTOM_INFER START ===\n"
+            "def CUSTOM_INFER(sub, ctx):\n"
+            "    return sub\n"
+            "# === CUSTOM_INFER END ===\n"
+            "sub = CUSTOM_INFER(sub, ctx)\n"
+            "sub.to_csv('submission.csv')\n"
+        )
+    )
+
+    assert result.startswith("rejected: recipe is identical")
 
 
 def test_write_plan_judge_rejects_until_novel(tmp_path: Path):

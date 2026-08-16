@@ -141,6 +141,7 @@ class CycleResult:
     train_slices: int = 0
     research_passes: int = 0
     wrote_custom_infer: bool = False
+    wrote_methods: bool = False
     wrote_recipe: bool = False
     errors: list[str] = field(default_factory=list)
 
@@ -369,6 +370,7 @@ class Orchestrator:
         result.validate_ok = None
         result.candidate_csv = None
         result.wrote_custom_infer = False
+        result.wrote_methods = False
         result.wrote_recipe = False
 
     def _run_train_slices(
@@ -420,6 +422,7 @@ class Orchestrator:
                     "smoke_path": result.smoke_path,
                     "kernel_ok": result.kernel_ok,
                     "wrote_custom_infer": result.wrote_custom_infer,
+                    "wrote_methods": result.wrote_methods,
                     "wrote_recipe": result.wrote_recipe,
                     "errors": prior + result.errors[err_before:],
                 }
@@ -433,6 +436,7 @@ class Orchestrator:
             result.smoke_path = best["smoke_path"]
             result.kernel_ok = best["kernel_ok"]
             result.wrote_custom_infer = bool(best.get("wrote_custom_infer"))
+            result.wrote_methods = bool(best.get("wrote_methods"))
             result.wrote_recipe = bool(best.get("wrote_recipe"))
             result.validate_ok = True
             result.errors = list(best["errors"])
@@ -1117,6 +1121,7 @@ class Orchestrator:
             f"Competition: {self.competition.slug}\n\n{pack.as_prompt_block()}"
         )
         result.wrote_custom_infer = bool(code_state.get("wrote_custom_infer"))
+        result.wrote_methods = bool(code_state.get("wrote_methods"))
         result.wrote_recipe = bool(code_state.get("wrote_recipe"))
         if self._tracer is not None:
             self._tracer.emit(
@@ -1128,7 +1133,8 @@ class Orchestrator:
             )
         append_daily_log(
             f"code agent stop={out.stop_reason} turns={out.turns} "
-            f"wrote_recipe={result.wrote_recipe} wrote_custom_infer={result.wrote_custom_infer}",
+            f"wrote_methods={result.wrote_methods} wrote_recipe={result.wrote_recipe} "
+            f"wrote_custom_infer={result.wrote_custom_infer}",
             self.root,
         )
         try:
@@ -1241,6 +1247,7 @@ class Orchestrator:
                     username=self._kernel_username(),
                     exp_id=exp_id,
                     enable_gpu=self.settings.kernel_enable_gpu,
+                    plan_text=result.plan_text or "",
                 )
                 result.kernel_path = str(package.folder)
                 result.kernel_ref = package.kernel_ref
@@ -1947,4 +1954,3 @@ def run_daily(
         mcp_submit_fn=mcp_submit_fn,
         skip_phases=skip_phases,
     ).run_cycle(dry_run=dry_run, assume_approved=assume_approved)
-

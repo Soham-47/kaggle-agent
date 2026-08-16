@@ -1,0 +1,48 @@
+"""Stable fingerprints for experiment and kernel duplicate checks."""
+
+from __future__ import annotations
+
+import hashlib
+import json
+from pathlib import Path
+from typing import Any
+
+
+def _digest(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def canonical_hash(value: Any) -> str:
+    """Hash JSON data without depending on mapping key order."""
+    encoded = json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+    return _digest(encoded)
+
+
+def recipe_hash(recipe: str) -> str:
+    """Hash recipe source while ignoring only trailing whitespace."""
+    lines = recipe.splitlines()
+    while lines and not lines[0].strip():
+        lines.pop(0)
+    while lines and not lines[-1].strip():
+        lines.pop()
+    normalized = "\n".join(line.rstrip() for line in lines)
+    return _digest(normalized)
+
+
+def experiment_fingerprint(
+    plan_text: str,
+    methods: dict[str, Any],
+    recipe: str,
+    brief_path: Path,
+    *,
+    seed: int,
+) -> str:
+    brief = brief_path.read_text(encoding="utf-8") if brief_path.is_file() else ""
+    payload = {
+        "plan": plan_text.strip(),
+        "methods": methods,
+        "recipe": recipe_hash(recipe),
+        "brief": brief.strip(),
+        "seed": int(seed),
+    }
+    return canonical_hash(payload)

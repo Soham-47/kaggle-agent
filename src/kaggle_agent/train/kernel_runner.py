@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import ast
 import json
+import re
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -14,6 +16,12 @@ from kaggle_agent.train.kernel_job import (
     clear_kernel_job,
     load_kernel_job,
     save_kernel_job,
+)
+from kaggle_agent.train.kernel_history import (
+    kernel_push_lock,
+    package_fingerprint,
+    record_kernel,
+    seen_kernel,
 )
 from kaggle_agent.train.notebook_builder import KernelPackage
 
@@ -80,23 +88,30 @@ def run_kernel_phase(
         return result
 
     try:
-        push_resp = client.kernels_push(package.folder)
-    except Exception as exc:  # noqa: BLE001
-        from kaggle_agent.heal.pins import apply_pin_heal, is_pin_error
-
-        if is_pin_error(str(exc)) and root is not None:
-            workspace = package.folder.parent.parent
-            apply_pin_heal(workspace, package.folder)
+        with kernel_push_lock(root):
+            package_fp = package_fingerprint(package.folder)
+            if root is not None and seen_kernel(root, package_fp):
+                result.ok = False
+                result.errors.append(
+                    "duplicate kernel package: identical package was already recorded"
+                )
+                return result
             try:
                 push_resp = client.kernels_push(package.folder)
             except Exception as exc2:  # noqa: BLE001
-                result.ok = False
-                result.errors.append(f"push: {exc2}")
-                return result
-        else:
-            result.ok = False
-            result.errors.append(f"push: {exc}")
-            return result
+                from kaggle_agent.heal.pins import apply_pin_heal, is_pin_error
+
+                if not (is_pin_error(str(exc2)) and root is not None):
+                    raise
+                workspace = package.folder.parent.parent
+                apply_pin_heal(workspace, package.folder)
+                push_resp = client.kernels_push(package.folder)
+            if root is not None:
+                record_kernel(root, package.kernel_ref, package_fp)
+    except Exception as exc:  # noqa: BLE001
+        result.ok = False
+        result.errors.append(f"push: {exc}")
+        return result
     result.pushed = True
     result.status = "pushed"
     result.message = str(push_resp)[:300]
@@ -136,7 +151,7 @@ def package_matches_existing(package: KernelPackage, existing: KernelJob) -> boo
     nb = "agent_baseline.ipynb"
     if not (package.folder / nb).is_file() or not (folder / nb).is_file():
         return False
-    if (package.folder / nb).read_bytes() != (folder / nb).read_bytes():
+    if _normalized_notebook(package.folder / nb) != _normalized_notebook(folder / nb):
         return False
     meta = "kernel-metadata.json"
     if (package.folder / meta).is_file() and (folder / meta).is_file():
@@ -150,9 +165,34 @@ def package_matches_existing(package: KernelPackage, existing: KernelJob) -> boo
         for key in ("id", "title"):
             new.pop(key, None)
             old.pop(key, None)
+        new.pop("experiment_manifest", None)
+        old.pop("experiment_manifest", None)
         if new != old:
             return False
     return True
+
+
+def _normalized_notebook(path: Path) -> bytes:
+    """Ignore per-experiment manifest IDs while retaining the seed."""
+    try:
+        notebook = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return path.read_bytes()
+    for cell in notebook.get("cells", []):
+        source = "".join(cell.get("source") or [])
+        match = re.search(r"^EXPERIMENT_MANIFEST = (\{.*\})$", source, re.M)
+        if not match:
+            continue
+        try:
+            manifest = ast.literal_eval(match.group(1))
+        except (SyntaxError, ValueError):
+            continue
+        if isinstance(manifest, dict):
+            manifest.pop("experiment_id", None)
+            replacement = "EXPERIMENT_MANIFEST = " + repr(manifest)
+            source = source[: match.start()] + replacement + source[match.end() :]
+            cell["source"] = [source]
+    return json.dumps(notebook, sort_keys=True, separators=(",", ":")).encode("utf-8")
 
 
 def _resume_job(

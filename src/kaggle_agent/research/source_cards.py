@@ -164,11 +164,12 @@ def steps_implemented(steps_text: str, methods: dict[str, Any]) -> bool:
     if not plan_tokens:
         return False
     impl_steps = [s for s in (methods.get("implement_steps") or []) if not step_is_junk(s)]
-    impl_tokens = _plan_tokens(" ".join(impl_steps))
-    if not impl_tokens:
-        return False
-    overlap = len(plan_tokens & impl_tokens)
-    return overlap >= 0.5 * len(plan_tokens) or plan_tokens <= impl_tokens
+    for step in impl_steps:
+        impl_tokens = _plan_tokens(step)
+        overlap = len(plan_tokens & impl_tokens)
+        if overlap >= 0.5 * len(plan_tokens) or plan_tokens <= impl_tokens:
+            return True
+    return False
 
 
 def extract_infer_hints(text: str) -> list[str]:

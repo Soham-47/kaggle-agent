@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from kaggle_agent.agents.loop import StageAgent, StageAgentConfig
+from kaggle_agent.experiment_fingerprint import canonical_hash, recipe_hash
 from kaggle_agent.heal.pins import sanitize_methods_payload
 from kaggle_agent.memory.ingest import build_context_pack, retrieve
 from kaggle_agent.research.source_cards import (
@@ -413,6 +414,8 @@ def build_code_tools(
                 "infer_hints": hints or current.get("infer_hints") or [],
             }
         )
+        if canonical_hash(payload) == canonical_hash(current):
+            return "rejected: methods are identical to the previous experiment"
         out = workspace / "pipeline" / "methods.json"
         out.parent.mkdir(parents=True, exist_ok=True)
         out.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
@@ -424,9 +427,14 @@ def build_code_tools(
         if not path.is_file():
             return "rejected: no kernel_recipe.py"
         try:
-            text = splice_custom_infer(path.read_text(encoding="utf-8"), source or "return sub")
+            before = path.read_text(encoding="utf-8")
+            text = splice_custom_infer(before, source or "return sub")
         except (ValueError, SyntaxError) as exc:
             return f"rejected: {exc}"
+        if recipe_hash(_recipe_text_from_wrapper(before)) == recipe_hash(
+            _recipe_text_from_wrapper(text)
+        ):
+            return "rejected: recipe is identical to the previous experiment"
         path.write_text(text, encoding="utf-8")
         state["wrote_custom_infer"] = "1"
         return "hook written"
@@ -436,9 +444,14 @@ def build_code_tools(
         if not path.is_file():
             return "rejected: no kernel_recipe.py"
         try:
-            text = replace_kernel_recipe(path.read_text(encoding="utf-8"), source)
+            before = path.read_text(encoding="utf-8")
+            text = replace_kernel_recipe(before, source)
         except ValueError as exc:
             return f"rejected: {exc}"
+        if recipe_hash(_recipe_text_from_wrapper(before)) == recipe_hash(
+            _recipe_text_from_wrapper(text)
+        ):
+            return "rejected: recipe is identical to the previous experiment"
         path.write_text(text, encoding="utf-8")
         state["wrote_recipe"] = "1"
         return "recipe written"
@@ -454,6 +467,11 @@ def build_code_tools(
         "write_kernel_recipe": write_kernel_recipe,
     }
     return tools, brief_path, state
+
+
+def _recipe_text_from_wrapper(wrapper: str) -> str:
+    """Extract recipe text without executing a workspace file."""
+    return extract_recipe_string(wrapper) or ""
 
 
 def _plan_steps(plan_text: str) -> str:
@@ -531,12 +549,10 @@ def make_code_agent(
     def code_stall_force(episode: int) -> tuple[str, dict[str, Any]] | None:
         if episode > 1:
             return None
-        if _any_plan_word_in_recipe(_plan_steps(plan_text), _recipe_text(workspace) or ""):
-            return (
-                "write_methods",
-                {"implement_steps": current_methods.get("implement_steps") or []},
-            )
-        return "read_file", {"rel": "pipeline/kernel_recipe.py"}
+        return (
+            "write_methods",
+            plan_to_methods_args(plan_text, current_methods),
+        )
 
     agent = StageAgent(
         zen,
@@ -555,7 +571,7 @@ def make_code_agent(
         ),
         tracer=tracer,
         tool_schemas=CODE_TOOL_SCHEMAS,
-        stall_after=5,
+        stall_after=3,
         stall_nudge=(
             "STALL NUDGE: you have read enough. If the plan steps are already in "
             "the kernel recipe source (check with read_file kernel_recipe.py), "
