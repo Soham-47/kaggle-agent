@@ -125,10 +125,16 @@ def test_kernel_retries_cpu_after_p100_ban(tmp_path: Path):
         shutil.copytree(real / "data", root / "data")
     comp = load_competition("rsna_knee", root)
     pkg = write_kernel_package(
-        comp, root=root, username="tester", exp_id="gpu", enable_gpu=True
+        comp,
+        root=root,
+        username="tester",
+        exp_id="gpu",
+        enable_gpu=True,
+        machine_shape="NvidiaTeslaT4",
     )
     meta = json.loads(pkg.metadata_path.read_text(encoding="utf-8"))
     assert meta["enable_gpu"] is True
+    assert meta["machine_shape"] == "NvidiaTeslaT4"
     api = FakeKaggleApi(
         status_queue=["ERROR", "COMPLETE"],
         failure_message="You cannot use P100 on this competition",
@@ -147,6 +153,7 @@ def test_kernel_retries_cpu_after_p100_ban(tmp_path: Path):
     assert run.status == "COMPLETE"
     meta2 = json.loads(pkg.metadata_path.read_text(encoding="utf-8"))
     assert meta2["enable_gpu"] is False
+    assert "machine_shape" not in meta2
     pushes = [c for c in api.submit_calls if c and c[0] == "kernels_push"]
     assert len(pushes) == 2
 

@@ -75,6 +75,25 @@ def _fix_metadata_owner(api: Any, kernel_folder: Path) -> None:
         meta.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
 
 
+def _disable_internet(kernel_folder: Path) -> None:
+    """Force enable_internet=false so the submit kernel meets the rules.
+
+    Code competitions require internet off for the submitted notebook.
+    """
+    meta = kernel_folder / "kernel-metadata.json"
+    if not meta.is_file():
+        return
+    try:
+        import json
+
+        data = json.loads(meta.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return
+    if data.get("enable_internet") is not False:
+        data["enable_internet"] = False
+        meta.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+
+
 def submit_notebook(
     api: Any,
     *,
@@ -93,6 +112,7 @@ def submit_notebook(
             dry_run=False, message=f"kernel folder missing: {kernel_folder}", success=False
         )
     _fix_metadata_owner(api, kernel_folder)
+    _disable_internet(kernel_folder)
     try:
         push = api.kernels_push(str(kernel_folder))
     except Exception as exc:  # noqa: BLE001

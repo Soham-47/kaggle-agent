@@ -146,8 +146,11 @@ eval:
 kernel:
   # Build package always; push only if push=true AND orchestrator.dry_run=false
   push: true
-  enable_gpu: false  # honor host accelerator policy; runner retries CPU on P100/GPU ban
-  enable_internet: true  # fetch pretrained DINOv2 weights when the kernel has no GPU
+  # T4 is allowed by this host; P100 is not. machine_shape asks Kaggle for T4.
+  # The runner still retries CPU if the host bans the requested accelerator.
+  enable_gpu: true
+  machine_shape: NvidiaTeslaT4
+  enable_internet: true  # fetch pretrained DINOv2 weights (train kernels only)
   poll_seconds: 30
   poll_attempts: 120  # allow up to 60 minutes for a CPU kernel
   # username: null  # default: from ~/.kaggle/kaggle.json

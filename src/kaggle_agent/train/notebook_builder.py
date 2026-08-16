@@ -182,6 +182,7 @@ def write_kernel_package(
     username: str,
     exp_id: str,
     enable_gpu: bool = False,
+    machine_shape: str | None = None,
     is_private: bool = True,
     enable_internet: bool = False,
     plan_text: str = "",
@@ -254,6 +255,8 @@ def write_kernel_package(
         "model_sources": models,
         "experiment_manifest": manifest,
     }
+    if machine_shape:
+        meta["machine_shape"] = machine_shape
     meta_path.write_text(json.dumps(meta, indent=2) + "\n", encoding="utf-8")
     _bundle_recipe_files(root, competition, folder)
     return KernelPackage(

@@ -1255,6 +1255,7 @@ class Orchestrator:
                     username=self._kernel_username(),
                     exp_id=exp_id,
                     enable_gpu=self.settings.kernel_enable_gpu,
+                    machine_shape=self.settings.kernel_machine_shape,
                     enable_internet=self.settings.kernel_enable_internet,
                     plan_text=result.plan_text or "",
                 )

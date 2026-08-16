@@ -174,6 +174,12 @@ class Settings:
         return bool(self.raw.get("kernel", {}).get("enable_gpu", False))
 
     @property
+    def kernel_machine_shape(self) -> str | None:
+        """Accelerator name (e.g. NvidiaTeslaT4). Overrides boolean GPU flags."""
+        raw = self.raw.get("kernel", {}).get("machine_shape")
+        return str(raw) if raw else None
+
+    @property
     def kernel_enable_internet(self) -> bool:
         return bool(self.raw.get("kernel", {}).get("enable_internet", False))
 

@@ -359,8 +359,9 @@ def _retry_cpu_after_gpu_ban(client: KaggleClient, folder: Path, fail: str) -> b
         meta = json.loads(meta_path.read_text(encoding="utf-8"))
     except json.JSONDecodeError:
         return False
-    if not meta.get("enable_gpu"):
+    if not meta.get("enable_gpu") and not meta.get("machine_shape"):
         return False
     meta["enable_gpu"] = False
+    meta.pop("machine_shape", None)
     meta_path.write_text(json.dumps(meta, indent=2) + "\n", encoding="utf-8")
     return True
