@@ -50,6 +50,8 @@ def run_kernel_phase(
     root: Path | None = None,
     competition: str = "",
     exp_id: str = "",
+    poll_seconds: int = 30,
+    poll_attempts: int = 40,
 ) -> KernelRunResult:
     """Build is already done. Resume in-flight job, or push new; pull if complete.
 
@@ -64,6 +66,8 @@ def run_kernel_phase(
             pull_output_dir=pull_output_dir,
             root=root,
             package=package,
+            poll_seconds=poll_seconds,
+            poll_attempts=poll_attempts,
         )
 
     if package is None:
@@ -142,6 +146,8 @@ def run_kernel_phase(
         root=root,
         competition=competition,
         exp_id=exp_id,
+        poll_seconds=poll_seconds,
+        poll_attempts=poll_attempts,
     )
 
 
@@ -211,6 +217,8 @@ def _resume_job(
     pull_output_dir: Path | None,
     root: Path | None,
     package: KernelPackage | None,
+    poll_seconds: int = 30,
+    poll_attempts: int = 40,
 ) -> KernelRunResult:
     folder = Path(job.folder) if job.folder not in {"none", ""} else None
     result = KernelRunResult(
@@ -230,6 +238,8 @@ def _resume_job(
         root=root,
         competition=job.competition,
         exp_id=job.exp_id,
+        poll_seconds=poll_seconds,
+        poll_attempts=poll_attempts,
     )
 
 
@@ -243,10 +253,12 @@ def _poll_and_maybe_pull(
     root: Path | None,
     competition: str,
     exp_id: str,
+    poll_seconds: int,
+    poll_attempts: int,
 ) -> KernelRunResult:
     try:
         st = "unknown"
-        for attempt in range(40):
+        for attempt in range(max(1, poll_attempts)):
             st = client.kernels_status(kernel_ref)
             result.status = st
             result.message = f"status={st}"
@@ -259,7 +271,7 @@ def _poll_and_maybe_pull(
                 exp_id=exp_id,
             )
             save_kernel_job(job, root)
-            st_now = (st or "").lower().replace(" ", "")
+            st_now = str(st or "").split(".")[-1].lower().replace(" ", "")
             if st_now in DONE or st_now in {"error", "failed"}:
                 break
             if attempt == 0 and st_now in {"complete", "completed", "success"}:
@@ -274,7 +286,7 @@ def _poll_and_maybe_pull(
                 "cancel_requested",
             }:
                 break
-            time.sleep(30)
+            time.sleep(max(5, poll_seconds))
     except Exception as exc:  # noqa: BLE001
         result.errors.append(f"status: {exc}")
         return result

@@ -5,6 +5,7 @@ This file is inlined into the submitted notebook. It may use pandas/sklearn
 """
 
 KERNEL_RECIPE_SOURCE = r'''
+
 # RSNA Knee recipe: report labels + series/DICOM metadata ranker + optional DINOv2
 from pathlib import Path
 import os, json, math, random, warnings
@@ -762,13 +763,9 @@ def try_dinov2(test_ids, pred):
         return pred
     try:
         model = torch.hub.load("facebookresearch/dinov2", "dinov2_vits14", pretrained=True)
-    except Exception:
-        try:
-            import timm
-            model = timm.create_model("vit_small_patch14_dinov2.lvd142m", pretrained=False, num_classes=0)
-        except Exception as e:
-            print("dinov2 load failed", e)
-            return pred
+    except Exception as e:
+        print("dinov2 load failed without usable pretrained weights", e)
+        return pred
     device = "cuda" if torch.cuda.is_available() else "cpu"
     model = model.to(device).eval()
     tfm = T.Compose([
@@ -846,7 +843,95 @@ if len(sample) and ID_COL in sample.columns:
             sub[c] = 0.5
     sub = sub[cols]
 out = WORK / "submission.csv"
+ctx = {"labels": LABELS, "id_col": ID_COL, "work": str(WORK)}
+# === CUSTOM_INFER START ===
+def CUSTOM_INFER(sub, ctx):
+    labels = [c for c in (ctx.get("labels") or []) if c in sub.columns]
+    id_col = ctx.get("id_col") or (sub.columns[0] if len(sub.columns) else "id")
+    if sub is None or len(sub) == 0 or not labels or id_col not in sub.columns:
+        return sub
+    import numpy as np
+    import pandas as pd
+    from pathlib import Path
+    out = sub.copy()
+    out[id_col] = out[id_col].astype(str)
+    members = []
+    kin = Path("/kaggle/input")
+    skip = {
+        "train.csv", "test.csv", "train_series.csv", "test_series.csv",
+        "sample_submission.csv",
+    }
+    if kin.is_dir():
+        for csv in kin.rglob("*.csv"):
+            if csv.name in skip or csv.stat().st_size > 80_000_000:
+                continue
+            low = str(csv).lower()
+            if any(t in low for t in ("label", "llm", "report", "gold")):
+                continue
+            try:
+                head = pd.read_csv(csv, nrows=6)
+            except Exception:
+                continue
+            if id_col not in head.columns:
+                continue
+            labs = [c for c in labels if c in head.columns]
+            if len(labs) < 3:
+                continue
+            vals = pd.to_numeric(head[labs].stack(), errors="coerce").dropna()
+            if len(vals) and set(np.round(vals.values, 6)).issubset({0.0, 1.0}):
+                continue
+            try:
+                full = pd.read_csv(csv, usecols=[id_col] + labs)
+            except Exception:
+                continue
+            full[id_col] = full[id_col].astype(str)
+            aligned = full.drop_duplicates(id_col).set_index(id_col).reindex(out[id_col])
+            if aligned[labs].notna().any().any():
+                members.append(aligned[labs])
+    try:
+        import pydicom
+        roots = []
+        for base in (Path("/kaggle/input"), Path(".")):
+            if not base.is_dir():
+                continue
+            hit = next((p for p in base.rglob("test") if p.is_dir()), None)
+            if hit is not None:
+                roots.append(hit)
+        scores = []
+        if roots:
+            root = roots[0]
+            for sid in out[id_col].tolist():
+                d = root / str(sid)
+                acc = []
+                if d.is_dir():
+                    files = [p for p in d.rglob("*") if p.is_file()][:30]
+                    picks = files[:: max(1, len(files) // 3)][:3]
+                    for fp in picks:
+                        try:
+                            ds = pydicom.dcmread(str(fp), force=True)
+                            arr = np.asarray(ds.pixel_array, dtype=np.float32)
+                            acc.append(float(arr.mean()))
+                        except Exception:
+                            continue
+                scores.append(float(np.mean(acc)) if acc else float("nan"))
+            s = pd.Series(scores, index=out[id_col].values)
+            if int(s.notna().sum()) >= 3:
+                rnk = s.rank(method="average", pct=True)
+                members.append(pd.DataFrame({lab: rnk.values for lab in labels}, index=out[id_col].values))
+    except Exception:
+        pass
+    if not members:
+        return out
+    ranked = [out.set_index(id_col)[labels].rank(method="average", pct=True)]
+    for m in members:
+        ranked.append(m.rank(method="average", pct=True))
+    mix = sum(ranked) / float(len(ranked))
+    mix = mix.clip(1e-6, 1.0 - 1e-6)
+    for lab in labels:
+        out[lab] = mix[lab].to_numpy()
+    return out
+# === CUSTOM_INFER END ===
+sub = CUSTOM_INFER(sub, ctx)
 sub.to_csv(out, index=False)
 print("wrote", out, "rows", len(sub), "mean", sub[LABELS].mean().to_dict())
-print(sub.head())
-'''
+print(sub.head())'''

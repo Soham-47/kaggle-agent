@@ -174,6 +174,14 @@ class Settings:
         return bool(self.raw.get("kernel", {}).get("enable_gpu", False))
 
     @property
+    def kernel_poll_seconds(self) -> int:
+        return max(5, int(self.raw.get("kernel", {}).get("poll_seconds", 30)))
+
+    @property
+    def kernel_poll_attempts(self) -> int:
+        return max(1, int(self.raw.get("kernel", {}).get("poll_attempts", 40)))
+
+    @property
     def kernel_username(self) -> str | None:
         raw = self.raw.get("kernel", {}).get("username")
         return str(raw) if raw else None
