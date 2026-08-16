@@ -123,3 +123,42 @@ def record_kernel(
             + "\n"
         )
     return path
+
+
+def output_history_path(root: Path | None = None) -> Path:
+    return memory_dir(root) / "output_history.jsonl"
+
+
+def seen_output(root: Path | None, output_hash: str, *, exp_id: str = "") -> str:
+    """Return the exp_id of a prior run with identical predictions, else ''.
+
+    Excludes ``exp_id`` itself so re-validating the same experiment within a
+    cycle never trips the guardrail.
+    """
+    if not output_hash:
+        return ""
+    path = output_history_path(root)
+    if not path.is_file():
+        return ""
+    for line in path.read_text(encoding="utf-8").splitlines():
+        try:
+            row = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(row, dict) or row.get("output_hash") != output_hash:
+            continue
+        prior_exp = str(row.get("exp_id") or "")
+        if prior_exp and prior_exp == exp_id:
+            continue
+        return prior_exp or "unknown"
+    return ""
+
+
+def record_output(root: Path | None, exp_id: str, output_hash: str) -> Path:
+    path = output_history_path(root)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(
+            json.dumps({"exp_id": exp_id, "output_hash": output_hash}, sort_keys=True) + "\n"
+        )
+    return path

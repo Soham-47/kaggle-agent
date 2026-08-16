@@ -291,7 +291,7 @@ def _poll_and_maybe_pull(
         result.errors.append(f"status: {exc}")
         return result
 
-    st_norm = (result.status or "").lower().replace(" ", "")
+    st_norm = str(result.status or "").split(".")[-1].lower().replace(" ", "")
     if st_norm in {"error", "failed"} and folder is not None:
         fail = ""
         try:
@@ -313,7 +313,7 @@ def _poll_and_maybe_pull(
                 save_kernel_job(job, root)
                 st = client.kernels_status(kernel_ref)
                 result.status = st
-                st_norm = (st or "").lower().replace(" ", "")
+                st_norm = str(st or "").split(".")[-1].lower().replace(" ", "")
             except Exception as exc:  # noqa: BLE001
                 result.ok = False
                 result.errors.append(f"cpu-retry: {exc}")

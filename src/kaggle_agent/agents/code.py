@@ -523,8 +523,8 @@ def _variant_recipe_source(workspace: Path, plan_text: str) -> str:
     # Use the researched 336px DINO path as the deterministic fallback.
     if "T.Resize((224, 224))" in changed:
         changed = changed.replace("T.Resize((224, 224))", "T.Resize((336, 336))", 1)
-    elif "files[:40]" in changed:
-        changed = changed.replace("files[:40]", "files[:48]", 1)
+    elif "n_estimators=200" in changed:
+        changed = changed.replace("n_estimators=200", "n_estimators=300", 1)
     elif "][:3]" in changed:
         changed = changed.replace("][:3]", "][:5]", 1)
     if changed == recipe:

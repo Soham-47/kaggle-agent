@@ -167,6 +167,48 @@ def test_kernel_job_enum_repr_status_is_done():
     assert job.is_active is False
 
 
+def test_run_kernel_phase_clears_job_when_status_has_enum_prefix(tmp_path: Path):
+    """Regression: a raw 'KernelWorkerStatus.COMPLETE' status must still clear
+    the job and pull output. Before the fix, the un-stripped enum prefix made
+    the post-poll completion check silently fail, leaving a stale kernel_job
+    that caused every later cycle to reuse the same old kernel forever.
+    """
+    import shutil
+
+    root = tmp_path / "ka"
+    real = repo_root()
+    shutil.copytree(real / "config", root / "config")
+    (root / "competitions" / "rsna_knee").mkdir(parents=True)
+    (root / "memory").mkdir()
+    if (real / "data").is_dir():
+        shutil.copytree(real / "data", root / "data")
+    comp = load_competition("rsna_knee", root)
+    pkg = write_kernel_package(comp, root=root, username="tester", exp_id="e1")
+    api = FakeKaggleApi(status_queue=["KernelWorkerStatus.COMPLETE"])
+    client = KaggleClient(api=api).connect()
+
+    run = run_kernel_phase(
+        client,
+        pkg,
+        push=True,
+        pull_output_dir=pkg.folder / "output",
+        root=root,
+        competition=comp.slug,
+        exp_id="e1",
+    )
+
+    assert run.ok
+    assert (pkg.folder / "output" / "submission.csv").is_file()
+    job = load_kernel_job(root)
+    assert job.kernel_ref == "none", "stale job must be cleared on completion"
+
+    # A brand-new identical-content package must not silently reuse the old
+    # kernel: with the job cleared, package_matches_existing has nothing to
+    # match against.
+    pkg2 = write_kernel_package(comp, root=root, username="tester", exp_id="e2")
+    assert package_matches_existing(pkg2, job) is False
+
+
 def test_kernel_job_plain_running_status_is_active():
     job = KernelJob(
         kernel_ref="u/k",

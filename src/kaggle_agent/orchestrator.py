@@ -89,6 +89,8 @@ from kaggle_agent.loop import (
     score_is_better,
     update_loop_from_score,
 )
+from kaggle_agent.experiment_fingerprint import submission_output_hash
+from kaggle_agent.train.kernel_history import record_output, seen_output
 from kaggle_agent.train.kernel_runner import (
     KernelRunResult,
     package_matches_existing,
@@ -126,6 +128,8 @@ class CycleResult:
     smoke_ok: bool | None = None
     smoke_path: str | None = None
     kernel_ok: bool | None = None
+    kernel_duplicate: bool = False
+    output_duplicate: bool = False
     kernel_ref: str | None = None
     kernel_path: str | None = None
     kernel_judge_ok: bool | None = None
@@ -364,6 +368,8 @@ class Orchestrator:
         result.smoke_ok = None
         result.smoke_path = None
         result.kernel_ok = None
+        result.kernel_duplicate = False
+        result.output_duplicate = False
         result.kernel_ref = None
         result.kernel_path = None
         result.kernel_resumed = None
@@ -468,6 +474,12 @@ class Orchestrator:
             state = self._run_named_phases((phase,), state, dry, result)
             if phase == "CODE" and result.code_ok is False:
                 append_daily_log("train slice stopped: CODE produced no recipe change", self.root)
+                break
+            if phase == "KERNEL_TRAIN" and result.kernel_duplicate:
+                append_daily_log("train slice stopped: kernel identical to a previous run", self.root)
+                break
+            if phase == "VALIDATE_SUB" and result.output_duplicate:
+                append_daily_log("train slice stopped: output identical to a previous run", self.root)
                 break
         return state
 
@@ -1263,16 +1275,20 @@ class Orchestrator:
                 result.kernel_ref = package.kernel_ref
                 out_dir = package.folder / "output"
                 if should_push and package_matches_existing(package, existing):
-                    # Completed kernel with identical artifact: reuse it, no new push.
-                    result.kernel_ref = existing.kernel_ref
-                    result.kernel_path = existing.folder
+                    # Same notebook + metadata as a previous kernel: CODE/PLAN
+                    # produced no real change. Stop instead of silently
+                    # resubmitting the same kernel as if it were a new one.
+                    result.kernel_duplicate = True
                     run = KernelRunResult(
-                        ok=True,
+                        ok=False,
                         package=package,
-                        resumed=True,
+                        resumed=False,
                         kernel_ref=existing.kernel_ref,
-                        message=f"reused identical kernel {existing.kernel_ref}",
+                        message=f"identical kernel: no change since {existing.kernel_ref}",
                         status=existing.status,
+                        errors=[
+                            f"kernel is identical to previous experiment {existing.kernel_ref}"
+                        ],
                     )
                 else:
                     run = run_kernel_phase(
@@ -1338,6 +1354,26 @@ class Orchestrator:
         result.candidate_csv = str(path)
         if check.ok:
             append_daily_log(f"validate ok path={path} rows={check.n_rows}", self.root)
+            kernel_output = (
+                result.kernel_path is not None
+                and path == Path(result.kernel_path) / "output" / "submission.csv"
+            )
+            if kernel_output:
+                out_hash = submission_output_hash(path, self.competition.id_column)
+                prior_exp = seen_output(
+                    self.root, out_hash, exp_id=result.experiment_id or ""
+                )
+                if prior_exp:
+                    result.output_duplicate = True
+                    result.validate_ok = False
+                    result.errors.append(
+                        f"validate: predictions identical to previous experiment {prior_exp}"
+                    )
+                    append_daily_log(
+                        f"validate rejected: output identical to {prior_exp}", self.root
+                    )
+                else:
+                    record_output(self.root, result.experiment_id or "unknown", out_hash)
         else:
             result.errors.extend(f"validate:{e}" for e in check.errors[:5])
             append_daily_log(f"validate failed: {check.errors[:3]}", self.root)

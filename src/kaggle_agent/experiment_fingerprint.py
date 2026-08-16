@@ -47,6 +47,22 @@ def recipe_logic_hash(recipe: str) -> str:
     return _digest(ast.dump(tree, annotate_fields=True, include_attributes=False))
 
 
+def submission_output_hash(path: Path, id_column: str) -> str:
+    """Hash a submission CSV's data, ignoring row order and line endings.
+
+    Two runs that predict the same labels for the same ids hash identically
+    even if the writer emitted rows in a different order.
+    """
+    import csv
+
+    with path.open(newline="", encoding="utf-8") as fh:
+        reader = csv.DictReader(fh)
+        fieldnames = list(reader.fieldnames or [])
+        rows = [dict(row) for row in reader]
+    rows.sort(key=lambda r: r.get(id_column, ""))
+    return canonical_hash({"columns": fieldnames, "rows": rows})
+
+
 def experiment_fingerprint(
     plan_text: str,
     methods: dict[str, Any],
