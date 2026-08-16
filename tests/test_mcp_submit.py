@@ -119,8 +119,8 @@ def test_mcp_fail_then_api_then_browser(tmp_path: Path):
         return SubmitResult(dry_run=False, message="browser ok", success=True)
 
     class FailApi(FakeKaggleApi):
-        def kernels_push(self, folder, timeout=None, acc=None):
-            raise RuntimeError("api push fail")
+        def competition_submit_code(self, *a, **k):
+            raise RuntimeError("api submit_code fail")
 
         def competition_submit(self, *a, **k):
             raise RuntimeError("api file fail")
@@ -262,6 +262,6 @@ def test_live_submit_uses_api_not_mcp(tmp_path: Path):
     assert r.submit_message and r.submit_message.startswith("api:")
     assert mcp_hits == []
     kinds = [c[0] for c in api.submit_calls if isinstance(c, tuple) and c]
-    assert "kernels_push" in kinds
     assert "submit_code" in kinds
+    assert "kernels_push" not in kinds
     assert load_pending(root).status == "submitted"

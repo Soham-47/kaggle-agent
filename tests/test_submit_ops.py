@@ -1,4 +1,4 @@
-"""submit_ops notebook-submit rules: internet off for the submitted kernel."""
+"""submit_ops notebook-submit: submit the completed train kernel output."""
 
 import json
 
@@ -27,7 +27,7 @@ def _write_meta(folder, **overrides):
     )
 
 
-def test_submit_notebook_disables_internet_before_push(tmp_path):
+def test_submit_notebook_no_repush_submits_completed_kernel(tmp_path):
     folder = tmp_path / "pkg"
     _write_meta(folder)
     api = FakeKaggleApi()
@@ -45,9 +45,14 @@ def test_submit_notebook_disables_internet_before_push(tmp_path):
     )
 
     assert result.success
-    meta = json.loads((folder / "kernel-metadata.json").read_text(encoding="utf-8"))
-    assert meta["enable_internet"] is False
-    assert meta["enable_gpu"] is True
-    assert meta["machine_shape"] == "NvidiaTeslaT4"
     pushes = [c for c in api.submit_calls if c and c[0] == "kernels_push"]
-    assert len(pushes) == 1
+    assert pushes == []
+    subs = [c for c in api.submit_calls if c and c[0] == "submit_code"]
+    assert len(subs) == 1
+    _, file_name, message, competition, kernel, version = subs[0]
+    assert file_name == "submission.csv"
+    assert kernel == "tester/kernel"
+    assert version is None
+    meta = json.loads((folder / "kernel-metadata.json").read_text(encoding="utf-8"))
+    assert meta["enable_internet"] is True
+    assert meta["machine_shape"] == "NvidiaTeslaT4"

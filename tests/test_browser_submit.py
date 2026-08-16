@@ -39,8 +39,8 @@ class _FailSubmitApi(FakeKaggleApi):
     def competition_submit(self, *args, **kwargs):
         raise RuntimeError("400 CreateSubmission forced")
 
-    def kernels_push(self, folder, timeout=None, acc=None):
-        raise RuntimeError("kernels_push forced fail")
+    def competition_submit_code(self, *args, **kwargs):
+        raise RuntimeError("submit_code forced fail")
 
 
 def test_browser_submit_dry_run(tmp_path: Path):

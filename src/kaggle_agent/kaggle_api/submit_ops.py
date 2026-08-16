@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from kaggle_agent.kaggle_api.models import SubmitResult
-from kaggle_agent.kaggle_api.sdk_get import get, get_str, http_detail
+from kaggle_agent.kaggle_api.sdk_get import get_str, http_detail
 
 _DONE = frozenset({"complete", "completed", "success"})
 _FAIL = frozenset({"error", "failed", "cancelled", "canceled"})
@@ -46,54 +46,6 @@ def submit_file(api: Any, competition: str, path: Path, message: str) -> SubmitR
     )
 
 
-def _fix_metadata_owner(api: Any, kernel_folder: Path) -> None:
-    """Rewrite kernel-metadata.json id owner to the authenticated user.
-
-    A stale owner (e.g. "local-user") makes the API treat the re-push as a
-    new kernel and fail with 409 title conflict.
-    """
-    meta = kernel_folder / "kernel-metadata.json"
-    if not meta.is_file():
-        return
-    owner = getattr(api, "username", None) or ""
-    if not owner:
-        cfg = getattr(api, "config_values", None) or {}
-        owner = str(cfg.get("username") or "")
-    if not owner:
-        return
-    try:
-        import json
-
-        data = json.loads(meta.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError):
-        return
-    k_id = str(data.get("id") or "")
-    if "/" not in k_id:
-        return
-    if k_id.split("/", 1)[0] != owner:
-        data["id"] = f"{owner}/{k_id.split('/', 1)[1]}"
-        meta.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
-
-
-def _disable_internet(kernel_folder: Path) -> None:
-    """Force enable_internet=false so the submit kernel meets the rules.
-
-    Code competitions require internet off for the submitted notebook.
-    """
-    meta = kernel_folder / "kernel-metadata.json"
-    if not meta.is_file():
-        return
-    try:
-        import json
-
-        data = json.loads(meta.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError):
-        return
-    if data.get("enable_internet") is not False:
-        data["enable_internet"] = False
-        meta.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
-
-
 def submit_notebook(
     api: Any,
     *,
@@ -106,39 +58,19 @@ def submit_notebook(
     poll_seconds: int = 45,
     poll_attempts: int = 60,
 ) -> SubmitResult:
-    """Push kernel, wait COMPLETE, then competition_submit_code(submission.csv)."""
-    if not kernel_folder.is_dir():
+    """Submit the output of an already-completed kernel version.
+
+    No re-push and no re-run: the train kernel already ran with internet and
+    the accelerator the metadata requests. kernel_version=None makes the API
+    submit the latest completed version of the kernel.
+    """
+    ref = normalize_kernel_ref(kernel_ref)
+    if not ref:
         return SubmitResult(
-            dry_run=False, message=f"kernel folder missing: {kernel_folder}", success=False
+            dry_run=False, message="no kernel ref for notebook submit", success=False
         )
-    _fix_metadata_owner(api, kernel_folder)
-    _disable_internet(kernel_folder)
-    try:
-        push = api.kernels_push(str(kernel_folder))
-    except Exception as exc:  # noqa: BLE001
-        from kaggle_agent.heal.pins import apply_pin_heal, is_pin_error
 
-        detail = http_detail(exc)
-        if is_pin_error(str(detail)) or is_pin_error(str(exc)):
-            apply_pin_heal(kernel_folder.parent.parent, kernel_folder)
-            try:
-                push = api.kernels_push(str(kernel_folder))
-            except Exception as exc2:  # noqa: BLE001
-                raise RuntimeError(f"kernels_push failed: {http_detail(exc2)}") from exc2
-        else:
-            raise RuntimeError(f"kernels_push failed: {detail}") from exc
-
-    ref = normalize_kernel_ref(get_str(push, "ref", default=kernel_ref or ""))
-    if not ref:
-        ref = normalize_kernel_ref(kernel_ref)
-    version = get(push, "version_number", "versionNumber")
-    err = get_str(push, "error")
-    if err and err not in {"none", "None", ""}:
-        return SubmitResult(dry_run=False, message=f"kernels_push error: {err}", success=False)
-    if not ref:
-        return SubmitResult(dry_run=False, message="kernels_push returned no ref", success=False)
-
-    last = "pushed"
+    last = "unknown"
     for _ in range(max(1, poll_attempts)):
         try:
             last = status_fn(ref)
@@ -170,8 +102,6 @@ def submit_notebook(
         "kernel": ref,
         "quiet": True,
     }
-    if version is not None:
-        kwargs["kernel_version"] = int(version)
     try:
         resp = api.competition_submit_code(**kwargs)
     except Exception as exc:  # noqa: BLE001
@@ -180,7 +110,7 @@ def submit_notebook(
     status = get_str(resp, "message", "ref", "status", default=str(resp))
     return SubmitResult(
         dry_run=False,
-        message=f"notebook submit ok ref={ref} v={version} status={status}",
+        message=f"notebook submit ok ref={ref} status={status}",
         success=True,
         raw_status=status,
     )
