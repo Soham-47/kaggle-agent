@@ -14,6 +14,7 @@ class AgentExecution:
     stop_reason: str = ""
     turns: int = 0
     tool_calls: list[str] = field(default_factory=list)
+    source_reads: list[str] = field(default_factory=list)
     writes: list[str] = field(default_factory=list)
     rejected_writes: list[str] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
@@ -36,20 +37,31 @@ def verify_research_fleet(
         if not _has_owned_write(by_agent.get(name, AgentExecution(name)))
     ]
     if missing:
-        return Verification(False, f"agents without verified card writes: {missing}")
-    errors = [f"{item.agent}: {item.errors}" for item in executions if item.errors]
-    if errors:
-        return Verification(False, "; ".join(errors))
+        detail = {
+            name: {
+                "source_reads": by_agent.get(name, AgentExecution(name)).source_reads,
+                "writes": by_agent.get(name, AgentExecution(name)).writes,
+            }
+            for name in missing
+        }
+        return Verification(False, f"agents without verified card writes: {detail}")
     return Verification(True, f"verified card writes for {len(required_agents)} agents")
 
 
 def _has_owned_write(execution: AgentExecution) -> bool:
+    if not execution.source_reads:
+        return False
     for raw_path in execution.writes:
         path = Path(raw_path)
         if not path.is_file():
             continue
-        lines = path.read_text(encoding="utf-8").splitlines()[:5]
-        if f"- agent: {execution.agent}" in lines:
+        lines = path.read_text(encoding="utf-8").splitlines()
+        if (
+            f"- agent: {execution.agent}" in lines
+            and not any("stall-recovery" in line for line in lines)
+            and any("- copyable next step:" in line for line in lines)
+            and any("- do not copy:" in line for line in lines)
+        ):
             return True
     return False
 

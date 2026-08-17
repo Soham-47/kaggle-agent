@@ -52,6 +52,7 @@ from kaggle_agent.research.agent import ResearchAgent
 from kaggle_agent.research.fleet import (
     AGENT_SPECS,
     clone_client_for_agent,
+    fleet_tool_schemas,
     make_fleet_tools,
     make_write_card,
     run_fleet,
@@ -137,6 +138,7 @@ class CycleResult:
     browser_ok: bool | None = None
     deep_ok: bool | None = None
     research_verified: bool | None = None
+    research_verification_detail: str = ""
     deep_learnings: int = 0
     deep_sources: int = 0
     code_ok: bool | None = None
@@ -260,7 +262,10 @@ class Orchestrator:
             )
             research_blocked = result.research_verified is False and self._llm_available()
             if research_blocked:
-                result.errors.append("research verification failed; training blocked")
+                result.errors.append(
+                    "research verification failed; training blocked: "
+                    f"{result.research_verification_detail}"
+                )
                 append_daily_log("research verification failed; training blocked", self.root)
             else:
                 state = self._run_train_slices(state, dry, result, started=now)
@@ -714,6 +719,7 @@ class Orchestrator:
                 kernel_pull_fn=(
                     kernel_pull_fn if "pull_kernel" in spec.tools else None
                 ),
+                max_searches=2,
             )
             tools["harvest_cards"] = harvest_cards
             agents.append(
@@ -736,9 +742,11 @@ class Orchestrator:
                             "your single best finding (ref + markdown body). Call "
                             "done only after write_card succeeded."
                         ),
-                        stall_force=("done", {}),
+                        stall_force=None,
+                        force_after_stall="write_card",
                         name="research",
                         agent_id=name,
+                        tool_schemas=fleet_tool_schemas(spec),
                         tracer=self._tracer,
                     ),
                 )
@@ -747,6 +755,7 @@ class Orchestrator:
         result.research_passes = max(1, out.turns)
         research_verification = verify_research_fleet(out.executions, roster)
         result.research_verified = research_verification.ok
+        result.research_verification_detail = research_verification.detail
         if self._tracer is not None:
             for execution in out.executions:
                 self._tracer.emit(
@@ -756,6 +765,7 @@ class Orchestrator:
                     stop_reason=execution.stop_reason,
                     turns=execution.turns,
                     tool_calls=execution.tool_calls,
+                    source_reads=execution.source_reads,
                     writes=execution.writes,
                     rejected_writes=execution.rejected_writes,
                     errors=execution.errors,

@@ -36,6 +36,7 @@ class StageAgentResult:
     observations: list[str] = field(default_factory=list)
     agent: str = ""
     tool_calls: list[str] = field(default_factory=list)
+    source_reads: list[str] = field(default_factory=list)
     writes: list[str] = field(default_factory=list)
     rejected_writes: list[str] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
@@ -46,6 +47,7 @@ class StageAgentResult:
             stop_reason=self.stop_reason,
             turns=self.turns,
             tool_calls=list(self.tool_calls),
+            source_reads=list(self.source_reads),
             writes=list(self.writes),
             rejected_writes=list(self.rejected_writes),
             errors=list(self.errors),
@@ -181,6 +183,7 @@ class StageAgent:
         stall_force: tuple[str, dict[str, Any]]
         | Callable[[int], tuple[str, dict[str, Any]] | None]
         | None = None,
+        force_after_stall: str | None = None,
     ) -> None:
         self._zen = zen
         self._model = model
@@ -206,7 +209,10 @@ class StageAgent:
             reject_msg=reject_msg,
         )
         self._nudges: list[str] = []
+        self._force_after_stall = force_after_stall
+        self._forced_tool_choice: str | None = None
         self._tool_calls: list[str] = []
+        self._source_reads: list[str] = []
         self._writes: list[str] = []
         self._rejected_writes: list[str] = []
         self._errors: list[str] = []
@@ -265,10 +271,14 @@ class StageAgent:
                 continue
             if decision.action == "nudge":
                 nudge_text = decision.nudge_text
+                self._forced_tool_choice = self._force_after_stall
                 if nudge_text not in self._nudges:
                     self._nudges.append(nudge_text)
                     self._logmsg(f"{self._name} agent nudge: stall turns={turns}")
                     transcript.append(f"nudge: {nudge_text}")
+                if self._force_after_stall:
+                    # Give the model one forced write turn after the nudge.
+                    stall.last_write_turn = turns
                 turns += 1
                 continue
             tool, args = self._next_action(transcript)
@@ -373,7 +383,19 @@ class StageAgent:
             return "no_llm", {}
         if self._zen is None or not hasattr(self._zen, "chat"):
             return "no_llm", {}
-        choice = "auto" if used & WRITE_TOOLS else "required"
+        forced_choice = self._forced_tool_choice
+        self._forced_tool_choice = None
+        if (
+            forced_choice
+            and forced_choice in self._tools
+            and (forced_choice != "write_card" or self._source_reads)
+        ):
+            choice: str | dict[str, Any] = {
+                "type": "function",
+                "function": {"name": forced_choice},
+            }
+        else:
+            choice = "auto" if used & WRITE_TOOLS else "required"
         raw = self._zen.chat(
             self._model,
             [
@@ -442,6 +464,20 @@ class StageAgent:
         self._tool_calls.append(tool)
         if result.startswith("tool error:"):
             self._errors.append(result)
+        if tool not in WRITE_TOOLS and result.strip() and not result.startswith(
+            (
+                "tool error:",
+                "refuse:",
+                "no source",
+                "no kaggle",
+                "missing",
+                "none",
+                "search budget exhausted",
+            )
+        ):
+            self._source_reads.append(tool)
+        if result.startswith("search budget exhausted") and self._source_reads:
+            self._forced_tool_choice = "write_card"
         if tool in WRITE_TOOLS and tool != "harvest_cards":
             if result.startswith(("rejected:", "tool error:")):
                 self._rejected_writes.append(result[:400])
@@ -457,6 +493,7 @@ class StageAgent:
             observations,
             agent=self._agent_id,
             tool_calls=list(self._tool_calls),
+            source_reads=list(self._source_reads),
             writes=list(self._writes),
             rejected_writes=list(self._rejected_writes),
             errors=list(self._errors),

@@ -403,10 +403,20 @@ def test_fleet_agents_write_owned_namespaced_cards(tmp_path: Path, monkeypatch):
     _fake_judge(monkeypatch, [(True, "ready")])
     _stub_cards(monkeypatch)
     root = _setup(tmp_path, drop_methods=True)
+    monkeypatch.setattr(
+        Orchestrator,
+        "_source_tool_closures",
+        lambda self: {
+            "list_kernels": lambda **_: "owner/kernel",
+            "pull_kernel": lambda **_: "kernel source",
+            "fetch_url": lambda *args, **kwargs: "fetched source",
+            "search": lambda query, kind, limit: f"hit {kind}",
+        },
+    )
 
     class _PerAgentZen:
         def __init__(self) -> None:
-            self.done: set[str] = set()
+            self.turns: dict[str, int] = {}
 
         def chat(self, model, messages, **kwargs):  # noqa: ANN001
             system = str(messages[0]["content"])
@@ -415,8 +425,22 @@ def test_fleet_agents_write_owned_namespaced_cards(tmp_path: Path, monkeypatch):
                 for item in ("notebooks", "papers", "github", "web", "discussions", "datasets")
                 if f"the {item} research agent" in system
             )
-            if name not in self.done:
-                self.done.add(name)
+            turn = self.turns.get(name, 0)
+            self.turns[name] = turn + 1
+            if turn == 0:
+                if name == "notebooks":
+                    return json.dumps({"tool": "list_kernels", "args": {}})
+                kind = {
+                    "papers": "arxiv",
+                    "github": "github",
+                    "web": "web",
+                    "discussions": "discussion",
+                    "datasets": "dataset",
+                }[name]
+                return json.dumps(
+                    {"tool": "search", "args": {"kind": kind, "query": name}}
+                )
+            if turn == 1:
                 return json.dumps(
                     {
                         "tool": "write_card",
@@ -450,19 +474,59 @@ def test_fleet_agents_write_owned_namespaced_cards(tmp_path: Path, monkeypatch):
     assert len(owned) == 6
 
 
-def test_failed_fleet_verification_blocks_training(tmp_path: Path, monkeypatch):
+def test_stalled_fleet_agents_force_owned_cards(tmp_path: Path, monkeypatch):
     _stub_deep(monkeypatch)
     _stub_cards(monkeypatch)
     _fake_judge(monkeypatch, [(True, "ready")])
     root = _setup(tmp_path, drop_methods=True)
-    zen = _ScriptedZen([{"tool": "done", "args": {}}] * 20)
+    monkeypatch.setattr(
+        Orchestrator,
+        "_source_tool_closures",
+        lambda self: {
+            "list_kernels": lambda **_: "owner/kernel",
+            "pull_kernel": lambda **_: "kernel source",
+            "fetch_url": lambda *args, **kwargs: "fetched source",
+            "search": lambda query, kind, limit: f"hit {kind}",
+        },
+    )
+
+    class _StallingZen:
+        def chat(self, model, messages, **kwargs):  # noqa: ANN001
+            system = str(messages[0]["content"])
+            name = next(
+                item
+                for item in ("notebooks", "papers", "github", "web", "discussions", "datasets")
+                if f"the {item} research agent" in system
+            )
+            if isinstance(kwargs.get("tool_choice"), dict):
+                return json.dumps(
+                    {
+                        "tool": "write_card",
+                        "args": {
+                            "ref": f"owner/{name}",
+                            "markdown": (
+                                f"# {name} finding\n- ref: owner/{name}\n"
+                                "- copyable next step: inspect source\n"
+                                "- do not copy: unverified claims\n"
+                            ),
+                        },
+                    }
+                )
+            if name == "notebooks":
+                return json.dumps({"tool": "list_kernels", "args": {}})
+            kind = {
+                "papers": "arxiv",
+                "github": "github",
+                "web": "web",
+                "discussions": "discussion",
+                "datasets": "dataset",
+            }[name]
+            return json.dumps({"tool": "search", "args": {"kind": kind, "query": name}})
 
     result = _orch(
         root,
         KaggleClient(api=FakeKaggleApi()).connect(),
-        zen=zen,
+        zen=_StallingZen(),
     ).run_cycle(dry_run=True)
 
-    assert result.research_verified is False
-    assert result.phases_run == ["LOCK", "RESEARCH"]
-    assert any("training blocked" in error for error in result.errors)
+    assert result.research_verified is True

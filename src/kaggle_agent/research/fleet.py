@@ -142,6 +142,53 @@ def make_write_card(
     return write_card
 
 
+def fleet_tool_schemas(spec: SubagentSpec) -> dict[str, dict[str, Any]]:
+    """Structured tool schemas so the model learns each tool's real parameters."""
+    schemas: dict[str, dict[str, Any]] = {}
+    if "search" in spec.tools:
+        kind_prop: dict[str, Any] = {"type": "string", "description": "source kind"}
+        if spec.search_kinds:
+            kind_prop["enum"] = list(spec.search_kinds)
+        schemas["search"] = {
+            "description": "Search one source kind for this competition.",
+            "properties": {
+                "query": {"type": "string", "description": "search query"},
+                "kind": kind_prop,
+                "limit": {"type": "integer", "description": "max hits"},
+            },
+            "required": ["query"],
+        }
+    if "fetch_url" in spec.tools:
+        schemas["fetch_url"] = {
+            "description": "Fetch one http(s) URL returned by search.",
+            "properties": {"url": {"type": "string", "description": "http(s) url"}},
+            "required": ["url"],
+        }
+    if "list_kernels" in spec.tools:
+        schemas["list_kernels"] = {
+            "description": "List top public kernels for this competition.",
+            "properties": {"query": {"type": "string", "description": "filter"}},
+        }
+    if "pull_kernel" in spec.tools:
+        schemas["pull_kernel"] = {
+            "description": "Pull one kernel's source by ref.",
+            "properties": {"ref": {"type": "string", "description": "owner/kernel"}},
+            "required": ["ref"],
+        }
+    if "write_card" in spec.tools:
+        schemas["write_card"] = {
+            "description": (
+                "Write one method card. Call after you read at least one source."
+            ),
+            "properties": {
+                "ref": {"type": "string", "description": "source url or ref"},
+                "markdown": {"type": "string", "description": "full card body"},
+            },
+            "required": ["ref", "markdown"],
+        }
+    return schemas
+
+
 def make_fleet_tools(
     spec: SubagentSpec,
     *,
@@ -150,10 +197,24 @@ def make_fleet_tools(
     write_fn: Callable[[str, str], str],
     kernel_list_fn: Callable[..., str] | None = None,
     kernel_pull_fn: Callable[..., str] | None = None,
+    max_searches: int = 2,
 ) -> dict[str, Callable[..., str]]:
     """Tool dict for one subagent; every tool enforces the spec's restrictions."""
 
-    def search(query: str = "", kind: str = "web", limit: int = 5, **_a: Any) -> str:
+    search_calls = 0
+
+    def search(query: str = "", kind: str = "", limit: int = 5, **_a: Any) -> str:
+        nonlocal search_calls
+        if search_calls >= max(1, int(max_searches)):
+            return "search budget exhausted; fetch a returned source or write_card now"
+        search_calls += 1
+        kind = str(kind).strip()
+        # A single-source agent defaults to (and is coerced to) its one kind,
+        # so a kind-less or mismatched call never wastes a turn on a refusal.
+        if len(spec.search_kinds) == 1:
+            kind = spec.search_kinds[0]
+        elif not kind and spec.search_kinds:
+            kind = spec.search_kinds[0]
         if kind not in spec.search_kinds:
             allowed = ", ".join(spec.search_kinds) or "none"
             return f"refuse: kind={kind} not allowed for {spec.name} (allowed: {allowed})"

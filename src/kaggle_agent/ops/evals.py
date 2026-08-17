@@ -79,7 +79,11 @@ def evaluate_cycle(
     n_tools = len(tools)
     n_research = len(research_tools)
     rate = (len(invalid) / n_tools) if n_tools else 0.0
-    wrote = any(e.get("tool") in RESEARCH_WRITE_TOOLS for e in research_tools)
+    wrote = any(
+        e.get("tool") in RESEARCH_WRITE_TOOLS
+        or (e.get("tool") == "fleet" and bool(e.get("verified")))
+        for e in research_tools
+    )
 
     ws = workspace
     if ws is None:

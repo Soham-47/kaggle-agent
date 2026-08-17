@@ -11,6 +11,7 @@ from kaggle_agent.llm.zen_client import ZenClient
 from kaggle_agent.research.fleet import (
     AGENT_SPECS,
     clone_client_for_agent,
+    fleet_tool_schemas,
     make_fleet_tools,
     make_write_card,
     run_fleet,
@@ -77,15 +78,53 @@ def _tools(spec_name: str, search_calls: dict | None = None, **extra):  # noqa: 
     )
 
 
-def test_search_refuses_disallowed_kinds():
+def test_single_kind_agent_coerces_wrong_kind_to_its_own():
     calls = {"n": 0}
     tools = _tools("papers", search_calls=calls)
+    # A wrong kind is coerced to the agent's only source, not wasted on a refusal.
     out = tools["search"](query="knee", kind="github")
-    assert "refuse" in out
-    assert calls["n"] == 0
-    out = tools["search"](query="knee", kind="arxiv", limit=3)
-    assert calls["n"] == 1
+    assert "refuse" not in out
     assert "hit arxiv" in out
+    assert calls["n"] == 1
+
+
+def test_single_kind_agent_defaults_to_its_kind():
+    seen = {"kind": None}
+
+    def search_fn(query: str, kind: str, limit: int) -> str:
+        seen["kind"] = kind
+        return f"hit {kind}"
+
+    tools = make_fleet_tools(
+        AGENT_SPECS["papers"],
+        search_fn=search_fn,
+        fetch_fn=lambda u: "body",
+        write_fn=lambda ref, md: "/tmp/card.md",
+    )
+    out = tools["search"](query="knee")  # no kind given
+    assert "refuse" not in out
+    assert seen["kind"] == "arxiv"
+
+
+def test_fleet_search_schema_advertises_kind_enum():
+    schema = fleet_tool_schemas(AGENT_SPECS["papers"])
+    props = schema["search"]["properties"]
+    assert props["kind"]["enum"] == ["arxiv"]
+    assert "query" in props
+
+
+def test_fleet_search_has_small_call_budget():
+    tools = make_fleet_tools(
+        AGENT_SPECS["web"],
+        search_fn=lambda q, k, l: f"hit {k}",
+        fetch_fn=lambda u: "body",
+        write_fn=lambda ref, md: "/tmp/card.md",
+        max_searches=2,
+    )
+
+    assert "hit web" in tools["search"](query="one")
+    assert "hit web" in tools["search"](query="two")
+    assert "budget exhausted" in tools["search"](query="three")
 
 
 def test_notebooks_agent_gets_kernel_tools_only():

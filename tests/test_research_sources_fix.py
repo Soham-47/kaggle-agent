@@ -137,9 +137,7 @@ def test_fleet_discussions_datasets_use_real_kinds():
         )
         assert "search" in tools
         out = tools["search"](query="knee", kind="web")
-        assert "refuse" in out
         kind = AGENT_SPECS[name].search_kinds[0]
-        out = tools["search"](query="knee", kind=kind)
         assert f"hit {kind}" in out
 
 
