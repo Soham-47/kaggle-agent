@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from kaggle_agent.agents.loop import StageAgent, StageAgentConfig
+from kaggle_agent.agents.verification import AgentExecution
 from kaggle_agent.llm.fallback import FallbackClient, ProviderSpec
 
 
@@ -106,7 +107,13 @@ def subagent_system(name: str, slug: str, our_score: str) -> str:
     )
 
 
-def make_write_card(dest: Path, kind: str) -> Callable[[str, str], str]:
+def make_write_card(
+    dest: Path,
+    kind: str,
+    *,
+    agent: str = "",
+    run_id: str = "",
+) -> Callable[[str, str], str]:
     """write_card closure that namespaces files as source-<kind>-<slug>.md."""
 
     def write_card(ref: str = "", markdown: str = "") -> str:
@@ -119,6 +126,16 @@ def make_write_card(dest: Path, kind: str) -> Callable[[str, str], str]:
         dest.mkdir(parents=True, exist_ok=True)
         slug = re.sub(r"[^a-z0-9]+", "-", (ref or kind).lower()).strip("-")[:60] or "src"
         path = dest / f"source-{kind}-{slug}.md"
+        provenance = []
+        if agent:
+            provenance.append(f"- agent: {agent}")
+        if run_id:
+            provenance.append(f"- run_id: {run_id}")
+        if provenance:
+            lines = body.splitlines()
+            insert_at = 1 if lines and lines[0].startswith("#") else 0
+            lines[insert_at:insert_at] = provenance
+            body = "\n".join(lines)
         path.write_text(body + "\n", encoding="utf-8")
         return str(path)
 
@@ -168,6 +185,7 @@ class FleetResult:
     turns: int = 0
     stops: list[str] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
+    executions: list[AgentExecution] = field(default_factory=list)
 
 
 def run_fleet(
@@ -186,6 +204,7 @@ def run_fleet(
 
     stops: dict[str, str] = {}
     errors: dict[str, str] = {}
+    executions: dict[str, AgentExecution] = {}
     turns = 0
     with ThreadPoolExecutor(max_workers=max(1, len(agents))) as pool:
         futs = {pool.submit(_one, item): item[0] for item in agents}
@@ -198,6 +217,8 @@ def run_fleet(
             else:
                 stops[name] = out.stop_reason
                 turns += out.turns
+                execution = out.execution()
+                executions[name] = execution
             if log is not None:
                 log(f"research fleet {name} stop={stops[name]}")
     return FleetResult(
@@ -205,6 +226,7 @@ def run_fleet(
         turns=turns,
         stops=[stops.get(name, "?") for name, _ in agents],
         errors=[errors[name] for name, _ in agents if name in errors],
+        executions=[executions.get(name, AgentExecution(name, "error")) for name, _ in agents],
     )
 
 

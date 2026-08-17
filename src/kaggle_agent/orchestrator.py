@@ -43,6 +43,11 @@ from kaggle_agent.research.browser import (
 from kaggle_agent.agents.code import make_code_agent
 from kaggle_agent.agents.loop import StageAgent, StageAgentConfig
 from kaggle_agent.agents.plan import make_plan_agent, write_plan_text
+from kaggle_agent.agents.verification import (
+    verify_code_stage,
+    verify_plan_stage,
+    verify_research_fleet,
+)
 from kaggle_agent.research.agent import ResearchAgent
 from kaggle_agent.research.fleet import (
     AGENT_SPECS,
@@ -131,6 +136,7 @@ class CycleResult:
     kaggle_ok: bool | None = None
     browser_ok: bool | None = None
     deep_ok: bool | None = None
+    research_verified: bool | None = None
     deep_learnings: int = 0
     deep_sources: int = 0
     code_ok: bool | None = None
@@ -156,6 +162,9 @@ class CycleResult:
     wrote_custom_infer: bool = False
     wrote_methods: bool = False
     wrote_recipe: bool = False
+    plan_verified: bool | None = None
+    code_verified: bool | None = None
+    code_agent: str | None = None
     errors: list[str] = field(default_factory=list)
 
     @property
@@ -249,7 +258,12 @@ class Orchestrator:
             state = self._run_named_phases(
                 self._enabled_phases(("RESEARCH",)), state, dry, result
             )
-            state = self._run_train_slices(state, dry, result, started=now)
+            research_blocked = result.research_verified is False and self._llm_available()
+            if research_blocked:
+                result.errors.append("research verification failed; training blocked")
+                append_daily_log("research verification failed; training blocked", self.root)
+            else:
+                state = self._run_train_slices(state, dry, result, started=now)
             state = self._run_named_phases(
                 self._enabled_phases(SUBMIT_PHASES), state, dry, result
             )
@@ -340,6 +354,10 @@ class Orchestrator:
         allowed = set(self.settings.phases)
         return tuple(p for p in phases if p in allowed and p not in self._skip_phases)
 
+    def _llm_available(self) -> bool:
+        client = self.router.client if self.router is not None else None
+        return client is not None and hasattr(client, "chat")
+
     def _run_named_phases(
         self,
         phases: tuple[str, ...] | list[str],
@@ -380,6 +398,8 @@ class Orchestrator:
 
     def _clear_slice_fields(self, result: CycleResult) -> None:
         result.code_ok = None
+        result.code_verified = None
+        result.code_agent = None
         result.smoke_ok = None
         result.smoke_path = None
         result.kernel_ok = None
@@ -487,8 +507,15 @@ class Orchestrator:
     ) -> AgentState:
         for phase in self._enabled_phases(TRAIN_SLICE_PHASES):
             state = self._run_named_phases((phase,), state, dry, result)
+            if phase == "PLAN" and result.plan_verified is False and self._llm_available():
+                result.errors.append("plan verification failed; code blocked")
+                append_daily_log("plan verification failed; code blocked", self.root)
+                break
             if phase == "CODE" and result.code_ok is False:
                 append_daily_log("train slice stopped: CODE produced no recipe change", self.root)
+                break
+            if phase == "LOCAL_SMOKE" and result.code_verified is False:
+                append_daily_log("code verification failed; train slice stopped", self.root)
                 break
             if phase == "KERNEL_TRAIN" and result.kernel_duplicate:
                 append_daily_log("train slice stopped: kernel identical to a previous run", self.root)
@@ -650,7 +677,7 @@ class Orchestrator:
                 if harvested["n"] >= 1:
                     return "already harvested this run; call write_card or done"
                 harvested["n"] += 1
-            self._source_cards(result, reset=True)
+            self._source_cards(result, reset=bool(reset))
             cards = sorted(dest.glob("source-*.md")) if dest.is_dir() else []
             return f"wrote {len(cards)} cards"
 
@@ -658,11 +685,22 @@ class Orchestrator:
         for name in roster:
             spec = AGENT_SPECS[name]
             wrote = {"n": 0}
-            base_write = make_write_card(dest, spec.card_kind)
+            base_write = make_write_card(
+                dest,
+                spec.card_kind,
+                agent=name,
+                run_id=result.experiment_id or "unknown",
+            )
 
-            def _write(ref: str = "", markdown: str = "") -> str:
-                path = base_write(ref, markdown)
-                wrote["n"] += 1
+            def _write(
+                ref: str = "",
+                markdown: str = "",
+                *,
+                _base_write=base_write,
+                _wrote=wrote,
+            ) -> str:
+                path = _base_write(ref, markdown)
+                _wrote["n"] += 1
                 return path
 
             tools = make_fleet_tools(
@@ -688,7 +726,7 @@ class Orchestrator:
                         agent_config,
                         system=subagent_system(name, self.competition.slug, our),
                         log=lambda msg: append_daily_log(msg, self.root),
-                        accept_done=lambda: wrote["n"] > 0,
+                        accept_done=lambda _wrote=wrote: _wrote["n"] > 0,
                         reject_msg="done rejected: write at least one card first",
                         must_first=["harvest_cards"] if thin else [],
                         must_first_args={"harvest_cards": {"reset": True}} if thin else None,
@@ -700,12 +738,29 @@ class Orchestrator:
                         ),
                         stall_force=("done", {}),
                         name="research",
+                        agent_id=name,
                         tracer=self._tracer,
                     ),
                 )
             )
         out = run_fleet(agents, log=lambda msg: append_daily_log(msg, self.root))
         result.research_passes = max(1, out.turns)
+        research_verification = verify_research_fleet(out.executions, roster)
+        result.research_verified = research_verification.ok
+        if self._tracer is not None:
+            for execution in out.executions:
+                self._tracer.emit(
+                    "agent_execution",
+                    stage="research",
+                    agent=execution.agent,
+                    stop_reason=execution.stop_reason,
+                    turns=execution.turns,
+                    tool_calls=execution.tool_calls,
+                    writes=execution.writes,
+                    rejected_writes=execution.rejected_writes,
+                    errors=execution.errors,
+                    verified=verify_research_fleet([execution], [execution.agent]).ok,
+                )
         cards = sorted(dest.glob("source-*.md")) if dest.is_dir() else []
         if cards:
             merge_digest(cards, research_md, our)
@@ -718,12 +773,16 @@ class Orchestrator:
                 stage="research",
                 tool="fleet",
                 agents=len(agents),
+                required_agents=roster,
                 turns=out.turns,
+                verified=result.research_verified,
+                verification_detail=research_verification.detail,
                 errors=out.errors[:3],
             )
         append_daily_log(
             f"research fleet agents={len(agents)} turns={out.turns} "
-            f"cards={len(cards)} errors={out.errors or 'none'}",
+            f"cards={len(cards)} verified={result.research_verified} "
+            f"verification={research_verification.detail} errors={out.errors or 'none'}",
             self.root,
         )
         if not cards_feasible(workspace, research_md) and not harvested["n"]:
@@ -1045,6 +1104,15 @@ class Orchestrator:
                 reset=reset,
                 log=lambda msg: append_daily_log(msg, self.root),
             )
+            for path in cards:
+                lines = path.read_text(encoding="utf-8").splitlines()
+                if "- agent:" not in lines[:5]:
+                    insert_at = 1 if lines and lines[0].startswith("#") else 0
+                    lines[insert_at:insert_at] = [
+                        "- agent: fallback",
+                        f"- run_id: {result.experiment_id or 'unknown'}",
+                    ]
+                    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
             if cards:
                 sidecar = write_methods_sidecar(
                     cards, self.root / self.competition.workspace_relative
@@ -1144,6 +1212,14 @@ class Orchestrator:
             result.code_ok = False
             result.errors.append(f"code: missing {check.missing}")
             append_daily_log(f"code missing={check.missing}", self.root)
+            if self._tracer is not None:
+                self._tracer.emit(
+                    "agent_verification",
+                    stage="code",
+                    agent="code",
+                    verified=False,
+                    detail="pipeline missing",
+                )
             return state
         zen = self.router.client if self.router is not None else None
         model = self.competition.model_for("code", self.settings)
@@ -1166,6 +1242,7 @@ class Orchestrator:
         out = agent.run(
             f"Competition: {self.competition.slug}\n\n{pack.as_prompt_block()}"
         )
+        result.code_agent = out.agent
         result.wrote_custom_infer = bool(code_state.get("wrote_custom_infer"))
         result.wrote_methods = bool(code_state.get("wrote_methods"))
         result.wrote_recipe = bool(code_state.get("wrote_recipe"))
@@ -1187,6 +1264,14 @@ class Orchestrator:
             result.code_ok = False
             result.errors.append("code: no recipe change was written")
             append_daily_log("code rejected: no recipe change was written", self.root)
+            if self._tracer is not None:
+                self._tracer.emit(
+                    "agent_verification",
+                    stage="code",
+                    agent=out.agent,
+                    verified=False,
+                    detail="no implementation artifact",
+                )
             return state
         try:
             import sys
@@ -1211,6 +1296,14 @@ class Orchestrator:
             result.code_ok = False
             result.errors.append(f"code: recipe failed: {exc}")
             append_daily_log(f"code recipe failed: {exc}", self.root)
+        if self._tracer is not None:
+            self._tracer.emit(
+                "agent_verification",
+                stage="code",
+                agent=out.agent,
+                verified=bool(result.code_ok),
+                detail="recipe validation",
+            )
         return state
 
     def _local_smoke(self, state: AgentState, result: CycleResult) -> AgentState:
@@ -1229,6 +1322,24 @@ class Orchestrator:
             sample_csv=sample_csv,
         )
         result.smoke_ok = outcome.ok
+        if result.wrote_recipe or result.wrote_custom_infer:
+            result.code_verified = verify_code_stage(
+                wrote_recipe=result.wrote_recipe,
+                wrote_custom_infer=result.wrote_custom_infer,
+                artifact_ok=bool(result.code_ok),
+                smoke_ok=bool(result.smoke_ok),
+            ).ok
+            if not result.code_verified:
+                result.code_ok = False
+                result.errors.append("code verification: artifact or smoke check failed")
+            if self._tracer is not None:
+                self._tracer.emit(
+                    "agent_verification",
+                    stage="code",
+                    agent=result.code_agent or "code",
+                    verified=result.code_verified,
+                    smoke_ok=result.smoke_ok,
+                )
         if outcome.smoke and outcome.smoke.submission_path:
             result.smoke_path = str(outcome.smoke.submission_path)
 
@@ -1499,6 +1610,29 @@ class Orchestrator:
             f"Competition: {self.competition.slug}\n\n{pack.as_prompt_block()}"
         )
         append_daily_log(f"plan agent stop={out.stop_reason} turns={out.turns}", self.root)
+        result.plan_verified = verify_plan_stage(
+            wrote=bool(_state.get("wrote")),
+            judge_ready=bool(judge_state.get("ready")),
+        ).ok
+        if self._tracer is not None:
+            self._tracer.emit(
+                "agent_execution",
+                stage="plan",
+                agent=out.agent,
+                stop_reason=out.stop_reason,
+                turns=out.turns,
+                tool_calls=out.tool_calls,
+                writes=out.writes,
+                rejected_writes=out.rejected_writes,
+                errors=out.errors,
+                verified=result.plan_verified,
+            )
+            self._tracer.emit(
+                "agent_verification",
+                stage="plan",
+                agent=out.agent,
+                verified=result.plan_verified,
+            )
         if result.plan_text is None:
             methods = load_methods(workspace)
             steps = [

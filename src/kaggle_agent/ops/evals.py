@@ -53,8 +53,28 @@ def evaluate_cycle(
     workspace: Path | None = None,
 ) -> dict[str, Any]:
     ev = list(events) if events is not None else collect_events(root)
+    cycle_ids = [str(e.get("cycle_id")) for e in ev if e.get("cycle_id")]
+    scoped_events = (
+        [e for e in ev if e.get("cycle_id") == cycle_ids[-1]]
+        if cycle_ids
+        else ev
+    )
+    ev = scoped_events
     tools = [e for e in ev if e.get("type") == "tool"]
     research_tools = [e for e in tools if e.get("stage") == "research"]
+    research_fleets = [e for e in research_tools if e.get("tool") == "fleet"]
+    stage_verifications = [
+        e
+        for e in ev
+        if e.get("type") == "agent_verification"
+    ]
+    executed_stages = {
+        str(e.get("stage"))
+        for e in ev
+        if e.get("type") == "agent_execution"
+        and e.get("stage") in {"plan", "code"}
+    }
+    verified_stages = {str(e.get("stage")) for e in stage_verifications}
     invalid = [e for e in tools if e.get("tool") == "invalid_json"]
     n_tools = len(tools)
     n_research = len(research_tools)
@@ -123,6 +143,24 @@ def evaluate_cycle(
             "research_wrote_card",
             wrote or n_research == 0,
             "write_card/harvest_cards called" if wrote else "no card-write tool in research loop",
+        ),
+        _check(
+            "research_agents_verified",
+            not research_fleets
+            or all(bool(e.get("verified")) for e in research_fleets),
+            "all research agents wrote verified cards"
+            if research_fleets and all(bool(e.get("verified")) for e in research_fleets)
+            else "research agent verification missing",
+        ),
+        _check(
+            "stage_agent_verification",
+            not executed_stages
+            or executed_stages.issubset(verified_stages)
+            and all(bool(e.get("verified")) for e in stage_verifications),
+            "stage artifacts verified"
+            if executed_stages.issubset(verified_stages)
+            and all(bool(e.get("verified")) for e in stage_verifications)
+            else "stage artifact verification failed",
         ),
         _check(
             "methods_pins_valid",

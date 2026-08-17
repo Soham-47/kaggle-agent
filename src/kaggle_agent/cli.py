@@ -57,6 +57,8 @@ def main(argv: list[str] | None = None) -> int:
         f"kaggle={r.kaggle_ok} browser={r.browser_ok} code={r.code_ok} smoke={r.smoke_ok} "
         f"kernel={r.kernel_ok} validate={r.validate_ok} approve={r.approve_ok} "
         f"submit={r.submit_ok} heal={r.heal_decision}"
+        f" research_verified={r.research_verified} plan_verified={r.plan_verified}"
+        f" code_verified={r.code_verified}"
     )
     if r.smoke_path:
         print(f"smoke_csv={r.smoke_path}")

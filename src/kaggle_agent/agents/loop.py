@@ -10,6 +10,7 @@ from typing import Any, Callable, Literal
 
 from kaggle_agent.config import ResearchAgentSettings
 from kaggle_agent.llm.zen_client import ZenClient
+from kaggle_agent.agents.verification import AgentExecution
 
 StageAgentConfig = ResearchAgentSettings
 LogFn = Callable[[str], None]
@@ -33,6 +34,22 @@ class StageAgentResult:
     stop_reason: str
     turns: int
     observations: list[str] = field(default_factory=list)
+    agent: str = ""
+    tool_calls: list[str] = field(default_factory=list)
+    writes: list[str] = field(default_factory=list)
+    rejected_writes: list[str] = field(default_factory=list)
+    errors: list[str] = field(default_factory=list)
+
+    def execution(self) -> AgentExecution:
+        return AgentExecution(
+            agent=self.agent,
+            stop_reason=self.stop_reason,
+            turns=self.turns,
+            tool_calls=list(self.tool_calls),
+            writes=list(self.writes),
+            rejected_writes=list(self.rejected_writes),
+            errors=list(self.errors),
+        )
 
 
 @dataclass
@@ -153,6 +170,7 @@ class StageAgent:
         must_first: list[str] | None = None,
         must_first_args: dict[str, dict[str, Any]] | None = None,
         name: str = "stage",
+        agent_id: str | None = None,
         reject_msg: str = "done rejected",
         tracer: Any | None = None,
         max_invalid: int = 2,
@@ -174,6 +192,7 @@ class StageAgent:
         self._must_first = list(must_first or no_zen_sequence or [])
         self._must_first_args = dict(must_first_args or {})
         self._name = name
+        self._agent_id = agent_id or name
         self._reject_msg = reject_msg
         self._tracer = tracer
         self._max_invalid = max(1, int(max_invalid))
@@ -187,10 +206,15 @@ class StageAgent:
             reject_msg=reject_msg,
         )
         self._nudges: list[str] = []
+        self._tool_calls: list[str] = []
+        self._writes: list[str] = []
+        self._rejected_writes: list[str] = []
+        self._errors: list[str] = []
 
     def _logmsg(self, msg: str) -> None:
         if self._log is not None:
-            self._log(msg)
+            prefix = self._name if self._agent_id == self._name else f"{self._name}[{self._agent_id}]"
+            self._log(f"{prefix}: {msg}")
 
     def run(self, context: str) -> StageAgentResult:
         deadline = time.monotonic() + self._config.max_minutes * 60
@@ -202,23 +226,23 @@ class StageAgent:
             if time.monotonic() >= deadline:
                 self._logmsg(f"{self._name} agent stop: time")
                 self._trace("agent_stop", reason="time", turns=turns)
-                return StageAgentResult("time", turns, observations)
+                return self._result("time", turns, observations)
             if turns >= self._config.max_tool_turns:
                 self._logmsg(f"{self._name} agent stop: turn_cap")
                 self._trace("agent_stop", reason="turn_cap", turns=turns)
-                return StageAgentResult("turn_cap", turns, observations)
+                return self._result("turn_cap", turns, observations)
             decision = stall.evaluate(turns)
             if decision.action == "stop_stalled":
                 self._logmsg(f"{self._name} agent stop: stalled")
                 self._trace("agent_stop", reason="stalled", turns=turns)
-                return StageAgentResult("stalled", turns, observations)
+                return self._result("stalled", turns, observations)
             if decision.action in ("force_tool", "force_done"):
                 name, args = decision.tool_name, dict(decision.tool_args)
                 if decision.action == "force_done":
                     if self._accept_done is None or self._accept_done():
                         self._logmsg(f"{self._name} agent stop: done (forced) {args}")
                         self._trace("agent_stop", reason="done")
-                        return StageAgentResult("done", turns, observations)
+                        return self._result("done", turns, observations)
                     obs = self._stall.reject_msg
                 else:
                     fn = self._tools.get(name)
@@ -232,6 +256,7 @@ class StageAgent:
                 turns += 1
                 observations.append(obs[:4000])
                 transcript.append(f"tool={name} args={args} result={obs[:2000]}")
+                self._record_tool(name, obs)
                 self._logmsg(f"{self._name} agent forced tool={name} turns={turns}")
                 if name in WRITE_TOOLS:
                     stall.mark_write(turns)
@@ -251,12 +276,12 @@ class StageAgent:
             if tool == "no_llm":
                 self._logmsg(f"{self._name} agent stop: no_llm")
                 self._trace("agent_stop", reason="no_llm", turns=turns)
-                return StageAgentResult("no_llm", turns, observations)
+                return self._result("no_llm", turns, observations)
             if tool == "done":
                 if self._accept_done is None or self._accept_done():
                     self._logmsg(f"{self._name} agent stop: done {args}")
                     self._trace("agent_stop", reason="done")
-                    return StageAgentResult("done", turns, observations)
+                    return self._result("done", turns, observations)
                 obs = self._reject_msg
                 turns += 1
                 observations.append(obs)
@@ -279,6 +304,7 @@ class StageAgent:
             turns += 1
             observations.append(obs[:4000])
             transcript.append(f"tool={tool} args={args} result={obs[:2000]}")
+            self._record_tool(tool, obs)
             self._logmsg(f"{self._name} agent turn={turns} tool={tool}")
             if obs.startswith(("rejected:", "tool error:")):
                 self._logmsg(f"{self._name} agent turn={turns} result={obs[:300]}")
@@ -408,4 +434,30 @@ class StageAgent:
     def _trace(self, kind: str, **fields: Any) -> None:
         if self._tracer is None:
             return
-        self._tracer.emit(kind, stage=self._name, **fields)
+        self._tracer.emit(kind, stage=self._name, agent=self._agent_id, **fields)
+
+    def _record_tool(self, tool: str, result: str) -> None:
+        if tool in {"done", "no_llm", "invalid_json"}:
+            return
+        self._tool_calls.append(tool)
+        if result.startswith("tool error:"):
+            self._errors.append(result)
+        if tool in WRITE_TOOLS and tool != "harvest_cards":
+            if result.startswith(("rejected:", "tool error:")):
+                self._rejected_writes.append(result[:400])
+            elif result.strip():
+                self._writes.append(result.strip()[:4000])
+
+    def _result(
+        self, stop_reason: str, turns: int, observations: list[str]
+    ) -> StageAgentResult:
+        return StageAgentResult(
+            stop_reason,
+            turns,
+            observations,
+            agent=self._agent_id,
+            tool_calls=list(self._tool_calls),
+            writes=list(self._writes),
+            rejected_writes=list(self._rejected_writes),
+            errors=list(self._errors),
+        )

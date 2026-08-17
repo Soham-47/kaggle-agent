@@ -396,3 +396,73 @@ def test_fleet_polish_improves_cards_when_judge_not_ready(tmp_path: Path, monkey
     assert "research judge post-polish" in logs
     cards = list((root / "memory" / "research-deep").glob("source-polish-*.md"))
     assert cards
+
+
+def test_fleet_agents_write_owned_namespaced_cards(tmp_path: Path, monkeypatch):
+    _stub_deep(monkeypatch)
+    _fake_judge(monkeypatch, [(True, "ready")])
+    _stub_cards(monkeypatch)
+    root = _setup(tmp_path, drop_methods=True)
+
+    class _PerAgentZen:
+        def __init__(self) -> None:
+            self.done: set[str] = set()
+
+        def chat(self, model, messages, **kwargs):  # noqa: ANN001
+            system = str(messages[0]["content"])
+            name = next(
+                item
+                for item in ("notebooks", "papers", "github", "web", "discussions", "datasets")
+                if f"the {item} research agent" in system
+            )
+            if name not in self.done:
+                self.done.add(name)
+                return json.dumps(
+                    {
+                        "tool": "write_card",
+                        "args": {
+                            "ref": f"owner/{name}",
+                            "markdown": (
+                                "# finding\n- ref: owner/"
+                                f"{name}\n- copyable next step: attach weights\n"
+                                "- do not copy: P100\n"
+                            ),
+                        },
+                    }
+                )
+            return json.dumps({"tool": "done", "args": {}})
+
+    result = _orch(
+        root,
+        KaggleClient(api=FakeKaggleApi()).connect(),
+        zen=_PerAgentZen(),
+    ).run_cycle(dry_run=True)
+
+    assert result.research_verified is True
+    owned = sorted(
+        path
+        for path in (root / "memory" / "research-deep").glob("source-*.md")
+        if "- agent: fallback" not in path.read_text(encoding="utf-8")
+        and "- agent:" in path.read_text(encoding="utf-8")
+    )
+    assert any("source-notebook-" in path.name for path in owned)
+    assert any("source-paper-" in path.name for path in owned)
+    assert len(owned) == 6
+
+
+def test_failed_fleet_verification_blocks_training(tmp_path: Path, monkeypatch):
+    _stub_deep(monkeypatch)
+    _stub_cards(monkeypatch)
+    _fake_judge(monkeypatch, [(True, "ready")])
+    root = _setup(tmp_path, drop_methods=True)
+    zen = _ScriptedZen([{"tool": "done", "args": {}}] * 20)
+
+    result = _orch(
+        root,
+        KaggleClient(api=FakeKaggleApi()).connect(),
+        zen=zen,
+    ).run_cycle(dry_run=True)
+
+    assert result.research_verified is False
+    assert result.phases_run == ["LOCK", "RESEARCH"]
+    assert any("training blocked" in error for error in result.errors)
