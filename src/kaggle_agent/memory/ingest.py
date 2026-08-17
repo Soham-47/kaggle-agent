@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import json
 import re
 from dataclasses import dataclass, field
+from datetime import date
 from pathlib import Path
 
 from kaggle_agent.paths import memory_dir
@@ -11,6 +13,8 @@ from kaggle_agent.paths import memory_dir
 CORE = ("MEMORY.md", "COMPETITION.md", "state.md", "research.md")
 _DIGEST_HEADINGS = ("## Method cards", "## Deep research digest")
 _SCORE_RE = re.compile(r"^-\s*public_score:\s*(\S+)", re.M)
+_EXPIRES_RE = re.compile(r"^-\s*expires:\s*(\S+)", re.M)
+_SUPERSEDED_RE = re.compile(r"^-\s*superseded:\s*\S+", re.M)
 _VIEWS = frozenset({"research", "plan", "code", "heal", "ops"})
 _RETRIEVE_SCOPES = {
     "cards": ("research-deep", "source-*.md"),
@@ -96,6 +100,50 @@ def _kv_lines(text: str, keys: tuple[str, ...]) -> str:
     return "\n".join(keep)
 
 
+def _note_is_expired(text: str) -> bool:
+    """True when the note has an expires date in the past."""
+    m = _EXPIRES_RE.search(text)
+    if not m:
+        return False
+    try:
+        exp = date.fromisoformat(m.group(1).strip())
+    except (ValueError, TypeError):
+        return False
+    return exp < date.today()
+
+
+def _note_is_superseded(text: str) -> bool:
+    """True when the note carries a truthy superseded field."""
+    m = _SUPERSEDED_RE.search(text)
+    if not m:
+        return False
+    val = m.group(0).split(":", 1)[1].strip().lower()
+    return val in {"yes", "true", "1"}
+
+
+def _note_is_stale(text: str) -> bool:
+    return _note_is_expired(text) or _note_is_superseded(text)
+
+
+def _evals_section(base: Path, cap: int = 600) -> str:
+    """Compact summary of the last eval report, or '' if absent."""
+    path = base / "daily" / "eval_report.json"
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return ""
+    if not isinstance(data, dict):
+        return ""
+    checks = data.get("checks") or []
+    failed = [c for c in checks if isinstance(c, dict) and not c.get("ok")]
+    lines = [f"passed={data.get('passed')} ran_at={data.get('ran_at', '')}"]
+    if failed:
+        lines.append("failed checks:")
+        for c in failed[:6]:
+            lines.append(f"- {c.get('id')}: {str(c.get('detail', ''))[:140]}")
+    return "\n".join(lines)[:cap]
+
+
 def _exp_score(path: Path) -> float | None:
     try:
         text = path.read_text(encoding="utf-8")
@@ -113,6 +161,13 @@ def _exp_score(path: Path) -> float | None:
         return None
 
 
+def _safe_read(path: Path) -> str:
+    try:
+        return path.read_text(encoding="utf-8")
+    except OSError:
+        return ""
+
+
 def pick_experiments(exp_dir: Path, n: int) -> list[Path]:
     files = [p for p in exp_dir.glob("*.md") if p.is_file()]
     files.sort(
@@ -122,13 +177,18 @@ def pick_experiments(exp_dir: Path, n: int) -> list[Path]:
             -p.stat().st_mtime,
         )
     )
-    return files[:n]
+    fresh = [p for p in files if not _note_is_stale(_safe_read(p))]
+    return fresh[:n] if fresh else files[:n]
 
 
 def pick_cards(deep: Path, n: int = 2) -> list[Path]:
     cards = [p for p in deep.glob("source-*.md") if p.is_file()]
     cards.sort(key=lambda p: p.stat().st_mtime, reverse=True)
-    return cards[:n]
+    fresh = [p for p in cards if not _note_is_stale(_safe_read(p))]
+    if fresh:
+        return fresh[:n]
+    # Fallback: newest card when all are stale (avoids empty pack section)
+    return cards[:1] if cards else []
 
 
 def build_context_pack(
@@ -246,6 +306,9 @@ def _fill_plan(
     if heal:
         excerpt = _kv_lines(heal, ("decision_next", "note")) or heal
         _add(pack, "heal.md", excerpt, 400)
+    evals = _evals_section(base)
+    if evals:
+        _add(pack, "Evals (last cycle)", evals, 800)
     if workspace is not None:
         methods = workspace / "pipeline" / "methods.json"
         raw = _read(methods)
@@ -281,6 +344,9 @@ def _fill_code(
         recipe = _read(workspace / "pipeline" / "kernel_recipe.py")
         if recipe:
             _add(pack, "kernel_recipe.py", recipe, 4000)
+    evals = _evals_section(base)
+    if evals:
+        _add(pack, "Evals (last cycle)", evals, 800)
     exp_dir = base / "experiments"
     if exp_dir.is_dir():
         files = pick_experiments(exp_dir, 1)
@@ -323,6 +389,8 @@ def retrieve(
         if name.startswith("deep-") or "secret" in name or "daily" in path.parts:
             continue
         text = path.read_text(encoding="utf-8")
+        if _note_is_stale(text):
+            continue
         idx = text.lower().find(q)
         if idx < 0:
             continue

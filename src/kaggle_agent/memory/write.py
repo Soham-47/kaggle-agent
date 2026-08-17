@@ -8,6 +8,9 @@ from pathlib import Path
 
 from kaggle_agent.paths import memory_dir
 
+_SCORE_RE = re.compile(r"^-\s*public_score:\s*(\S+)", re.M)
+_SUPERSEDED_RE = re.compile(r"^-\s*superseded:\s*\S+", re.M)
+
 
 def append_daily_log(line: str, root: Path | None = None, when: datetime | None = None) -> Path:
     when = when or datetime.now(timezone.utc)
@@ -105,3 +108,58 @@ def patch_memory_public_score(score: str, root: Path | None = None) -> None:
     )
     if n:
         path.write_text(new, encoding="utf-8")
+
+
+def supersede_experiment(
+    exp_id: str,
+    *,
+    root: Path | None = None,
+    by: str | None = None,
+) -> None:
+    """Mark an experiment file as superseded (drops it from pick_experiments)."""
+    path = memory_dir(root) / "experiments" / f"{exp_id}.md"
+    if not path.is_file():
+        return
+    text = path.read_text(encoding="utf-8")
+    if _SUPERSEDED_RE.search(text):
+        return  # already superseded
+    line = "- superseded: yes"
+    if by:
+        line += f" (by {by})"
+    path.write_text(text.rstrip() + "\n" + line + "\n", encoding="utf-8")
+
+
+def _parse_score_from_text(text: str) -> float | None:
+    m = _SCORE_RE.search(text)
+    if not m:
+        return None
+    raw = m.group(1).strip().lower()
+    if raw in {"none", "n/a", "nan", ""}:
+        return None
+    try:
+        return float(raw)
+    except ValueError:
+        return None
+
+
+def supersede_worse_experiments(root: Path | None, best_score: str) -> None:
+    """Supersede every experiment whose public_score is strictly worse."""
+    best = _parse_score_from_text(f"- public_score: {best_score}")
+    if best is None:
+        return
+    exp_dir = memory_dir(root) / "experiments"
+    if not exp_dir.is_dir():
+        return
+    for p in exp_dir.glob("*.md"):
+        if not p.is_file():
+            continue
+        try:
+            text = p.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        if _SUPERSEDED_RE.search(text):
+            continue
+        exp_score = _parse_score_from_text(text)
+        if exp_score is not None and exp_score < best:
+            exp_id = p.stem
+            supersede_experiment(exp_id, root=root)

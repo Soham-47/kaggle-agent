@@ -17,6 +17,7 @@ Auth: ~/.kaggle/kaggle.json (see docs above). Never log key contents.
 
 from __future__ import annotations
 
+import time
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any, Protocol
@@ -33,9 +34,32 @@ from kaggle_agent.kaggle_api.models import (
 )
 from kaggle_agent.kaggle_api.sdk_get import get as _g
 from kaggle_agent.kaggle_api.sdk_get import get_str as _s
+from kaggle_agent.heal.submit_errors import is_network_error
 
 _META_SUFFIXES = (".csv", ".json", ".md", ".txt", ".parquet")
 _MAX_META_BYTES = 50 * 1024 * 1024
+
+_NETWORK_MAX_ATTEMPTS = 3
+_NETWORK_BASE_DELAY = 2.0
+
+
+def _retry_network(
+    fn: Callable,
+    *,
+    attempts: int = _NETWORK_MAX_ATTEMPTS,
+    base_delay: float = _NETWORK_BASE_DELAY,
+    _sleep: Callable = time.sleep,
+) -> Any:
+    """Retry *fn* on transient network errors with exponential backoff."""
+    delay = base_delay
+    for i in range(attempts):
+        try:
+            return fn()
+        except Exception as exc:  # noqa: BLE001
+            if i >= attempts - 1 or not is_network_error(str(exc)):
+                raise
+            _sleep(delay)
+            delay *= 2
 
 
 class KaggleApiError(RuntimeError):
@@ -250,7 +274,9 @@ class KaggleClient:
         return out
 
     def submissions(self, competition: str, *, top: int = 20) -> list[SubmissionRow]:
-        rows = self.api.competition_submissions(competition) or []
+        rows = _retry_network(
+            lambda: self.api.competition_submissions(competition)
+        ) or []
         out: list[SubmissionRow] = []
         for s in rows[:top]:
             if s is None:
@@ -336,7 +362,7 @@ class KaggleClient:
         Source: KaggleApi.kernels_push
         """
         try:
-            resp = self.api.kernels_push(str(folder))
+            resp = _retry_network(lambda: self.api.kernels_push(str(folder)))
         except Exception as exc:  # noqa: BLE001
             raise KaggleApiError(f"kernels_push failed: {exc}") from exc
         return _s(resp, "message", "ref", "errorMessage", default=str(resp))

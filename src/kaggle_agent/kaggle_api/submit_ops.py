@@ -120,10 +120,18 @@ def _submit_variant_folder(
         push = api.kernels_push(str(variant))
     except Exception as exc:  # noqa: BLE001
         from kaggle_agent.heal.pins import apply_pin_heal, is_pin_error
+        from kaggle_agent.heal.submit_errors import is_409_title_conflict
 
         detail = http_detail(exc)
+        detail_str = f"{detail} {exc}"
         if is_pin_error(str(detail)) or is_pin_error(str(exc)):
             apply_pin_heal(variant.parent.parent, variant)
+            try:
+                push = api.kernels_push(str(variant))
+            except Exception as exc2:  # noqa: BLE001
+                raise RuntimeError(f"kernels_push failed: {http_detail(exc2)}") from exc2
+        elif is_409_title_conflict(detail_str):
+            _fix_metadata_owner(api, variant)
             try:
                 push = api.kernels_push(str(variant))
             except Exception as exc2:  # noqa: BLE001

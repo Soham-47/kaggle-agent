@@ -113,12 +113,20 @@ def run_kernel_phase(
                 push_resp = client.kernels_push(package.folder)
             except Exception as exc2:  # noqa: BLE001
                 from kaggle_agent.heal.pins import apply_pin_heal, is_pin_error
+                from kaggle_agent.heal.submit_errors import is_409_title_conflict
 
-                if not (is_pin_error(str(exc2)) and root is not None):
+                err_str = str(exc2)
+                if is_pin_error(err_str) and root is not None:
+                    workspace = package.folder.parent.parent
+                    apply_pin_heal(workspace, package.folder)
+                    push_resp = client.kernels_push(package.folder)
+                elif is_409_title_conflict(err_str):
+                    from kaggle_agent.kaggle_api.submit_ops import _fix_metadata_owner
+
+                    _fix_metadata_owner(client.api, package.folder)
+                    push_resp = client.kernels_push(package.folder)
+                else:
                     raise
-                workspace = package.folder.parent.parent
-                apply_pin_heal(workspace, package.folder)
-                push_resp = client.kernels_push(package.folder)
             if root is not None:
                 record_kernel(root, package.kernel_ref, package_fp, recipe_fp)
     except Exception as exc:  # noqa: BLE001

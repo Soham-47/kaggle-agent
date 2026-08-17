@@ -2137,6 +2137,8 @@ class Orchestrator:
         if score_is_better(score, state.public_best, self.competition.metric_direction):
             state.public_best = score
             patch_memory_public_score(str(score), self.root)
+            from kaggle_agent.memory.write import supersede_worse_experiments
+            supersede_worse_experiments(self.root, score)
 
     def _heal(self, state: AgentState, result: CycleResult) -> AgentState:
         heal = load_heal(self.root)
@@ -2150,6 +2152,14 @@ class Orchestrator:
             for e in result.errors
         )
         from kaggle_agent.heal.pins import apply_pin_heal, is_pin_error, should_wait_approve
+        from kaggle_agent.heal.submit_errors import classify_submit_error
+
+        if not result.submit_ok and not result.dry_run:
+            for e in result.errors:
+                err_cls = classify_submit_error(e)
+                if err_cls:
+                    heal.note = f"submit {err_cls} error: {e[:120]}"
+                    break
 
         pin_errs = [e for e in result.errors if is_pin_error(e)]
         if pin_errs and result.kernel_path:

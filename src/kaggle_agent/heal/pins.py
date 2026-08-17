@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 from typing import Any
 
+from kaggle_agent.heal.submit_errors import is_409_title_conflict, is_network_error
 from kaggle_agent.research.source_cards import _valid_attach_ref, valid_model_pin
 
 
@@ -20,7 +21,8 @@ def should_wait_approve(
     """True only when a live CSV is ready and a human yes is still required."""
     if dry_run or assume_approved:
         return False
-    if any(is_pin_error(e) for e in (errors or [])):
+    if any(is_pin_error(e) or is_network_error(e) or is_409_title_conflict(e)
+           for e in (errors or [])):
         return False
     return bool(validate_ok) and not submit_ok
 
