@@ -24,6 +24,8 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from kaggle_agent.llm.zen_client import ZenClient
+from kaggle_agent.kaggle_api.sdk_get import get as _g
+from kaggle_agent.kaggle_api.sdk_get import get_str as _s
 from kaggle_agent.research.browser import (
     FetchFn,
     SerpFn,
@@ -127,6 +129,133 @@ class KaggleSource:
         if cached is None:
             return ""
         return _notebook_text(cached)[:max_chars]
+
+
+class DiscussionSource:
+    """Kaggle competition discussion topics via the official API.
+
+    ``competition_list_topics`` returns top-voted topics; content fetches the
+    topic body plus all comments via ``forums_topic_show``.
+    """
+
+    kind = "discussion"
+
+    def __init__(self, client: Any, competition: str) -> None:
+        self._client = client
+        self._competition = competition
+
+    def search(self, query: str, limit: int = 5) -> list[SourceHit]:
+        try:
+            resp = self._client.api.competition_list_topics(
+                self._competition, sort_by="top"
+            )
+        except Exception:  # noqa: BLE001
+            return []
+        out: list[SourceHit] = []
+        for t in (getattr(resp, "topics", None) or [])[:limit]:
+            if t is None:
+                continue
+            topic_id = _g(t, "id", default=0)
+            title = _s(t, "title") or f"discussion {topic_id}"
+            url = _s(t, "topic_url")
+            if not url:
+                url = (
+                    f"https://www.kaggle.com/c/{self._competition}"
+                    f"/discussion/{topic_id}"
+                )
+            votes = _g(t, "votes", default=0)
+            comments = _g(t, "comment_count", default=0)
+            out.append(
+                SourceHit(
+                    url=url,
+                    title=title,
+                    snippet=f"{votes} votes, {comments} comments",
+                    kind="discussion",
+                )
+            )
+        return out
+
+    def content(self, hit: SourceHit, max_chars: int = _MAX_CONTENT_CHARS) -> str:
+        topic_id = _topic_id_from_url(hit.url)
+        if topic_id is None:
+            return ""
+        try:
+            topic, comments, _ = self._client.api.forums_topic_show(topic_id)
+        except Exception:  # noqa: BLE001
+            return ""
+        parts: list[str] = []
+        body = _s(topic, "content") or _s(topic, "title")
+        if body:
+            parts.append(body)
+        for c in (comments or [])[:20]:
+            text = _s(c, "content")
+            if text:
+                parts.append(text)
+        return "\n\n".join(parts)[:max_chars]
+
+
+class DatasetSource:
+    """Kaggle dataset search via the official API; content = description."""
+
+    kind = "dataset"
+
+    def __init__(self, client: Any, competition: str) -> None:
+        self._client = client
+        self._competition = competition
+
+    def search(self, query: str, limit: int = 5) -> list[SourceHit]:
+        try:
+            resp = self._client.api.dataset_list_with_response(
+                search=query, sort_by="hottest", page_size=limit
+            )
+        except Exception:  # noqa: BLE001
+            return []
+        out: list[SourceHit] = []
+        for d in (getattr(resp, "datasets", None) or [])[:limit]:
+            if d is None:
+                continue
+            title = _s(d, "title") or _s(d, "ref") or "dataset"
+            subtitle = _s(d, "subtitle")
+            downloads = _g(d, "download_count", default=0)
+            votes = _g(d, "vote_count", default=0)
+            snippet = " — ".join(
+                x for x in (subtitle, f"{downloads} downloads", f"{votes} votes") if x
+            )
+            out.append(
+                SourceHit(
+                    url=_s(d, "url") or f"https://www.kaggle.com/datasets/{_s(d, 'ref')}",
+                    title=title,
+                    snippet=snippet,
+                    kind="dataset",
+                )
+            )
+        return out
+
+    def content(self, hit: SourceHit, max_chars: int = _MAX_CONTENT_CHARS) -> str:
+        slug = hit.url.rstrip("/").rsplit("/", 2)[-2:]
+        if len(slug) != 2:
+            return hit.snippet[:max_chars]
+        try:
+            resp = self._client.api.dataset_list_with_response(
+                search=slug[-1], sort_by="hottest", page_size=10
+            )
+        except Exception:  # noqa: BLE001
+            return hit.snippet[:max_chars]
+        for d in (getattr(resp, "datasets", None) or [])[:10]:
+            if d is None:
+                continue
+            if not (_s(d, "url") or "").rstrip("/").endswith("/".join(slug)):
+                continue
+            desc = _s(d, "description")
+            if desc:
+                return desc[:max_chars]
+        return hit.snippet[:max_chars]
+
+
+def _topic_id_from_url(url: str) -> int | None:
+    """Pull the numeric topic id from a discussion URL."""
+    match = re.search(r"/discussion/(\d+)", url or "")
+    return int(match.group(1)) if match else None
 
 
 def _prefer_primary_sources(urls: list[str]) -> list[str]:
@@ -406,6 +535,7 @@ class DeepResearcher:
         self._deadline = time.monotonic() + config.max_minutes * 60
         self._query_count = 0
         self._fetch_count = 0
+        self._seen_queries: set[str] = set()
 
     def _logmsg(self, msg: str) -> None:
         if self._log is not None:
@@ -413,6 +543,14 @@ class DeepResearcher:
 
     def _budget_left(self) -> bool:
         return self._query_count < self._config.max_queries and time.monotonic() < self._deadline
+
+    def _mark_query(self, query: str) -> bool:
+        """True when the query is new (normalized); records it as issued."""
+        key = re.sub(r"\W+", "", (query or "").lower())
+        if not key or key in self._seen_queries:
+            return False
+        self._seen_queries.add(key)
+        return True
 
     def _findings_enough(self, learnings: list[str]) -> bool:
         """Waku-style judge: stop adding depth when facts are implementable."""
@@ -531,7 +669,11 @@ class DeepResearcher:
             return learnings, visited
         self._query_count += 1
         queries = self._generate_queries(query, learnings, breadth)
-        self._logmsg(f"deep depth={depth} queries={len(queries)} total={self._query_count}")
+        fresh = [q for q in queries if self._mark_query(q["query"])]
+        skipped = len(queries) - len(fresh)
+        if skipped:
+            self._logmsg(f"deep dedup: {skipped} repeated queries skipped")
+        self._logmsg(f"deep depth={depth} queries={len(fresh)} total={self._query_count}")
 
         def _one(item: dict[str, str]) -> tuple[dict[str, str], list[SourceHit], dict[str, Any]]:
             try:
@@ -551,9 +693,9 @@ class DeepResearcher:
             return item, hits, distilled
 
         packed: list[tuple[dict[str, str], list[SourceHit], dict[str, Any]]] = []
-        if queries:
-            with ThreadPoolExecutor(max_workers=min(4, len(queries))) as pool:
-                for item, hits, distilled in pool.map(_one, queries):
+        if fresh:
+            with ThreadPoolExecutor(max_workers=min(4, len(fresh))) as pool:
+                for item, hits, distilled in pool.map(_one, fresh):
                     if not self._budget_left():
                         break
                     packed.append((item, hits, distilled))
@@ -667,7 +809,18 @@ class DeepResearcher:
     def run(self, prompt: str, research_path: Path | None = None) -> DeepResearchResult:
         result = DeepResearchResult()
         if self._client is None and not any(
-            isinstance(s, (KaggleSource, ArxivSource, GithubSource, WebSource)) for s in self._sources
+            isinstance(
+                s,
+                (
+                    KaggleSource,
+                    ArxivSource,
+                    GithubSource,
+                    WebSource,
+                    DiscussionSource,
+                    DatasetSource,
+                ),
+            )
+            for s in self._sources
         ):
             result.error = "no llm and no sources"
             return result

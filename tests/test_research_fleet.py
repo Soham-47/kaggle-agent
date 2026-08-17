@@ -45,8 +45,8 @@ def test_roster_has_six_specialist_agents():
     assert AGENT_SPECS["papers"].search_kinds == ("arxiv",)
     assert AGENT_SPECS["github"].search_kinds == ("github",)
     assert AGENT_SPECS["web"].search_kinds == ("web",)
-    assert AGENT_SPECS["discussions"].search_kinds == ("web",)
-    assert AGENT_SPECS["datasets"].search_kinds == ("web",)
+    assert AGENT_SPECS["discussions"].search_kinds == ("discussion",)
+    assert AGENT_SPECS["datasets"].search_kinds == ("dataset",)
     for name, spec in AGENT_SPECS.items():
         assert "search" not in spec.tools or "write_card" in spec.tools
 

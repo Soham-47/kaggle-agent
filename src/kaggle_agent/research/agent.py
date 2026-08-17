@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Callable
+from typing import Any, Callable
 
 from kaggle_agent.agents.loop import (
     StageAgent,
@@ -51,6 +51,13 @@ class ResearchAgent(StageAgent):
         must_first: list[str] | None = None,
         must_first_args: dict | None = None,
         reject_msg: str = "done rejected: cards not ready",
+        stall_after: int | None = None,
+        stall_nudge: str = "",
+        stall_force: (
+            tuple[str, dict[str, Any]]
+            | Callable[[int], tuple[str, dict[str, Any]] | None]
+            | None
+        ) = None,
     ) -> None:
         super().__init__(
             zen,
@@ -65,4 +72,7 @@ class ResearchAgent(StageAgent):
             name="research",
             reject_msg=reject_msg,
             tracer=tracer,
+            stall_after=stall_after,
+            stall_nudge=stall_nudge,
+            stall_force=stall_force,
         )

@@ -253,6 +253,15 @@ class Settings:
         return float(self.raw.get("loop", {}).get("max_minutes", 90))
 
     @property
+    def feedback_wait_minutes(self) -> int:
+        """How long FEEDBACK polls the LB for the just-submitted score (0 = no wait)."""
+        return max(0, int(self.raw.get("feedback", {}).get("wait_minutes", 12)))
+
+    @property
+    def feedback_poll_seconds(self) -> int:
+        return max(5, int(self.raw.get("feedback", {}).get("poll_seconds", 30)))
+
+    @property
     def block_submit(self) -> bool:
         return bool(self.raw.get("eval", {}).get("block_submit", False))
 

@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import re
 import threading
+import time
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
@@ -13,6 +14,7 @@ from typing import Any
 from kaggle_agent.code.workspace import ensure_pipeline_ready
 from kaggle_agent.config import CompetitionConfig, Settings, load_competition, load_settings
 from kaggle_agent.kaggle_api import KaggleClient
+from kaggle_agent.kaggle_api.models import SubmissionRow
 from kaggle_agent.judge import (
     judge_kernel,
     judge_plan,
@@ -63,7 +65,9 @@ from kaggle_agent.stages import Stage, build_stage_registry
 from kaggle_agent.state_access import DiskStateAccessor, StateAccessor
 from kaggle_agent.research.deep import (
     ArxivSource,
+    DatasetSource,
     DeepResearcher,
+    DiscussionSource,
     GithubSource,
     KaggleSource,
     WebSource,
@@ -83,6 +87,10 @@ from kaggle_agent.submit.pending import (
     usable_approval,
 )
 from kaggle_agent.heal.policy import decide_next, load_heal, save_heal
+from kaggle_agent.heal.feedback import (
+    already_recorded,
+    exp_id_from_description,
+)
 from kaggle_agent.loop import (
     load_loop,
     next_loop_count,
@@ -226,6 +234,12 @@ class Orchestrator:
         try:
             state = self._begin(state, dry, now, result)
             result.context_sections = len(build_context_pack(self.root).sections)
+
+            if not dry:
+                try:
+                    self._catch_up_scores(state)
+                except Exception as exc:  # noqa: BLE001
+                    append_daily_log(f"score catch-up failed: {exc}", self.root)
 
             # Block order is fixed (RESEARCH before the slice). Each block
             # is intersected with settings.phases so yaml can still drop steps.
@@ -556,6 +570,12 @@ class Orchestrator:
             tracer=self._tracer,
             must_first=["harvest_cards"] if thin else [],
             must_first_args={"harvest_cards": {"reset": True}} if thin else None,
+            stall_after=6,
+            stall_nudge=(
+                "Stall: you have read enough. Call write_card or harvest_cards "
+                "now with your single best finding, then judge_cards, then done."
+            ),
+            stall_force=("done", {}),
         )
         pack = build_context_pack(self.root, view="research")
         out = agent.run(pack.as_prompt_block() or self.competition.slug)
@@ -858,6 +878,16 @@ class Orchestrator:
                 "arxiv": ArxivSource(),
                 "github": GithubSource(),
                 "web": WebSource(serp=default_serp(self.settings.browser_prefer_harness)),
+                "discussion": (
+                    DiscussionSource(self._kaggle, self.competition.slug)
+                    if self._kaggle is not None
+                    else None
+                ),
+                "dataset": (
+                    DatasetSource(self._kaggle, self.competition.slug)
+                    if self._kaggle is not None
+                    else None
+                ),
             }
             src = sources.get(str(kind), sources["web"])
             if src is None:
@@ -1813,37 +1843,142 @@ class Orchestrator:
             if self._kaggle is None:
                 self._kaggle = KaggleClient().connect()
             subs = self._kaggle.submissions(self.competition.slug, top=3)
-            if subs:
-                latest = subs[0]
-                result.feedback_score = latest.public_score or latest.status
-                append_daily_log(
-                    f"feedback status={latest.status} score={latest.public_score}",
-                    self.root,
-                )
-                if latest.public_score and latest.public_score not in {"", "none"}:
-                    pending = self._sa.load_pending()
-                    exp_id = pending.exp_id if pending.exp_id not in {"", "none"} else result.experiment_id
-                    if exp_id and exp_id != "none":
-                        patch_experiment(
-                            exp_id,
-                            root=self.root,
-                            public_score=latest.public_score,
-                            submission=latest.status or "submitted",
-                            kernel=result.kernel_ref or pending.kernel_ref,
-                        )
-                    if score_is_better(
-                        latest.public_score,
-                        state.public_best,
-                        self.competition.metric_direction,
-                    ):
-                        state.public_best = latest.public_score
-                        patch_memory_public_score(str(latest.public_score), self.root)
-            else:
+            if not subs:
                 append_daily_log("feedback: no submissions yet", self.root)
+                return state
+            latest = subs[0]
+            append_daily_log(
+                f"feedback status={latest.status} score={latest.public_score}",
+                self.root,
+            )
+            scored = (
+                latest
+                if parse_loop_score(latest.public_score) is not None
+                else self._wait_for_feedback_score()
+            )
+            if scored is None:
+                append_daily_log("feedback: no scored submission yet", self.root)
+                return state
+            result.feedback_score = scored.public_score
+            pending = self._sa.load_pending()
+            exp_id = (
+                pending.exp_id
+                if pending.exp_id not in {"", "none"}
+                else result.experiment_id
+            )
+            if exp_id and exp_id != "none":
+                patch_experiment(
+                    exp_id,
+                    root=self.root,
+                    public_score=scored.public_score,
+                    submission=scored.status or "submitted",
+                    kernel=result.kernel_ref or pending.kernel_ref,
+                )
+            self._apply_best_score(state, scored.public_score)
         except Exception as exc:  # noqa: BLE001
             result.errors.append(f"feedback: {exc}")
             append_daily_log(f"feedback failed: {exc}", self.root)
         return state
+
+    def _wait_for_feedback_score(self) -> SubmissionRow | None:
+        """Poll the LB until the newest submission has a numeric score.
+
+        Bounded by settings.feedback_wait_minutes; 0 disables the wait.
+        """
+        wait_minutes = self.settings.feedback_wait_minutes
+        if wait_minutes <= 0:
+            return None
+        poll = self.settings.feedback_poll_seconds
+        deadline = time.monotonic() + wait_minutes * 60
+        while time.monotonic() < deadline:
+            time.sleep(poll)
+            subs = self._kaggle.submissions(self.competition.slug, top=3)
+            latest = subs[0]
+            scored = (
+                latest
+                if parse_loop_score(latest.public_score) is not None
+                else None
+            )
+            if scored is not None:
+                append_daily_log(
+                    f"feedback waited: score={scored.public_score}", self.root
+                )
+                return scored
+            append_daily_log("feedback: still pending score, polling…", self.root)
+        append_daily_log(f"feedback: no score within {wait_minutes}m", self.root)
+        return None
+
+    def _catch_up_scores(self, state: AgentState) -> None:
+        """Ingest scores that landed after a previous cycle exited.
+
+        Patches experiment files, then advances heal/loop state and the
+        public best, so a late score still drives the self-heal ladder.
+        """
+        if self._kaggle is None:
+            self._kaggle = KaggleClient().connect()
+        subs = self._kaggle.submissions(self.competition.slug, top=20)
+        ingested: list[SubmissionRow] = []
+        for row in subs:
+            if parse_loop_score(row.public_score) is None:
+                continue
+            exp_id = exp_id_from_description(row.description)
+            if not exp_id:
+                continue
+            exp_file = memory_dir(self.root) / "experiments" / f"{exp_id}.md"
+            if not exp_file.is_file() or already_recorded(exp_file, row.public_score):
+                continue
+            patch_experiment(
+                exp_id,
+                root=self.root,
+                public_score=row.public_score,
+                submission=row.status or "submitted",
+            )
+            ingested.append(row)
+            append_daily_log(
+                f"score catch-up exp={exp_id} score={row.public_score}", self.root
+            )
+        if not ingested:
+            return
+        self._advance_heal_and_loop(ingested[0], state)
+
+    def _advance_heal_and_loop(self, row: SubmissionRow, state: AgentState) -> None:
+        score = row.public_score
+        heal = load_heal(self.root)
+        if parse_loop_score(heal.last_score) != parse_loop_score(score):
+            heal = decide_next(
+                heal,
+                public_score=score,
+                metric_direction=self.competition.metric_direction,
+                max_tune_attempts=self.settings.max_tune_attempts,
+                max_no_improve_days=self.settings.max_no_improve_days,
+                cycle_ok=True,
+            )
+            save_heal(heal, self.root)
+            append_daily_log(
+                f"heal catch-up score={score} decision_next={heal.decision_next}",
+                self.root,
+            )
+        try:
+            n_used = int(load_loop(self.root).last_n)
+        except (TypeError, ValueError):
+            n_used = 1
+        update_loop_from_score(
+            self.root,
+            score,
+            n_used=n_used,
+            n_min=self.settings.loop_n_min,
+            n_max=self.settings.loop_n_max,
+            typical_gain=self.settings.loop_typical_gain,
+            default_n=self.settings.loop_default_n,
+            direction=self.competition.metric_direction,
+        )
+        self._apply_best_score(state, score)
+
+    def _apply_best_score(self, state: AgentState, score: str) -> None:
+        """Raise the public best and persist it when a score improves it."""
+        if score_is_better(score, state.public_best, self.competition.metric_direction):
+            state.public_best = score
+            patch_memory_public_score(str(score), self.root)
 
     def _heal(self, state: AgentState, result: CycleResult) -> AgentState:
         heal = load_heal(self.root)

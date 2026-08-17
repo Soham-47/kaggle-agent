@@ -235,14 +235,15 @@ class StageAgent:
                 self._logmsg(f"{self._name} agent forced tool={name} turns={turns}")
                 if name in WRITE_TOOLS:
                     stall.mark_write(turns)
+                    self._nudges = []
                 stall.stall_forced = False
                 continue
             if decision.action == "nudge":
                 nudge_text = decision.nudge_text
                 if nudge_text not in self._nudges:
                     self._nudges.append(nudge_text)
-                self._logmsg(f"{self._name} agent nudge: stall turns={turns}")
-                transcript.append(f"nudge: {nudge_text}")
+                    self._logmsg(f"{self._name} agent nudge: stall turns={turns}")
+                    transcript.append(f"nudge: {nudge_text}")
                 turns += 1
                 continue
             tool, args = self._next_action(transcript)
@@ -283,6 +284,7 @@ class StageAgent:
                 self._logmsg(f"{self._name} agent turn={turns} result={obs[:300]}")
             if tool in WRITE_TOOLS:
                 stall.mark_write(turns)
+                self._nudges = []
 
     def _used_tools(self, transcript: list[str]) -> set[str]:
         return {t.split(" ", 1)[0][5:] for t in transcript if t.startswith("tool=")}

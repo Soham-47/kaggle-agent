@@ -178,6 +178,10 @@ heal:
   max_no_improve_days: 5
   # ladder: tune → recipe → new → pause (sets state.paused)
 
+feedback:
+  wait_minutes: 12   # poll LB after submit for the score; 0 = never wait
+  poll_seconds: 30
+
 loop:
   n_min: 2
   n_max: 8

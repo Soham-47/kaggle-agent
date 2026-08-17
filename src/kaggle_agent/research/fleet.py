@@ -42,10 +42,10 @@ AGENT_SPECS: dict[str, SubagentSpec] = {
         "discussions",
         "discussion",
         ("search", "fetch_url", "write_card"),
-        ("web",),
+        ("discussion",),
     ),
     "datasets": SubagentSpec(
-        "datasets", "dataset", ("search", "fetch_url", "write_card"), ("web",)
+        "datasets", "dataset", ("search", "fetch_url", "write_card"), ("dataset",)
     ),
 }
 
@@ -72,7 +72,7 @@ _ROLE_LINES = {
     ),
     "datasets": (
         "You find public Kaggle datasets and preprocessed versions for this "
-        "competition (site:kaggle.com/datasets)."
+        "competition via the Kaggle dataset search API."
     ),
 }
 
