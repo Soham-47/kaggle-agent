@@ -112,7 +112,9 @@ def evaluate_cycle(
         if e.get("tool") == "write_plan"
     )
     code_changed = any(
-        e.get("stage") == "code" and e.get("tool") in {"write_methods", "write_custom_infer"}
+        e.get("stage") == "code"
+        and e.get("tool")
+        in {"write_methods", "write_custom_infer", "write_kernel_recipe"}
         for e in tools
     )
     recipe_path = ws / "pipeline" / "kernel_recipe.py"

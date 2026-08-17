@@ -1253,6 +1253,19 @@ class Orchestrator:
             f"Competition: {self.competition.slug}\n\n{pack.as_prompt_block()}"
         )
         result.code_agent = out.agent
+        if self._tracer is not None:
+            self._tracer.emit(
+                "agent_execution",
+                stage="code",
+                agent=out.agent,
+                stop_reason=out.stop_reason,
+                turns=out.turns,
+                tool_calls=out.tool_calls,
+                writes=out.writes,
+                rejected_writes=out.rejected_writes,
+                errors=out.errors,
+                verified=bool(out.writes),
+            )
         result.wrote_custom_infer = bool(code_state.get("wrote_custom_infer"))
         result.wrote_methods = bool(code_state.get("wrote_methods"))
         result.wrote_recipe = bool(code_state.get("wrote_recipe"))

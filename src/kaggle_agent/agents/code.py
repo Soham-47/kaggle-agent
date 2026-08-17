@@ -528,7 +528,7 @@ def _variant_recipe_source(workspace: Path, plan_text: str) -> str:
     elif "][:3]" in changed:
         changed = changed.replace("][:3]", "][:5]", 1)
     if changed == recipe:
-        return f"EXPERIMENT_VARIANT = {variant!r}\n" + recipe
+        changed = f"RECIPE_VARIANT = {variant!r}\n" + recipe
     return f"EXPERIMENT_VARIANT = {variant!r}\n" + changed
 
 
@@ -608,5 +608,6 @@ def make_code_agent(
             "CUSTOM_INFER markers). Then call done."
         ),
         stall_force=code_stall_force,
+        force_after_stall="write_kernel_recipe",
     )
     return agent, state

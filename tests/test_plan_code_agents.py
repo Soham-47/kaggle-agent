@@ -193,7 +193,7 @@ def test_loop_stops_when_stall_force_returns_none():
     assert out.turns < 20
 
 
-def test_code_agent_stops_on_second_stall_episode(tmp_path: Path):
+def test_code_agent_stops_after_fallback_when_model_ignores_forced_write(tmp_path: Path):
     root = tmp_path / "ka"
     (root / "memory").mkdir(parents=True)
     (root / "memory" / "state.md").write_text("# state\n- phase: IDLE\n")
@@ -240,6 +240,58 @@ def test_code_agent_stops_on_second_stall_episode(tmp_path: Path):
     recipe = (pipe / "kernel_recipe.py").read_text(encoding="utf-8")
     assert "# === CUSTOM_INFER START ===" in recipe
     assert "rank" in recipe
+
+
+def test_code_agent_forces_model_recipe_write_after_stall(tmp_path: Path):
+    root = tmp_path / "ka"
+    (root / "memory").mkdir(parents=True)
+    (root / "memory" / "state.md").write_text("# state\n- phase: IDLE\n")
+    ws = root / "competitions" / "rsna_knee"
+    pipe = ws / "pipeline"
+    pipe.mkdir(parents=True)
+    (pipe / "kernel_recipe.py").write_text(
+        "KERNEL_RECIPE_SOURCE = r'''\n"
+        "# === CUSTOM_INFER START ===\n"
+        "def CUSTOM_INFER(sub, ctx):\n    return sub\n"
+        "# === CUSTOM_INFER END ===\n"
+        "sub.to_csv('submission.csv')\n'''")
+    (pipe / "methods.json").write_text(json.dumps({"implement_steps": ["old"]}))
+
+    class _ChoiceZen:
+        def __init__(self) -> None:
+            self.choices = []
+
+        def chat(self, model, messages, **kwargs):  # noqa: ANN001
+            self.choices.append(kwargs.get("tool_choice"))
+            if isinstance(kwargs.get("tool_choice"), dict):
+                return json.dumps(
+                    {
+                        "tool": "write_kernel_recipe",
+                        "args": {
+                            "source": (
+                                "def CUSTOM_INFER(sub, ctx):\n"
+                                "    return sub.rank(method='average', pct=True)\n"
+                                "sub.to_csv('submission.csv')\n"
+                            )
+                        },
+                    }
+                )
+            return json.dumps({"tool": "read_plan", "args": {}})
+
+    zen = _ChoiceZen()
+    agent, state = make_code_agent(
+        zen,
+        "m",
+        root,
+        workspace=ws,
+        config=StageAgentConfig(max_minutes=5, max_tool_turns=8),
+        plan_text="steps: rank average predictions",
+    )
+
+    agent.run("code")
+
+    assert state["wrote_recipe"] == "1"
+    assert any(isinstance(choice, dict) for choice in zen.choices)
 
 
 def test_replace_kernel_recipe_works():
@@ -320,7 +372,7 @@ def test_done_ok_rejects_when_wrote_methods_but_no_recipe_word(tmp_path: Path):
     assert out.stop_reason != "done"
 
 
-def test_code_stall_force_writes_distinct_recipe_variant(tmp_path: Path):
+def test_code_agent_fallback_writes_distinct_recipe_variant(tmp_path: Path):
     import json
 
     root = tmp_path / "ka"

@@ -205,12 +205,14 @@ class StageAgent:
         self._stall = StallControl(
             stall_after=stall_after,
             stall_nudge=stall_nudge,
-            stall_force=stall_force,
+            stall_force=None if force_after_stall and stall_force else stall_force,
             reject_msg=reject_msg,
         )
         self._nudges: list[str] = []
         self._force_after_stall = force_after_stall
         self._forced_tool_choice: str | None = None
+        self._active_forced_tool: str | None = None
+        self._stall_fallback_force = stall_force if force_after_stall else None
         self._tool_calls: list[str] = []
         self._source_reads: list[str] = []
         self._writes: list[str] = []
@@ -263,6 +265,13 @@ class StageAgent:
                 observations.append(obs[:4000])
                 transcript.append(f"tool={name} args={args} result={obs[:2000]}")
                 self._record_tool(name, obs)
+                self._trace(
+                    "tool",
+                    tool=name,
+                    turn=turns,
+                    args_keys=sorted(args.keys()),
+                    forced=True,
+                )
                 self._logmsg(f"{self._name} agent forced tool={name} turns={turns}")
                 if name in WRITE_TOOLS:
                     stall.mark_write(turns)
@@ -315,6 +324,11 @@ class StageAgent:
             observations.append(obs[:4000])
             transcript.append(f"tool={tool} args={args} result={obs[:2000]}")
             self._record_tool(tool, obs)
+            if self._active_forced_tool is not None:
+                forced_tool = self._active_forced_tool
+                self._active_forced_tool = None
+                if tool != forced_tool or obs.startswith(("rejected:", "tool error:")):
+                    stall.stall_force = self._stall_fallback_force
             self._logmsg(f"{self._name} agent turn={turns} tool={tool}")
             if obs.startswith(("rejected:", "tool error:")):
                 self._logmsg(f"{self._name} agent turn={turns} result={obs[:300]}")
@@ -390,6 +404,7 @@ class StageAgent:
             and forced_choice in self._tools
             and (forced_choice != "write_card" or self._source_reads)
         ):
+            self._active_forced_tool = forced_choice
             choice: str | dict[str, Any] = {
                 "type": "function",
                 "function": {"name": forced_choice},
