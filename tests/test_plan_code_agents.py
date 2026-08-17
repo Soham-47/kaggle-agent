@@ -11,6 +11,7 @@ from kaggle_agent.agents.plan import build_plan_tools, make_plan_agent, plan_is_
 from kaggle_agent.agents.code import (
     ValidationPipeline,
     calls_custom_infer,
+    extract_recipe_string,
     make_code_agent,
     methods_payload_ok,
     min_length,
@@ -232,7 +233,7 @@ def test_code_agent_stops_after_fallback_when_model_ignores_forced_write(tmp_pat
         root,
         workspace=ws,
         config=StageAgentConfig(max_minutes=5, max_tool_turns=30),
-        plan_text="steps: unrelated plan text",
+        plan_text="steps: rank average predictions",
     )
     out = agent.run("test")
     assert out.stop_reason == "stalled"
@@ -432,6 +433,61 @@ def test_replace_kernel_recipe_auto_inserts_glue():
     assert "sub = CUSTOM_INFER(sub, ctx)" in out
 
 
+def test_replace_kernel_recipe_rejects_hook_call_with_undefined_sub():
+    wrapper = """KERNEL_RECIPE_SOURCE = r'''
+def main():
+    sub = make_submission()
+    return sub
+def CUSTOM_INFER(sub, ctx):
+    return sub
+sub = CUSTOM_INFER(sub, ctx)
+sub.to_csv('submission.csv')
+'''
+    """
+
+    try:
+        replace_kernel_recipe(
+            wrapper,
+            "def main():\n    sub = make_submission()\n    return sub\n"
+            "def CUSTOM_INFER(sub, ctx):\n    return sub\n"
+            "sub = CUSTOM_INFER(sub, ctx)\n"
+            "sub.to_csv('submission.csv')\n",
+        )
+        raise AssertionError("should reject undefined top-level sub")
+    except ValueError as exc:
+        assert "sub" in str(exc)
+
+
+def test_code_write_recipe_rejects_missing_plan_tokens(tmp_path: Path):
+    root = tmp_path / "ka"
+    (root / "memory").mkdir(parents=True)
+    (root / "memory" / "state.md").write_text("# state\n- phase: IDLE\n")
+    ws = root / "competitions" / "rsna_knee"
+    pipe = ws / "pipeline"
+    pipe.mkdir(parents=True)
+    (pipe / "kernel_recipe.py").write_text(
+        "KERNEL_RECIPE_SOURCE = r'''\n"
+        "def CUSTOM_INFER(sub, ctx):\n    return sub\n"
+        "sub = None\n"
+        "sub = CUSTOM_INFER(sub, ctx)\nsub.to_csv('submission.csv')\n'''")
+
+    tools, _, _ = __import__(
+        "kaggle_agent.agents.code", fromlist=["build_code_tools"]
+    ).build_code_tools(
+        root, ws, plan_text="steps: add fold rank aggregation"
+    )
+    out = tools["write_kernel_recipe"](
+        source=(
+            "def CUSTOM_INFER(sub, ctx):\n    return sub\n"
+            "sub = None\n"
+            "sub = CUSTOM_INFER(sub, ctx)\nsub = sub.copy()\n"
+            "sub.to_csv('submission.csv')\n"
+        )
+    )
+
+    assert out.startswith("rejected: plan steps")
+
+
 def test_replace_kernel_recipe_auto_inserts_markers():
     wrapper = "KERNEL_RECIPE_SOURCE = r'''\n" "sub = CUSTOM_INFER(s,c)\n" "sub.to_csv('sub.csv')\n" "'''\n"
     body = (
@@ -457,6 +513,17 @@ def test_validation_pipeline_rules():
     assert no_out_hook("sub = CUSTOM_INFER(sub, ctx)") is None
     assert calls_custom_infer("sub = CUSTOM_INFER(sub, ctx)") is None
     assert calls_custom_infer("sub = sub.copy()") == "recipe must call CUSTOM_INFER(sub, ctx)"
+
+
+def test_submitted_fold_rank_recipe_preserves_study_rows():
+    from pathlib import Path
+
+    wrapper = Path("competitions/rsna_knee/pipeline/kernel_recipe.py").read_text(
+        encoding="utf-8"
+    )
+    recipe = extract_recipe_string(wrapper) or ""
+    assert "ranked.loc[group.index, df.columns]" in recipe
+    assert "fold_ranks[name] = rank_transform(df)" in recipe
 
 
 def test_validation_pipeline_min_length_rule():
@@ -531,7 +598,7 @@ def test_write_kernel_recipe_unlocks_done(tmp_path: Path):
         {"tool": "write_kernel_recipe", "args": {"source": new_recipe}},
         {"tool": "done", "args": {}},
     ])
-    agent, state = make_code_agent(zen, "m", root, workspace=ws, config=StageAgentConfig(max_minutes=5, max_tool_turns=5), plan_text="steps: unrelated plan text")
+    agent, state = make_code_agent(zen, "m", root, workspace=ws, config=StageAgentConfig(max_minutes=5, max_tool_turns=5), plan_text="steps: rank average predictions")
     out = agent.run("test")
     assert out.stop_reason == "done"
     assert state.get("wrote_recipe") == "1"

@@ -57,6 +57,26 @@ def test_validate_rejects_out_of_range(tmp_path: Path):
     assert not r.ok
 
 
+def test_validate_rejects_constant_kernel_output(tmp_path: Path):
+    path = write_constant_submission(
+        tmp_path / "kernel.csv",
+        ["s1", "s2"],
+        id_column="StudyInstanceUID",
+        labels=LABELS,
+        value=0.525,
+    )
+
+    r = validate_submission_csv(
+        path,
+        id_column="StudyInstanceUID",
+        labels=LABELS,
+        require_prediction_variation=True,
+    )
+
+    assert not r.ok
+    assert any("constant" in error for error in r.errors)
+
+
 def test_run_local_smoke(tmp_path: Path):
     out = run_local_smoke(
         study_ids=["a", "b", "c"],

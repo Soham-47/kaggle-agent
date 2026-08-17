@@ -1510,19 +1510,20 @@ class Orchestrator:
             append_daily_log("validate: no candidate CSV", self.root)
             return state
 
+        kernel_output = (
+            result.kernel_path is not None
+            and path == Path(result.kernel_path) / "output" / "submission.csv"
+        )
         check = validate_submission_csv(
             path,
             id_column=self.competition.id_column,
             labels=self.competition.labels,
+            require_prediction_variation=kernel_output,
         )
         result.validate_ok = check.ok
         result.candidate_csv = str(path)
         if check.ok:
             append_daily_log(f"validate ok path={path} rows={check.n_rows}", self.root)
-            kernel_output = (
-                result.kernel_path is not None
-                and path == Path(result.kernel_path) / "output" / "submission.csv"
-            )
             if kernel_output:
                 out_hash = submission_output_hash(path, self.competition.id_column)
                 prior_exp = seen_output(

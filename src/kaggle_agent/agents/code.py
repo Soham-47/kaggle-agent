@@ -250,6 +250,28 @@ def calls_custom_infer(recipe: str) -> str | None:
     return None
 
 
+def valid_custom_infer_scope(recipe: str) -> str | None:
+    """Reject a top-level hook call when ``sub`` only exists inside ``main``."""
+    try:
+        tree = ast.parse(recipe)
+    except SyntaxError:
+        return "recipe is not valid Python"
+    global_sub = False
+    has_main = any(
+        isinstance(node, ast.FunctionDef) and node.name == "main" for node in tree.body
+    )
+    for node in tree.body:
+        value = node.value if isinstance(node, ast.Assign) else None
+        if isinstance(value, ast.Call) and isinstance(value.func, ast.Name):
+            if value.func.id == "CUSTOM_INFER" and not global_sub and has_main:
+                return "recipe calls CUSTOM_INFER with undefined top-level sub"
+        if isinstance(node, (ast.Assign, ast.AnnAssign)):
+            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+            if any(isinstance(target, ast.Name) and target.id == "sub" for target in targets):
+                global_sub = True
+    return None
+
+
 def min_length(old: str) -> RecipeRule:
     """Length guard against summarized/truncated recipe replacements."""
 
@@ -262,7 +284,11 @@ def min_length(old: str) -> RecipeRule:
 
 
 _PRE_FIX_RULES: list[RecipeRule] = [valid_python, writes_submission_csv]
-_POST_FIX_RULES: list[RecipeRule] = [no_out_hook, calls_custom_infer]
+_POST_FIX_RULES: list[RecipeRule] = [
+    no_out_hook,
+    calls_custom_infer,
+    valid_custom_infer_scope,
+]
 
 
 def splice_custom_infer(wrapper: str, source: str) -> str:
@@ -422,7 +448,10 @@ def build_code_tools(
             return "rejected: methods are identical to the previous experiment"
         out = workspace / "pipeline" / "methods.json"
         out.parent.mkdir(parents=True, exist_ok=True)
-        out.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+        try:
+            out.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+        except OSError as exc:
+            return f"rejected: could not write methods.json: {exc}"
         state["wrote_methods"] = "1"
         return str(out)
 
@@ -433,7 +462,7 @@ def build_code_tools(
         try:
             before = path.read_text(encoding="utf-8")
             text = splice_custom_infer(before, source or "return sub")
-        except (ValueError, SyntaxError) as exc:
+        except (OSError, UnicodeError, ValueError, SyntaxError) as exc:
             return f"rejected: {exc}"
         old_recipe = _recipe_text_from_wrapper(before)
         new_recipe = _recipe_text_from_wrapper(text)
@@ -452,7 +481,7 @@ def build_code_tools(
         try:
             before = path.read_text(encoding="utf-8")
             text = replace_kernel_recipe(before, source)
-        except ValueError as exc:
+        except (OSError, UnicodeError, ValueError, SyntaxError) as exc:
             return f"rejected: {exc}"
         old_recipe = _recipe_text_from_wrapper(before)
         new_recipe = _recipe_text_from_wrapper(text)
@@ -460,6 +489,9 @@ def build_code_tools(
             return "rejected: recipe is identical to the previous experiment"
         if recipe_logic_hash(old_recipe) == recipe_logic_hash(new_recipe):
             return "rejected: recipe has no semantic logic change"
+        plan_steps = _plan_steps(plan_text)
+        if plan_steps and not _any_plan_word_in_recipe(plan_steps, new_recipe):
+            return "rejected: plan steps are missing from the recipe"
         path.write_text(text, encoding="utf-8")
         state["wrote_recipe"] = "1"
         return "recipe written"
@@ -529,7 +561,8 @@ def _variant_recipe_source(workspace: Path, plan_text: str) -> str:
         changed = changed.replace("][:3]", "][:5]", 1)
     if changed == recipe:
         changed = f"RECIPE_VARIANT = {variant!r}\n" + recipe
-    return f"EXPERIMENT_VARIANT = {variant!r}\n" + changed
+    plan_comment = re.sub(r"\s+", " ", _plan_steps(plan_text)).strip()
+    return f"EXPERIMENT_VARIANT = {variant!r}\n# CODE_PLAN: {plan_comment}\n" + changed
 
 
 def make_code_agent(
@@ -548,7 +581,7 @@ def make_code_agent(
     def done_ok() -> bool:
         plan_steps = _plan_steps(plan_text)
         if state.get("wrote_recipe"):
-            return True
+            return _any_plan_word_in_recipe(plan_steps, _recipe_text(workspace))
         if state.get("wrote_custom_infer"):
             recipe = _recipe_text(workspace)
             if recipe and not _any_plan_word_in_recipe(plan_steps, recipe):
