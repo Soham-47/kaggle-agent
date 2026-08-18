@@ -101,3 +101,36 @@ def test_submit_notebook_submits_offline_kernel_version_without_push(tmp_path):
     assert result.success
     assert not [c for c in api.submit_calls if c[0] == "kernels_push"]
     assert [c for c in api.submit_calls if c[0] == "submit_code"][0][5] == 3
+
+
+def test_submit_notebook_uses_metadata_ref_when_ref_omitted(tmp_path):
+    folder = tmp_path / "pkg"
+    _write_meta(folder, id="meta-owner/meta-kernel", enable_internet=False)
+    api = FakeKaggleApi()
+    result = submit_notebook(
+        api, competition="rsna-knee-abnormality-detection", message="m",
+        kernel_folder=folder, kernel_ref=None, kernel_version=4,
+        output_file="submission.csv", status_fn=lambda ref: "COMPLETE",
+        poll_seconds=1, poll_attempts=1,
+    )
+    assert result.success
+    assert [c for c in api.submit_calls if c[0] == "submit_code"][0][4] == "meta-owner/meta-kernel"
+
+
+def test_submit_notebook_reads_mapping_push_response(tmp_path):
+    folder = tmp_path / "pkg"
+    _write_meta(folder)
+    api = FakeKaggleApi()
+    original_push = api.kernels_push
+    def push(path):
+        original_push(path)
+        return {"ref": "/code/u/mapped", "versionNumber": 7}
+    api.kernels_push = push
+    result = submit_notebook(
+        api, competition="rsna-knee-abnormality-detection", message="m",
+        kernel_folder=folder, kernel_ref="u/old", output_file="submission.csv",
+        status_fn=lambda ref: "COMPLETE", poll_seconds=1, poll_attempts=1,
+    )
+    assert result.success
+    call = [c for c in api.submit_calls if c[0] == "submit_code"][0]
+    assert call[4:] == ("u/mapped", 7)

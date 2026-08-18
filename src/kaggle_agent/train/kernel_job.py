@@ -30,6 +30,7 @@ class KernelJob:
     status: str = "none"
     competition: str = "none"
     exp_id: str = "none"
+    kernel_version: str = "none"
     updated_at: str = "never"
 
     def to_dict(self) -> dict[str, str]:

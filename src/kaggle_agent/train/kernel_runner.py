@@ -48,7 +48,10 @@ def _push_result(client: KaggleClient, folder: Path):
 
 
 def _push_version(response) -> int | None:
-    value = getattr(response, "version_number", None) or getattr(response, "versionNumber", None)
+    if isinstance(response, dict):
+        value = response.get("version_number") or response.get("versionNumber")
+    else:
+        value = getattr(response, "version_number", None) or getattr(response, "versionNumber", None)
     try:
         return int(value) if value is not None else None
     except (TypeError, ValueError):
@@ -157,6 +160,7 @@ def run_kernel_phase(
         status="pushed",
         competition=competition,
         exp_id=exp_id,
+        kernel_version=str(result.kernel_version) if result.kernel_version is not None else "none",
     )
     save_kernel_job(job, root)
 
@@ -249,6 +253,7 @@ def _resume_job(
         package=package,
         resumed=True,
         kernel_ref=job.kernel_ref,
+        kernel_version=int(job.kernel_version) if job.kernel_version not in {"none", ""} else None,
         message=f"resuming {job.kernel_ref}",
         status=job.status,
     )
@@ -323,8 +328,9 @@ def _poll_and_maybe_pull(
             fail = ""
         if _retry_cpu_after_gpu_ban(client, folder, fail):
             try:
-                client.kernels_push(folder)
+                push_resp = client.kernels_push(folder)
                 result.pushed = True
+                result.kernel_version = _push_version(push_resp)
                 result.message = f"retried cpu after: {fail[:160]}"
                 job = KernelJob(
                     kernel_ref=kernel_ref,
@@ -332,6 +338,7 @@ def _poll_and_maybe_pull(
                     status="pushed",
                     competition=competition,
                     exp_id=exp_id,
+                    kernel_version=result.kernel_version,
                 )
                 save_kernel_job(job, root)
                 st = client.kernels_status(kernel_ref)

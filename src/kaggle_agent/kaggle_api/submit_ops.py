@@ -58,6 +58,19 @@ def _read_meta(kernel_folder: Path) -> dict[str, Any] | None:
     return data if isinstance(data, dict) else None
 
 
+def _response_value(response: Any, *names: str) -> Any:
+    if isinstance(response, dict):
+        for name in names:
+            if name in response:
+                return response[name]
+        return None
+    for name in names:
+        value = getattr(response, name, None)
+        if value is not None:
+            return value
+    return None
+
+
 def _fix_metadata_owner(api: Any, kernel_folder: Path) -> None:
     """Rewrite kernel-metadata.json id owner to the authenticated user.
 
@@ -139,10 +152,10 @@ def _submit_variant_folder(
         else:
             raise RuntimeError(f"kernels_push failed: {detail}") from exc
 
-    ref = normalize_kernel_ref(get_str(push, "ref", default=kernel_ref or ""))
+    ref = normalize_kernel_ref(str(_response_value(push, "ref") or ""))
     if not ref:
         ref = normalize_kernel_ref(kernel_ref)
-    version = get(push, "version_number", "versionNumber")
+    version = _response_value(push, "version_number", "versionNumber")
     err = get_str(push, "error")
     return variant, ref, str(err), version, ""
 
@@ -178,10 +191,12 @@ def submit_notebook(
         )
 
     meta = _read_meta(kernel_folder)
+    metadata_ref = normalize_kernel_ref(str((meta or {}).get("id") or ""))
+    effective_ref = normalize_kernel_ref(kernel_ref) or metadata_ref
     if meta and meta.get("enable_internet") is False and kernel_version is not None:
-        variant, ref, err, version = kernel_folder, normalize_kernel_ref(kernel_ref), "", kernel_version
+        variant, ref, err, version = kernel_folder, effective_ref, "", kernel_version
     else:
-        variant, ref, err, version, _ = _submit_variant_folder(api, kernel_folder, kernel_ref or "")
+        variant, ref, err, version, _ = _submit_variant_folder(api, kernel_folder, effective_ref)
     if err and err not in {"none", "None", ""}:
         return SubmitResult(dry_run=False, message=f"kernels_push error: {err}", success=False)
     if not ref:
