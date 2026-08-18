@@ -47,6 +47,17 @@ def test_extract_skips_junk_dataset_model():
     assert any("rsna-knee-weights" in x for x in ds)
 
 
+def test_extract_datasets_rejects_url_fragment_owners_but_keeps_valid_ref():
+    text = (
+        "com/datasets and www.kaggle.com/datasets must not attach; "
+        "use pilkwang/rsna-knee-weights instead."
+    )
+    ds = extract_datasets(text)
+    assert "com/datasets" not in ds
+    assert "www.kaggle.com/datasets" not in ds
+    assert "pilkwang/rsna-knee-weights" in ds
+
+
 def test_valid_model_pin_needs_five_or_four_parts():
     assert valid_model_pin("metaresearch/dinov2/PyTorch/small/1")
     assert not valid_model_pin("metaresearch/dinov2")

@@ -20,3 +20,10 @@ Complete.
 
 - `methods.json` had unrelated dirty changes before this task. They remain preserved.
 - The `uv` command is not installed in this environment.
+
+## Correction
+
+- Confirmed `implement_steps` and `n_cards` match commit `68a7500`.
+- Preserved `dataset_sources` as an empty list.
+- Added an integration test that rejects `com/datasets` and `www.kaggle.com/datasets` while retaining `pilkwang/rsna-knee-weights`.
+- `pytest tests/test_source_cards.py -q`: 15 passed.
