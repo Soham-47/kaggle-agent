@@ -60,7 +60,7 @@ def test_validate_rejects_out_of_range(tmp_path: Path):
 def test_validate_rejects_constant_kernel_output(tmp_path: Path):
     path = write_constant_submission(
         tmp_path / "kernel.csv",
-        ["s1", "s2"],
+        [f"s{i}" for i in range(1000)],
         id_column="StudyInstanceUID",
         labels=LABELS,
         value=0.525,
