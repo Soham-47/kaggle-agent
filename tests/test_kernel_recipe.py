@@ -74,43 +74,46 @@ def test_main_does_not_write_fallback_for_empty_inputs(tmp_path, monkeypatch):
     namespace["sample"] = pd.DataFrame({"StudyInstanceUID": ["study-a"]})
     monkeypatch.chdir(tmp_path)
 
-    with pytest.raises(ValueError, match="discovered test IDs"):
+    with pytest.raises(ValueError, match="zero discovered test IDs"):
         namespace["main"]()
 
     assert not (tmp_path / "submission.csv").exists()
 
 
-def test_main_rejects_incomplete_discovery_before_output(tmp_path, monkeypatch):
+def test_main_accepts_fewer_than_1000_discovered_ids(tmp_path, monkeypatch):
     namespace = _recipe_namespace()
     namespace["train"] = pd.DataFrame({"StudyInstanceUID": ["train-a"]})
     namespace["test"] = pd.DataFrame({"StudyInstanceUID": ["test-a"]})
     namespace["sample"] = pd.DataFrame()
-    namespace["build_dinov2_member"] = lambda *args: pd.DataFrame(index=["test-a"])
-    namespace["build_radimagenet_member"] = lambda *args: pd.DataFrame(index=["test-a"])
+    predictions = pd.DataFrame(0.5, index=["test-a"], columns=namespace["LABELS"])
+    namespace["build_dinov2_member"] = lambda *args: predictions
+    namespace["build_dinov3_member"] = lambda *args: predictions
     monkeypatch.chdir(tmp_path)
 
-    with pytest.raises(ValueError, match="discovered test IDs"):
-        namespace["main"]()
+    result = namespace["main"]()
 
-    assert not (tmp_path / "submission.csv").exists()
+    assert result.shape == (1, 13)
+    assert (tmp_path / "submission.csv").exists()
 
 
 def test_main_output_has_schema_and_full_discovered_row_count(tmp_path, monkeypatch):
     namespace = _recipe_namespace()
-    ids = [f"study-{i}" for i in range(1000)]
+    ids = [f"study-{i}" for i in range(3)]
     namespace["train"] = pd.DataFrame({"StudyInstanceUID": ["train-a"]})
     namespace["test"] = pd.DataFrame({"StudyInstanceUID": ids})
     namespace["sample"] = pd.DataFrame()
     predictions = pd.DataFrame(0.5, index=ids, columns=namespace["LABELS"])
     namespace["build_dinov2_member"] = lambda *args: predictions
-    namespace["build_radimagenet_member"] = lambda *args: predictions
+    namespace["build_dinov3_member"] = lambda *args: predictions
     monkeypatch.chdir(tmp_path)
 
     result = namespace["main"]()
 
-    assert result.shape == (1000, 13)
+    assert result.shape == (3, 13)
     assert result.columns.tolist() == [namespace["ID_COL"]] + namespace["LABELS"]
-    assert pd.read_csv("submission.csv").shape == (1000, 13)
+    output = pd.read_csv("submission.csv")
+    assert output.shape == (3, 13)
+    assert output[namespace["LABELS"]].nunique().max() > 1
 
 
 def test_dinov2_member_handles_asymmetric_feature_columns_and_varies_predictions():
