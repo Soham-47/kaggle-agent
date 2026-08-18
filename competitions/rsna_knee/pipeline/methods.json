@@ -1,5 +1,9 @@
 {
-  "dataset_sources": [],
+  "dataset_sources": [
+    "barun2104/rsna-knee-stratified-folds-and-llm-soft-labels",
+    "riachk/smart-mri-detection",
+    "stevenleehans/rsna-knee-llm-report-labels"
+  ],
   "model_sources": [],
   "infer_hints": [
     "discover_test_ids_from_folders",
@@ -8,10 +12,12 @@
     "rank_mean_ensemble"
   ],
   "implement_steps": [
-    "Discover hidden test IDs from study folders, not only public test.csv.",
-    "Use the report extractor for missing targets and retain official labels when present.",
-    "Evaluate metadata features with grouped study-level cross-validation before kernel training.",
-    "Rank-average model members instead of probability-averaging them."
+    "Pull this kernel and copy its inference ID discovery + rank-average.",
+    "Train on the LLM soft labels (regression targets) instead of hard binary labels, using the provided stratified folds for grouped CV; this gives smoother gradients and better calibration on the ordinal abnormality scale.",
+    "Inspect this dataset's file layout and label schema; if it contains preprocessed knee MRI volumes, use them as an alternate input pipeline and cross-check against the official RSNA knee data to confirm ID alignment before training.",
+    "Use these LLM report labels as soft/auxiliary regression targets alongside the hard binary labels; train a multi-task head so the model learns ordinal severity from report semantics, then blend with the stratified-fold model for",
+    "use GroupKFold on study_id; train one 3D model per sequence type and compare per-type CV before fusion",
+    "Pull this kernel and copy its inference ID discovery + rank-average. Rank-average member scores; do not probability-mean."
   ],
-  "n_cards": 4
+  "n_cards": 25
 }

@@ -31,6 +31,13 @@ def test_sanitize_drops_junk_keeps_full_pin():
     assert datasets == ["sohamgawd47foden/rsna-knee-dinov2-vits14"]
 
 
+def test_valid_attach_ref_rejects_url_fragment_dataset_refs():
+    from kaggle_agent.research.source_cards import _valid_attach_ref
+
+    assert _valid_attach_ref("com/datasets") is False
+    assert _valid_attach_ref("www.kaggle.com/datasets") is False
+
+
 def test_sanitize_methods_deduplicates_steps():
     payload = sanitize_methods_payload(
         {"implement_steps": ["same step", "same step", "bad Our score=0.5"]}

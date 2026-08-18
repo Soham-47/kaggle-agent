@@ -39,6 +39,8 @@ def skip_kernel(row: KernelRow) -> bool:
 
 
 _NOT_A_DATASET_OWNER = {
+    "com",
+    "www.kaggle.com",
     "input",
     "data",
     "mnt",
