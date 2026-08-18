@@ -341,13 +341,13 @@ def _poll_and_maybe_pull(
         return result
 
     st_norm = str(result.status or "").split(".")[-1].lower().replace(" ", "")
-    if st_norm in {"error", "failed"} and folder is not None:
+    if st_norm in {"error", "failed"}:
         fail = ""
         try:
             fail = client.kernels_failure_message(kernel_ref)
         except Exception:  # noqa: BLE001
             fail = ""
-        if _retry_cpu_after_gpu_ban(client, folder, fail):
+        if folder is not None and _retry_cpu_after_gpu_ban(client, folder, fail):
             try:
                 push_resp = client.kernels_push(folder)
                 result.pushed = True
@@ -367,7 +367,21 @@ def _poll_and_maybe_pull(
                 st_norm = str(st or "").split(".")[-1].lower().replace(" ", "")
             except Exception as exc:  # noqa: BLE001
                 result.ok = False
-                result.errors.append(f"cpu-retry: {exc}")
+                diagnosis = _browser_traceback(kernel_ref)
+                detail = fail or result.status
+                if diagnosis:
+                    detail = f"{detail}\ntraceback:\n{diagnosis}"
+                result.errors.append(f"cpu-retry: {exc}\nkernel error: {detail}")
+                clear_kernel_job(root)
+                return result
+            if st_norm in {"error", "failed"}:
+                result.ok = False
+                diagnosis = _browser_traceback(kernel_ref)
+                detail = fail or result.status
+                if diagnosis:
+                    detail = f"{detail}\ntraceback:\n{diagnosis}"
+                result.errors.append(f"kernel error: {detail}")
+                clear_kernel_job(root)
                 return result
         else:
             result.ok = False
