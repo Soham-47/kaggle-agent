@@ -297,6 +297,11 @@ def _poll_and_maybe_pull(
                 status=plain_st,
                 competition=competition,
                 exp_id=exp_id,
+                kernel_version=(
+                    str(result.kernel_version)
+                    if result.kernel_version is not None
+                    else "none"
+                ),
             )
             save_kernel_job(job, root)
             st_now = str(st or "").split(".")[-1].lower().replace(" ", "")

@@ -39,3 +39,9 @@ Output:
 ```
 
 The three failures are existing wider-cycle failures. They stop before submit because the generated kernel reports `study_ids required`. The failure is unrelated to submit response parsing or version handling.
+
+## Follow-up Fix
+
+The status polling path created a new `KernelJob` without the existing kernel version. This caused a resume poll to replace the saved version with `none`.
+
+The poll now copies `result.kernel_version` into each saved `KernelJob`. A regression test polls an active job, resumes it, and verifies that version `7` remains saved.

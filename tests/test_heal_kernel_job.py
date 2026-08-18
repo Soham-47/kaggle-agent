@@ -112,6 +112,64 @@ def test_kernel_job_resume_no_second_push(tmp_path: Path):
     assert len(new_pushes) == len(old_pushes)
 
 
+def test_kernel_job_resume_preserves_version_during_polling(tmp_path: Path):
+    import shutil
+
+    root = tmp_path / "ka"
+    real = repo_root()
+    shutil.copytree(real / "config", root / "config")
+    (root / "competitions" / "rsna_knee").mkdir(parents=True)
+    (root / "memory").mkdir()
+    if (real / "data").is_dir():
+        shutil.copytree(real / "data", root / "data")
+    comp = load_competition("rsna_knee", root)
+    pkg = write_kernel_package(comp, root=root, username="tester", exp_id="e1")
+
+    api = FakeKaggleApi(status_queue=["RUNNING", "COMPLETE"])
+    client = KaggleClient(api=api).connect()
+    save_kernel_job(
+        KernelJob(
+            kernel_ref=pkg.kernel_ref,
+            folder=str(pkg.folder),
+            status="RUNNING",
+            competition=comp.slug,
+            exp_id="e1",
+            kernel_version="7",
+        ),
+        root,
+    )
+
+    run = run_kernel_phase(
+        client,
+        None,
+        push=True,
+        pull_output_dir=pkg.folder / "output",
+        root=root,
+        competition=comp.slug,
+        exp_id="e1",
+        poll_seconds=0,
+        poll_attempts=1,
+    )
+
+    assert run.resumed is True
+    assert run.status == "RUNNING"
+    assert load_kernel_job(root).kernel_version == "7"
+
+    api._status_idx = 1
+    run = run_kernel_phase(
+        client,
+        None,
+        push=True,
+        pull_output_dir=pkg.folder / "output",
+        root=root,
+        competition=comp.slug,
+        exp_id="e1",
+        poll_seconds=0,
+        poll_attempts=1,
+    )
+    assert run.status == "COMPLETE"
+
+
 def test_kernel_retries_cpu_after_p100_ban(tmp_path: Path):
     import json
     import shutil
