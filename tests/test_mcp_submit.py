@@ -10,7 +10,7 @@ from kaggle_agent.kaggle_api.submit_ops import normalize_kernel_ref, split_kerne
 from kaggle_agent.notify.telegram import FakeTelegram
 from kaggle_agent.orchestrator import run_daily
 from kaggle_agent.submit.pending import load_pending, request_approval, set_decision
-from fakes import FakeKaggleApi
+from fakes import FakeKaggleApi, successful_kernel_train
 from kaggle_agent.kaggle_api import KaggleClient
 
 
@@ -18,6 +18,14 @@ def _enable_mcp_in_settings(root: Path) -> None:
     path = root / "config" / "settings.yaml"
     text = path.read_text(encoding="utf-8")
     path.write_text(text.replace("mcp: false", "mcp: true"), encoding="utf-8")
+
+
+def _write_live_submission(path: Path, header: list[str]) -> None:
+    rows = "\n".join(
+        f"study-{i}," + ",".join([str(0.5 + (i % 2) * 0.1)] * (len(header) - 1))
+        for i in range(1000)
+    )
+    path.write_text(",".join(header) + "\n" + rows + "\n", encoding="utf-8")
 
 
 def test_normalize_kernel_ref():
@@ -76,7 +84,7 @@ def test_mcp_code_submit_injected():
     assert "mcp code submit ok" in r.message
 
 
-def test_mcp_fail_then_api_then_browser(tmp_path: Path):
+def test_mcp_fail_then_api_then_browser(tmp_path: Path, monkeypatch):
     import shutil
 
     root = tmp_path / "kaggle-agent"
@@ -98,10 +106,7 @@ def test_mcp_fail_then_api_then_browser(tmp_path: Path):
     csv = root / "competitions" / "rsna_knee" / "submissions" / "pre.csv"
     csv.parent.mkdir(parents=True, exist_ok=True)
     header = [comp.id_column, *comp.labels]
-    csv.write_text(
-        ",".join(header) + "\nstudy-1," + ",".join(["0.5"] * len(comp.labels)) + "\n",
-        encoding="utf-8",
-    )
+    _write_live_submission(csv, header)
     request_approval(
         exp_id="pre-exp",
         csv_path=str(csv),
@@ -111,6 +116,9 @@ def test_mcp_fail_then_api_then_browser(tmp_path: Path):
         kernel_path="none",
     )
     set_decision("latest", approved=True, root=root)
+    monkeypatch.setattr(
+        "kaggle_agent.orchestrator.Orchestrator._kernel_train", successful_kernel_train(root)
+    )
 
     def mcp_fail(name: str, arguments: dict):
         raise RuntimeError("mcp forced fail")
@@ -140,7 +148,7 @@ def test_mcp_fail_then_api_then_browser(tmp_path: Path):
     assert load_pending(root).status == "submitted"
 
 
-def test_mcp_success_skips_api(tmp_path: Path):
+def test_mcp_success_skips_api(tmp_path: Path, monkeypatch):
     import shutil
 
     root = tmp_path / "kaggle-agent"
@@ -163,10 +171,7 @@ def test_mcp_success_skips_api(tmp_path: Path):
     csv = root / "competitions" / "rsna_knee" / "submissions" / "pre.csv"
     csv.parent.mkdir(parents=True, exist_ok=True)
     header = [comp.id_column, *comp.labels]
-    csv.write_text(
-        ",".join(header) + "\nstudy-1," + ",".join(["0.5"] * len(comp.labels)) + "\n",
-        encoding="utf-8",
-    )
+    _write_live_submission(csv, header)
     request_approval(
         exp_id="pre-exp",
         csv_path=str(csv),
@@ -175,6 +180,9 @@ def test_mcp_success_skips_api(tmp_path: Path):
         kernel_ref="user/k",
     )
     set_decision("latest", approved=True, root=root)
+    monkeypatch.setattr(
+        "kaggle_agent.orchestrator.Orchestrator._kernel_train", successful_kernel_train(root)
+    )
 
     submit_code_hits: list[str] = []
 
@@ -200,7 +208,7 @@ def test_mcp_success_skips_api(tmp_path: Path):
     assert submit_code_hits == []
 
 
-def test_live_submit_uses_api_not_mcp(tmp_path: Path):
+def test_live_submit_uses_api_not_mcp(tmp_path: Path, monkeypatch):
     import shutil
 
     root = tmp_path / "kaggle-agent"
@@ -225,10 +233,7 @@ def test_live_submit_uses_api_not_mcp(tmp_path: Path):
     csv = root / "competitions" / "rsna_knee" / "submissions" / "pre.csv"
     csv.parent.mkdir(parents=True, exist_ok=True)
     header = [comp.id_column, *comp.labels]
-    csv.write_text(
-        ",".join(header) + "\nstudy-1," + ",".join(["0.5"] * len(comp.labels)) + "\n",
-        encoding="utf-8",
-    )
+    _write_live_submission(csv, header)
     kernel_dir = root / "competitions" / "rsna_knee" / "notebooks" / "pre-exp"
     kernel_dir.mkdir(parents=True, exist_ok=True)
     (kernel_dir / "kernel-metadata.json").write_text("{}", encoding="utf-8")
@@ -241,6 +246,9 @@ def test_live_submit_uses_api_not_mcp(tmp_path: Path):
         kernel_path=str(kernel_dir),
     )
     set_decision("latest", approved=True, root=root)
+    monkeypatch.setattr(
+        "kaggle_agent.orchestrator.Orchestrator._kernel_train", successful_kernel_train(root)
+    )
 
     mcp_hits: list[str] = []
 

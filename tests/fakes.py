@@ -7,6 +7,20 @@ from pathlib import Path
 from types import SimpleNamespace
 
 
+def successful_kernel_train(root: Path):
+    """Return a kernel-stage stub with a validated candidate artifact."""
+    def run(orchestrator, _state, _dry, result):
+        source = next((root / "competitions").glob("**/submissions/*.csv"))
+        result.kernel_ok = True
+        result.kernel_ref = "tester/fake-kernel"
+        result.kernel_version = 1
+        result.kernel_path = str(source.parent)
+        result.candidate_csv = str(source)
+        return orchestrator._sa.load_state()
+
+    return run
+
+
 @dataclass
 class _Lim:
     num_today: int = 1
@@ -136,10 +150,15 @@ class FakeKaggleApi:
         dest.mkdir(parents=True, exist_ok=True)
         out = dest / "submission.csv"
         # Minimal RSNA-shaped header for tests that pull outputs
+        rows = "\n".join(
+            f"k{i}," + ",".join([str(0.5 + (i % 2) * 0.1)] * 12)
+            for i in range(1000)
+        )
         out.write_text(
             "StudyInstanceUID,ACL,MCL,Medial Meniscus,Lateral Meniscus,"
             "Medial OA,Lateral OA,PF OA,Effusion,Synovitis,Baker's,Contusion,Fracture\n"
-            "k1,0.5,0.5,0.5,0.5,0.5,0.5,0.5,0.5,0.5,0.5,0.5,0.5\n",
+            + rows
+            + "\n",
             encoding="utf-8",
         )
         return ([str(out)], "")

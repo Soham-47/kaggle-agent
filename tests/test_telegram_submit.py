@@ -1,7 +1,7 @@
 import os
 from pathlib import Path
 
-from fakes import FakeKaggleApi
+from fakes import FakeKaggleApi, successful_kernel_train
 from helpers import copy_min_workspace as _copy_min
 from kaggle_agent.kaggle_api import KaggleClient
 from kaggle_agent.notify.commands import handle_command, process_updates
@@ -126,7 +126,7 @@ def test_live_submit_blocked_without_approve(tmp_path: Path):
 
 
 
-def test_approve_then_second_live_submits(tmp_path: Path):
+def test_approve_then_second_live_submits(tmp_path: Path, monkeypatch):
     """/yes then /run live must not ask for approval again; it should submit."""
     root = tmp_path / "kaggle-agent"
     real = Path(__file__).resolve().parents[1]
@@ -153,6 +153,9 @@ def test_approve_then_second_live_submits(tmp_path: Path):
     handle_command("/yes", root=root)
     assert load_pending(root).status == "approved"
     approved_csv = load_pending(root).csv_path
+    monkeypatch.setattr(
+        "kaggle_agent.orchestrator.Orchestrator._kernel_train", successful_kernel_train(root)
+    )
 
     # rsna public test CSV is 3 rows that never change; allow identical output
     os.environ["KAGGLE_AGENT_ALLOW_DUPLICATE_OUTPUT"] = "1"
