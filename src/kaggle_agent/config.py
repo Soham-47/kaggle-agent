@@ -296,6 +296,11 @@ class CompetitionConfig:
         return str(self.raw.get("submission", {}).get("id_column", "StudyInstanceUID"))
 
     @property
+    def submission_min_rows(self) -> int | None:
+        raw = self.raw.get("submission", {}).get("min_rows")
+        return int(raw) if raw is not None else None
+
+    @property
     def workspace_relative(self) -> str:
         return str(
             self.raw.get("workspace", {}).get("relative", f"competitions/{self.id}")

@@ -1537,6 +1537,7 @@ class Orchestrator:
             path,
             id_column=self.competition.id_column,
             labels=self.competition.labels,
+            require_min_rows=(self.competition.submission_min_rows if kernel_output else None),
             require_prediction_variation=kernel_output,
         )
         result.validate_ok = check.ok

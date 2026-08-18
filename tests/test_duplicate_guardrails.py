@@ -83,8 +83,11 @@ def test_validate_stops_on_identical_output(tmp_path: Path):
     from kaggle_agent.experiment_fingerprint import submission_output_hash
 
     header = [comp.id_column, *comp.labels]
-    row = "study-1," + ",".join(["0.5"] * len(comp.labels))
-    csv_text = ",".join(header) + "\n" + row + "\n"
+    rows = [
+        f"study-{i}," + ",".join([str(0.5 + (i % 2) * 0.1)] * len(comp.labels))
+        for i in range(1000)
+    ]
+    csv_text = ",".join(header) + "\n" + "\n".join(rows) + "\n"
 
     kernel_dir = root / "competitions" / "rsna_knee" / "notebooks" / "e2"
     out_dir = kernel_dir / "output"
@@ -101,6 +104,7 @@ def test_validate_stops_on_identical_output(tmp_path: Path):
         dry_run=False,
         experiment_id="e2",
         kernel_path=str(kernel_dir),
+        kernel_ok=True,
     )
     state = AgentState(paused=False, competition="rsna_knee")
 
@@ -117,8 +121,11 @@ def test_validate_records_and_accepts_new_output(tmp_path: Path):
     settings = load_settings(root)
 
     header = [comp.id_column, *comp.labels]
-    row = "study-1," + ",".join(["0.7"] * len(comp.labels))
-    csv_text = ",".join(header) + "\n" + row + "\n"
+    rows = [
+        f"study-{i}," + ",".join([str(0.7 + (i % 2) * 0.1)] * len(comp.labels))
+        for i in range(1000)
+    ]
+    csv_text = ",".join(header) + "\n" + "\n".join(rows) + "\n"
 
     kernel_dir = root / "competitions" / "rsna_knee" / "notebooks" / "e3"
     out_dir = kernel_dir / "output"
@@ -132,6 +139,7 @@ def test_validate_records_and_accepts_new_output(tmp_path: Path):
         dry_run=False,
         experiment_id="e3",
         kernel_path=str(kernel_dir),
+        kernel_ok=True,
     )
     state = AgentState(paused=False, competition="rsna_knee")
 

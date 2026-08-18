@@ -51,6 +51,7 @@ def test_load_rsna_competition():
     assert "Baker's" in c.labels
     assert len(c.labels) == 12
     assert c.metric_direction == "max"
+    assert c.submission_min_rows == 1000
 
 
 def test_model_fallback_to_settings():

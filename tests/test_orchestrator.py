@@ -111,9 +111,12 @@ def _write_kernel_output(root: Path, comp, exp_id: str) -> Path:  # noqa: ANN001
     kernel_dir = root / "competitions" / "rsna_knee" / "notebooks" / exp_id
     (kernel_dir / "output").mkdir(parents=True)
     header = ",".join([comp.id_column, *comp.labels])
+    rows = [
+        f"s{i}," + ",".join([str(0.5 + (i % 2) * 0.1)] * len(comp.labels))
+        for i in range(1000)
+    ]
     (kernel_dir / "output" / "submission.csv").write_text(
-        header + "\ns1," + ",".join(["0.5"] * len(comp.labels)) + "\n",
-        encoding="utf-8",
+        header + "\n" + "\n".join(rows) + "\n", encoding="utf-8"
     )
     return kernel_dir
 

@@ -77,6 +77,26 @@ def test_validate_rejects_constant_kernel_output(tmp_path: Path):
     assert any("constant" in error for error in r.errors)
 
 
+def test_validate_rejects_output_shorter_than_required_minimum(tmp_path: Path):
+    path = write_constant_submission(
+        tmp_path / "short.csv",
+        ["s1", "s2", "s3"],
+        id_column="StudyInstanceUID",
+        labels=LABELS,
+        value=0.5,
+    )
+
+    r = validate_submission_csv(
+        path,
+        id_column="StudyInstanceUID",
+        labels=LABELS,
+        require_min_rows=1000,
+    )
+
+    assert not r.ok
+    assert any("1000" in error for error in r.errors)
+
+
 def test_run_local_smoke(tmp_path: Path):
     out = run_local_smoke(
         study_ids=["a", "b", "c"],

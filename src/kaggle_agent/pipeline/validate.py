@@ -29,6 +29,7 @@ def validate_submission_csv(
     id_column: str,
     labels: list[str],
     require_rows: bool = True,
+    require_min_rows: int | None = None,
     require_prediction_variation: bool = False,
 ) -> ValidationResult:
     result = ValidationResult(ok=True, path=path)
@@ -67,6 +68,8 @@ def validate_submission_csv(
         result.n_rows = n
         if require_rows and n == 0:
             result.fail("no data rows")
+        if require_min_rows is not None and n < require_min_rows:
+            result.fail(f"only {n} data rows; require at least {require_min_rows}")
         if require_prediction_variation and n > 1 and len(set(prediction_values)) < 2:
             result.fail("prediction output is constant across all labels and rows")
 

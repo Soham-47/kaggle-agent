@@ -27,6 +27,7 @@ labels:
 
 submission:
   id_column: StudyInstanceUID
+  min_rows: 1000
   # Header must match sample_submission.csv exactly (including Baker's apostrophe)
   probability_columns:
     - ACL
