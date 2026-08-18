@@ -10,6 +10,7 @@ from kaggle_agent.heal.pins import (
     is_pin_error,
     sanitize_datasets,
     sanitize_models,
+    sanitize_methods_payload,
 )
 
 
@@ -28,6 +29,18 @@ def test_sanitize_drops_junk_keeps_full_pin():
         ["dataset/model", "wguesdon/rsna-knee-llm-report-labels-opus", "metaresearch/dinov2"]
     )
     assert datasets == ["sohamgawd47foden/rsna-knee-dinov2-vits14"]
+
+
+def test_sanitize_methods_deduplicates_steps():
+    payload = sanitize_methods_payload(
+        {"implement_steps": ["same step", "same step", "bad Our score=0.5"]}
+    )
+    assert payload["implement_steps"] == ["same step"]
+
+
+def test_sanitize_methods_wraps_string_step():
+    payload = sanitize_methods_payload({"implement_steps": "one step"})
+    assert payload["implement_steps"] == ["one step"]
 
 
 def test_should_not_wait_approve_when_already_approved_or_pin_error():

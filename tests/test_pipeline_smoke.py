@@ -101,3 +101,32 @@ def test_competition_smoke_and_workspace():
     assert outcome.ok
     assert outcome.smoke and outcome.smoke.submission_path
     assert outcome.smoke.submission_path.is_file()
+
+
+def test_competition_smoke_reports_cv_auc(tmp_path: Path, monkeypatch):
+    import shutil
+
+    from kaggle_agent.paths import repo_root
+
+    root = tmp_path / "kaggle-agent"
+    workspace = root / "competitions" / "rsna_knee"
+    shutil.copytree(
+        repo_root() / "competitions" / "rsna_knee" / "pipeline",
+        workspace / "pipeline",
+    )
+    data = root / "data"
+    data.mkdir(parents=True)
+    (data / "sample_submission.csv").write_text(
+        "StudyInstanceUID," + ",".join(LABELS) + "\ns1," + ",".join(["0.5"] * 12) + "\n",
+        encoding="utf-8",
+    )
+    (data / "train.csv").write_text("train\n", encoding="utf-8")
+    (data / "train_series.csv").write_text("series\n", encoding="utf-8")
+    monkeypatch.setattr(
+        "kaggle_agent.pipeline.cv.evaluate_ranker_cv",
+        lambda *args, **kwargs: {"macro_auc": 0.5312, "n_studies": 10, "folds": 5},
+    )
+    comp = load_competition("rsna_knee", repo_root())
+    outcome = run_competition_smoke(comp, root=root, exp_id="cv-smoke")
+    assert outcome.ok
+    assert outcome.cv_auc == 0.5312

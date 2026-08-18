@@ -138,9 +138,33 @@ def step_is_junk(step: str) -> bool:
     low = (step or "").lower()
     if "dataset/model" in low:
         return True
+    if "source unavailable" in low:
+        return True
     if re.search(r"attach datasets \['dataset/", low):
         return True
     return False
+
+
+def _slice_words(text: str, limit: int) -> str:
+    if len(text) <= limit:
+        return text.strip()
+    return text[:limit].rsplit(" ", 1)[0].strip()
+
+
+def dedupe_steps(steps: list[str]) -> list[str]:
+    """Keep unique, usable implementation steps in source order."""
+    out: list[str] = []
+    seen: set[str] = set()
+    for step in steps:
+        raw = str(step).strip()
+        if not raw or step_is_junk(raw) or re.search(r"our score\s*=", raw, re.I):
+            continue
+        key = re.sub(r"\W+", " ", raw.lower()).strip()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(raw)
+    return out
 
 
 _STOP_TOKENS = frozenset(
@@ -213,7 +237,7 @@ def card_from_notebook(row: KernelRow, notebook_text: str, our_score: str) -> st
             "- CV: prefer grouped splits (report or site); avoid random folds",
             "- inference: discover hidden test IDs from study folders, not only sample test.csv",
             f"- infer_hints: {', '.join(hints) or 'none'}",
-            f"- copyable next step: {next_step} Our score={our_score}.",
+            f"- copyable next step: {next_step}",
             "- do not copy: H-flip on laterality labels; probability-mean ensembles; P100 if host forbids it.",
             "",
             f"votes: {row.total_votes}",
@@ -240,7 +264,8 @@ def card_from_source_llm(
         f"our_public_best: {our_score}\n\n"
         "Return JSON with keys: claimed_public, backbone, labels, cv, inference, "
         "copyable_next_step, do_not_copy, dataset_sources (list), model_sources (list).\n"
-        "copyable_next_step is one kernel change we can ship. "
+        "copyable_next_step is one kernel change we can ship. It must state the "
+        "exact model, input resolution, loss, epochs, fold scheme, and weight pin. "
         "model_sources must be full pins or [].\n\n"
         f"<source>\n{source_text[:18000]}\n</source>"
     )
@@ -263,7 +288,7 @@ def card_from_source_llm(
             f"- labels: {parsed.get('labels') or 'see source'}",
             f"- CV: {parsed.get('cv') or 'prefer grouped splits'}",
             f"- inference: {parsed.get('inference') or 'discover hidden test IDs from study folders'}",
-            f"- copyable next step: {step} Our score={our_score}.",
+            f"- copyable next step: {step}",
             f"- do not copy: {parsed.get('do_not_copy') or 'H-flip; probability-mean; P100 if forbidden.'}",
             "",
             f"kind: {kind}",
@@ -303,7 +328,7 @@ def merge_digest(cards: list[Path], research_md: Path, our_score: str) -> None:
         url = f"https://www.kaggle.com/code/{ref}" if "/" in ref and "http" not in ref else ref
         lines.append(f"- source: {url} — {title}; public {score_m.group(1) if score_m else '?'}")
         if step_m:
-            lines.append(f"  next: {step_m.group(1)[:240]}")
+            lines.append(f"  next: {_slice_words(step_m.group(1), 240)}")
         lines.append("")
     merge_section_into_research_md(research_md, METHOD_CARDS_HEADING, "\n".join(lines))
 
@@ -331,7 +356,7 @@ def write_methods_sidecar(cards: list[Path], workspace: Path) -> Path:
                 hints.append(h)
         step_m = re.search(r"- copyable next step:\s*(.+)", text)
         if step_m:
-            raw_step = step_m.group(1).strip()[:240]
+            raw_step = _slice_words(step_m.group(1).strip(), 240)
             if not step_is_junk(raw_step):
                 steps.append(raw_step)
     from kaggle_agent.heal.pins import sanitize_methods_payload
@@ -341,7 +366,7 @@ def write_methods_sidecar(cards: list[Path], workspace: Path) -> Path:
             "dataset_sources": datasets[:6],
             "model_sources": models[:3],
             "infer_hints": hints,
-            "implement_steps": steps[:6],
+            "implement_steps": dedupe_steps(steps)[:6],
             "n_cards": len(cards),
         }
     )
@@ -558,8 +583,7 @@ def _write_url_card(
             "- labels: see source\n"
             "- CV: prefer grouped splits (report or site); avoid random folds\n"
             "- inference: discover hidden test IDs from study folders, not only sample test.csv\n"
-            f"- copyable next step: Read {url} and copy one implementable kernel change. "
-            f"Our score={our_score}.\n"
+            "- copyable next step: source unavailable; no implementation step.\n"
             "- do not copy: H-flip; probability-mean ensembles; P100 if host forbids it.\n"
         )
     path = dest / f"source-{kind}-{_slug(title)}.md"

@@ -75,3 +75,13 @@ def test_scored_experiments_preferred(tmp_path):
     (exp / "new.md").write_text("- public_score: none\n", encoding="utf-8")
     pack = build_context_pack(tmp_path, view="plan", last_experiments=1)
     assert "experiments/old.md" in pack.sections
+
+
+def test_competition_memory_records_ground_truth():
+    from kaggle_agent.paths import repo_root
+
+    text = (repo_root() / "memory" / "COMPETITION.md").read_text(encoding="utf-8")
+    assert "## Ground truth" in text
+    assert "58" in text
+    assert "reports" in text
+    assert "metadata ranker" in text

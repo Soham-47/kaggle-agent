@@ -149,6 +149,17 @@ def test_code_done_rejected_until_brief(tmp_path: Path):
     assert "rank-mean" in brief.read_text(encoding="utf-8")
 
 
+def test_default_code_brief_names_method_details(tmp_path: Path):
+    from kaggle_agent.agents.code import DEFAULT_BRIEF, build_code_tools
+
+    workspace = tmp_path / "workspace"
+    (workspace / "pipeline").mkdir(parents=True)
+    tools, path, _ = build_code_tools(tmp_path, workspace)
+    tools["write_brief"]()
+    assert path.read_text(encoding="utf-8") == DEFAULT_BRIEF
+    assert all(word in DEFAULT_BRIEF for word in ("model", "loss", "epochs", "fold"))
+
+
 def test_loop_stalls_again_after_write(tmp_path: Path):
     brief = tmp_path / "code_brief.md"
     zen = _ScriptedZen(

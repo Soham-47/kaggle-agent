@@ -132,7 +132,32 @@ def test_card_lists_copyable_step():
     row = KernelRow(ref="user/nb", title="Winner 0.89", url="https://www.kaggle.com/code/user/nb")
     card = card_from_notebook(row, "use dinov2 and rank-mean", "0.50")
     assert "copyable next step" in card
-    assert "0.50" in card
+    assert "Our score=" not in card
+
+
+def test_dedupe_steps_removes_scores_and_duplicates():
+    from kaggle_agent.research.source_cards import dedupe_steps
+
+    steps = [
+        "Train a head on soft labels with BCE loss.",
+        "Train a head on soft labels with BCE loss.",
+        "Train another head. Our score=0.526.",
+        "attach datasets ['dataset/model']",
+    ]
+    assert dedupe_steps(steps) == ["Train a head on soft labels with BCE loss."]
+
+
+def test_copyable_step_is_not_cut_mid_word(tmp_path: Path):
+    from kaggle_agent.research.source_cards import _slice_words, write_methods_sidecar
+
+    text = "word " * 100
+    assert not _slice_words(text, 240).endswith("wor")
+    card = tmp_path / "source-a.md"
+    card.write_text(f"# A\n- copyable next step: {text}\n", encoding="utf-8")
+    import json
+
+    methods = json.loads(write_methods_sidecar([card], tmp_path).read_text())
+    assert not methods["implement_steps"][0].endswith("wor")
 
 
 def test_write_methods_sidecar_no_forced_dino(tmp_path: Path):

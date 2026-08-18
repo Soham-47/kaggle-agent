@@ -1,22 +1,17 @@
 {
-  "dataset_sources": [
-    "pilkwang/rsna-knee-llm-labels",
-    "pilkwang/rsna-knee-weights",
-    "pilkwang/pilkwang-public-dataset-for-notebooks-figures"
-  ],
-  "model_sources": [
-    "metaresearch/dinov2/PyTorch/small/1"
-  ],
+  "dataset_sources": [],
+  "model_sources": [],
   "infer_hints": [
     "discover_test_ids_from_folders",
-    "rank_mean_ensemble",
     "train_on_report_or_llm_labels",
-    "grouped_cv"
+    "grouped_cv",
+    "rank_mean_ensemble"
   ],
   "implement_steps": [
-    "Attach pilkwang/rsna-knee-llm-labels and train heads on those columns; regex only when a study is missing.",
-    "Attach pilkwang/rsna-knee-weights; rank-average any prediction CSVs; do not probability-mean.",
-    "Discover hidden test IDs from study folders, not only the public test.csv."
+    "Discover hidden test IDs from study folders, not only public test.csv.",
+    "Use the report extractor for missing targets and retain official labels when present.",
+    "Evaluate metadata features with grouped study-level cross-validation before kernel training.",
+    "Rank-average model members instead of probability-averaging them."
   ],
-  "n_cards": 6
+  "n_cards": 4
 }

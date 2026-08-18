@@ -72,6 +72,13 @@ def sanitize_methods_payload(data: dict[str, Any]) -> dict[str, Any]:
     cleaned = dict(data)
     cleaned["dataset_sources"] = sanitize_datasets(list(data.get("dataset_sources") or []))
     cleaned["model_sources"] = sanitize_models(list(data.get("model_sources") or []))
+    if cleaned.get("implement_steps"):
+        from kaggle_agent.research.source_cards import dedupe_steps
+
+        raw_steps = cleaned["implement_steps"]
+        if isinstance(raw_steps, str):
+            raw_steps = [raw_steps]
+        cleaned["implement_steps"] = dedupe_steps(list(raw_steps))
     return cleaned
 
 

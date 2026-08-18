@@ -48,6 +48,22 @@ def test_record_verdict_streaks_identical_verdicts():
     assert st["last_reason"] == "b"
 
 
+def test_kernel_judge_reports_constant_output(tmp_path: Path):
+    path = tmp_path / "submission.csv"
+    path.write_text(
+        "StudyInstanceUID,ACL,MCL\ns1,0.5,0.5\ns2,0.5,0.5\n",
+        encoding="utf-8",
+    )
+    ready, reason = judge_kernel(
+        "complete",
+        ValidationResult(ok=True, path=path, n_rows=2),
+        labels=["ACL", "MCL"],
+        csv_path=path,
+    )
+    assert ready is True
+    assert "constant=True" in reason
+
+
 def test_judge_stage_deterministic_pass_then_llm():
     st = _state()
     lines: list[str] = []

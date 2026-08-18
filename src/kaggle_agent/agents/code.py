@@ -41,6 +41,12 @@ ALLOWED_READ = frozenset(
     }
 )
 
+DEFAULT_BRIEF = (
+    "Implement the plan steps in the kernel recipe. State the exact model, "
+    "input resolution, loss, epochs, and fold scheme. Attach listed datasets; "
+    "discover test dirs; rank-mean members."
+)
+
 CODE_TOOL_SCHEMAS: dict[str, dict[str, Any]] = {
     "read_cards": {
         "description": "Read the latest method cards (research-deep digest) for copyable steps."
@@ -68,6 +74,7 @@ CODE_TOOL_SCHEMAS: dict[str, dict[str, Any]] = {
     },
     "write_brief": {
         "description": "Write the code brief the kernel builder follows. Default: "
+        "state the model, input resolution, loss, epochs, and fold scheme; "
         "attach listed datasets; discover test dirs; rank-mean.",
         "properties": {
             "text": {
@@ -414,7 +421,7 @@ def build_code_tools(
     def write_brief(text: str = "", **_: Any) -> str:
         brief_path.parent.mkdir(parents=True, exist_ok=True)
         brief_path.write_text(
-            text or "attach listed datasets; discover test dirs; rank-mean",
+            text or DEFAULT_BRIEF,
             encoding="utf-8",
         )
         return str(brief_path)
@@ -432,6 +439,9 @@ def build_code_tools(
             _as_list(implement_steps),
             _as_list(infer_hints),
         )
+        from kaggle_agent.research.source_cards import dedupe_steps
+
+        steps = dedupe_steps(steps)
         ok, err = methods_payload_ok(ds, ms, steps)
         if not ok:
             return f"rejected: {err}"

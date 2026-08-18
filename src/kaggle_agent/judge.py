@@ -135,14 +135,21 @@ def judge_plan(
 
 
 def _kernel_deterministic(
-    job_status: str, csv_check: ValidationResult
+    job_status: str,
+    csv_check: ValidationResult,
+    *,
+    labels: list[str] | None = None,
+    csv_path: Path | None = None,
 ) -> tuple[bool, str]:
     st = (job_status or "").lower().replace(" ", "")
     if st in _JUNK_STATUSES:
         return False, f"job status {st}"
     if not csv_check.ok:
         return False, "; ".join(csv_check.errors[:3])
-    return True, f"job {st or 'none'} rows={csv_check.n_rows}"
+    reason = f"job {st or 'none'} rows={csv_check.n_rows}"
+    if labels is not None and csv_path is not None and csv_path.is_file():
+        reason += f" stats={_csv_stats(csv_path, labels)}"
+    return True, reason
 
 
 def judge_kernel(
@@ -151,12 +158,16 @@ def judge_kernel(
     *,
     state: dict[str, Any] | None = None,
     log: Callable[[str], None] | None = None,
+    labels: list[str] | None = None,
+    csv_path: Path | None = None,
 ) -> tuple[bool, str]:
     """CODE kernel judge: job log sanity + output CSV sanity (mechanical)."""
     return judge_stage(
         "kernel",
         state=state if state is not None else new_judge_state(),
-        deterministic=lambda: _kernel_deterministic(job_status, csv_check),
+        deterministic=lambda: _kernel_deterministic(
+            job_status, csv_check, labels=labels, csv_path=csv_path
+        ),
         log=log,
     )
 
@@ -164,31 +175,36 @@ def judge_kernel(
 def _csv_stats(path: Path, labels: list[str]) -> str:
     cols = {lab: [] for lab in labels}
     rows = 0
+    invalid = 0
     try:
         with path.open(newline="", encoding="utf-8") as f:
             for row in csv.DictReader(f):
                 rows += 1
                 for lab in labels:
                     try:
-                        cols[lab].append(float(row.get(lab, "")))
+                        value = float(row.get(lab, ""))
                     except (TypeError, ValueError):
-                        pass
+                        invalid += 1
+                    else:
+                        if math.isfinite(value):
+                            cols[lab].append(value)
+                        else:
+                            invalid += 1
     except Exception:  # noqa: BLE001
         return "rows=0"
     if rows == 0:
         return "rows=0"
-    finite = [[x for x in v if not math.isnan(x)] for v in cols.values()]
-    nans = sum(len(v) - len(f) for v, f in zip(cols.values(), finite))
+    finite = list(cols.values())
     means = [sum(f) / len(f) if f else 0.0 for f in finite]
     constant = any(
-        v and (not f or (len(f) == len(v) and all(x == f[0] for x in f)))
+        not f or all(x == f[0] for x in f)
         for v, f in zip(cols.values(), finite)
     )
     mean = sum(means) / len(means) if means else 0.0
     low = min(means) if means else 0.0
     high = max(means) if means else 0.0
     return (
-        f"rows={rows} nan={nans} mean={mean:.3f} "
+        f"rows={rows} nan={invalid} mean={mean:.3f} "
         f"min={low:.3f} max={high:.3f} constant={constant}"
     )
 

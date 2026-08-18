@@ -1373,6 +1373,19 @@ class Orchestrator:
             append_daily_log(f"smoke failed: {outcome.errors}", self.root)
             return state
 
+        if result.experiment_id:
+            patch_experiment(
+                result.experiment_id,
+                cv_auc=(f"{outcome.cv_auc:.4f}" if outcome.cv_auc is not None else None),
+                local_smoke="ok",
+                root=self.root,
+            )
+        if outcome.cv_auc is not None:
+            append_daily_log(
+                f"cv_auc={outcome.cv_auc:.4f} exp={result.experiment_id or 'unknown'}",
+                self.root,
+            )
+
         n = outcome.smoke.n_studies if outcome.smoke else 0
         append_daily_log(
             f"smoke ok path={result.smoke_path} n={n} info={info or 'none'}",
@@ -1556,7 +1569,14 @@ class Orchestrator:
             def judge_log(msg: str) -> None:
                 append_daily_log(msg, self.root)
 
-            ready, _reason = judge_kernel(job.status, check, state=kernel_judge, log=judge_log)
+            ready, _reason = judge_kernel(
+                job.status,
+                check,
+                state=kernel_judge,
+                log=judge_log,
+                labels=self.competition.labels,
+                csv_path=kernel_csv,
+            )
             result.kernel_judge_ok = ready
             if ready and self.settings.judge_train:
                 zen = self.router.client if self.router is not None else None

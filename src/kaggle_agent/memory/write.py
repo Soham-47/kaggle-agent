@@ -61,6 +61,8 @@ def patch_experiment(
     submission: str | None = None,
     kernel: str | None = None,
     judge: str | None = None,
+    cv_auc: str | None = None,
+    local_smoke: str | None = None,
 ) -> Path | None:
     path = memory_dir(root) / "experiments" / f"{exp_id}.md"
     if not path.is_file():
@@ -70,6 +72,8 @@ def patch_experiment(
         "public_score": public_score,
         "submission": submission,
         "kernel": kernel,
+        "cv_auc": cv_auc,
+        "local_smoke": local_smoke,
     }
     lines = []
     saw_judge = False
