@@ -1499,7 +1499,13 @@ class Orchestrator:
         return state
 
     def _validate_sub(self, state: AgentState, result: CycleResult) -> AgentState:
-        """Validate best local candidate CSV (kernel output preferred, else smoke)."""
+        """Validate a candidate CSV, but block live fallback to smoke output."""
+        if not result.dry_run and result.kernel_ok is not True:
+            result.validate_ok = False
+            result.errors.append("validate: live submission requires a successful kernel")
+            append_daily_log("validate: blocked because live kernel failed", self.root)
+            return state
+
         candidates: list[Path] = []
         if result.kernel_path:
             candidates.append(Path(result.kernel_path) / "output" / "submission.csv")

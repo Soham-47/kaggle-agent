@@ -131,6 +131,26 @@ def _daily_text(root: Path) -> str:
     )
 
 
+def test_live_validation_blocks_smoke_after_kernel_failure(tmp_path: Path):
+    from kaggle_agent.orchestrator import CycleResult
+
+    root = tmp_path / "kaggle-agent"
+    real = Path(__file__).resolve().parents[1]
+    _copy_min(root, real)
+    orchestrator = _judge_orch(root)
+    result = CycleResult(
+        competition="rsna-knee-abnormality-detection",
+        dry_run=False,
+        experiment_id="exp-1",
+        kernel_ok=False,
+        smoke_path=str(root / "smoke.csv"),
+    )
+    orchestrator._validate_sub(load_state(root), result)
+    assert result.validate_ok is False
+    assert result.candidate_csv is None
+    assert "successful kernel" in result.errors[-1]
+
+
 def test_validate_sub_kernel_judge_patches_experiment(tmp_path: Path):
     from kaggle_agent.config import load_competition
     from kaggle_agent.orchestrator import CycleResult
