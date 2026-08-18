@@ -11,11 +11,22 @@ def successful_kernel_train(root: Path):
     """Return a kernel-stage stub with a validated candidate artifact."""
     def run(orchestrator, _state, _dry, result):
         source = next((root / "competitions").glob("**/submissions/*.csv"))
+        kernel_path = source.parent / "successful-kernel"
+        output = kernel_path / "output"
+        output.mkdir(parents=True, exist_ok=True)
+        header = source.read_text(encoding="utf-8").splitlines()[0]
+        columns = len(header.split(","))
+        rows = "\n".join(
+            f"study-{i}," + ",".join([str(0.5 + (i % 2) * 0.1)] * (columns - 1))
+            for i in range(1000)
+        )
+        submission = output / "submission.csv"
+        submission.write_text(header + "\n" + rows + "\n", encoding="utf-8")
         result.kernel_ok = True
         result.kernel_ref = "tester/fake-kernel"
         result.kernel_version = 1
-        result.kernel_path = str(source.parent)
-        result.candidate_csv = str(source)
+        result.kernel_path = str(kernel_path)
+        result.candidate_csv = str(submission)
         return orchestrator._sa.load_state()
 
     return run
