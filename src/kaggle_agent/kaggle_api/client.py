@@ -303,6 +303,7 @@ class KaggleClient:
         mode: str = "file",
         kernel_folder: Path | None = None,
         kernel_ref: str | None = None,
+        kernel_version: int | None = None,
         output_file: str = "submission.csv",
         poll_seconds: int = 30,
         poll_attempts: int = 40,
@@ -327,6 +328,7 @@ class KaggleClient:
                     message=message,
                     kernel_folder=Path(kernel_folder or "."),
                     kernel_ref=kernel_ref,
+                    kernel_version=kernel_version,
                     output_file=output_file,
                     status_fn=self.kernels_status,
                     poll_seconds=poll_seconds,
@@ -366,6 +368,13 @@ class KaggleClient:
         except Exception as exc:  # noqa: BLE001
             raise KaggleApiError(f"kernels_push failed: {exc}") from exc
         return _s(resp, "message", "ref", "errorMessage", default=str(resp))
+
+    def kernels_push_result(self, folder: Path | str) -> Any:
+        """Push a kernel and preserve the API response, including its version."""
+        try:
+            return _retry_network(lambda: self.api.kernels_push(str(folder)))
+        except Exception as exc:  # noqa: BLE001
+            raise KaggleApiError(f"kernels_push failed: {exc}") from exc
 
     def kernels_status(self, kernel_ref: str) -> str:
         """Return status string e.g. COMPLETE / RUNNING.

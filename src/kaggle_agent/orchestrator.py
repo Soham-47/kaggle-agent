@@ -148,6 +148,7 @@ class CycleResult:
     kernel_duplicate: bool = False
     output_duplicate: bool = False
     kernel_ref: str | None = None
+    kernel_version: int | None = None
     kernel_path: str | None = None
     kernel_judge_ok: bool | None = None
     validate_ok: bool | None = None
@@ -1483,6 +1484,7 @@ class Orchestrator:
 
             result.kernel_ok = run.ok
             result.kernel_resumed = run.resumed
+            result.kernel_version = run.kernel_version
             if run.kernel_ref and run.kernel_ref != "none":
                 result.kernel_ref = run.kernel_ref
             if not run.ok:
@@ -1944,6 +1946,7 @@ class Orchestrator:
                             mode=mode,
                             kernel_folder=kernel_folder,
                             kernel_ref=kernel_ref,
+                            kernel_version=result.kernel_version,
                             output_file=self.competition.submit_output_file,
                             poll_seconds=30 if nb else 15,
                             poll_attempts=(

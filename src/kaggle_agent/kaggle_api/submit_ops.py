@@ -154,6 +154,7 @@ def submit_notebook(
     message: str,
     kernel_folder: Path,
     kernel_ref: str | None,
+    kernel_version: int | None = None,
     output_file: str,
     status_fn: Callable[[str], str],
     poll_seconds: int = 45,
@@ -176,7 +177,11 @@ def submit_notebook(
             dry_run=False, message=f"kernel folder missing: {kernel_folder}", success=False
         )
 
-    variant, ref, err, version, _ = _submit_variant_folder(api, kernel_folder, kernel_ref or "")
+    meta = _read_meta(kernel_folder)
+    if meta and meta.get("enable_internet") is False and kernel_version is not None:
+        variant, ref, err, version = kernel_folder, normalize_kernel_ref(kernel_ref), "", kernel_version
+    else:
+        variant, ref, err, version, _ = _submit_variant_folder(api, kernel_folder, kernel_ref or "")
     if err and err not in {"none", "None", ""}:
         return SubmitResult(dry_run=False, message=f"kernels_push error: {err}", success=False)
     if not ref:

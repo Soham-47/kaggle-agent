@@ -39,6 +39,20 @@ class KernelRunResult:
     output_files: list[str] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
     kernel_ref: str = "none"
+    kernel_version: int | None = None
+
+
+def _push_result(client: KaggleClient, folder: Path):
+    method = getattr(client, "kernels_push_result", None)
+    return method(folder) if method is not None else client.kernels_push(folder)
+
+
+def _push_version(response) -> int | None:
+    value = getattr(response, "version_number", None) or getattr(response, "versionNumber", None)
+    try:
+        return int(value) if value is not None else None
+    except (TypeError, ValueError):
+        return None
 
 
 def run_kernel_phase(
@@ -110,7 +124,7 @@ def run_kernel_phase(
                 )
                 return result
             try:
-                push_resp = client.kernels_push(package.folder)
+                push_resp = _push_result(client, package.folder)
             except Exception as exc2:  # noqa: BLE001
                 from kaggle_agent.heal.pins import apply_pin_heal, is_pin_error
                 from kaggle_agent.heal.submit_errors import is_409_title_conflict
@@ -119,12 +133,12 @@ def run_kernel_phase(
                 if is_pin_error(err_str) and root is not None:
                     workspace = package.folder.parent.parent
                     apply_pin_heal(workspace, package.folder)
-                    push_resp = client.kernels_push(package.folder)
+                    push_resp = _push_result(client, package.folder)
                 elif is_409_title_conflict(err_str):
                     from kaggle_agent.kaggle_api.submit_ops import _fix_metadata_owner
 
                     _fix_metadata_owner(client.api, package.folder)
-                    push_resp = client.kernels_push(package.folder)
+                    push_resp = _push_result(client, package.folder)
                 else:
                     raise
             if root is not None:
@@ -134,6 +148,7 @@ def run_kernel_phase(
         result.errors.append(f"push: {exc}")
         return result
     result.pushed = True
+    result.kernel_version = _push_version(push_resp)
     result.status = "pushed"
     result.message = str(push_resp)[:300]
     job = KernelJob(
