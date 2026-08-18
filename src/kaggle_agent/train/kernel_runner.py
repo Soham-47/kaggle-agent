@@ -28,6 +28,22 @@ from kaggle_agent.train.kernel_history import (
 from kaggle_agent.train.notebook_builder import KernelPackage
 
 
+def _browser_traceback(kernel_ref: str) -> str:
+    """Return a short traceback from the Kaggle page, or an empty string."""
+    try:
+        from kaggle_agent.research.browser import fetch_via_browser_harness
+
+        text = fetch_via_browser_harness(f"https://www.kaggle.com/code/{kernel_ref}")
+    except Exception:  # noqa: BLE001
+        return ""
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    markers = ("traceback (most recent call last):", "error:", "exception:")
+    for index, line in enumerate(lines):
+        if line.lower() in markers or "traceback (most recent call last):" in line.lower():
+            return "\n".join(lines[index : index + 8])[:1200]
+    return ""
+
+
 @dataclass
 class KernelRunResult:
     ok: bool
@@ -355,7 +371,11 @@ def _poll_and_maybe_pull(
                 return result
         else:
             result.ok = False
-            result.errors.append(f"kernel error: {fail or result.status}")
+            diagnosis = _browser_traceback(kernel_ref)
+            detail = fail or result.status
+            if diagnosis:
+                detail = f"{detail}\ntraceback:\n{diagnosis}"
+            result.errors.append(f"kernel error: {detail}")
             clear_kernel_job(root)
             return result
 
