@@ -60,6 +60,15 @@ def test_late_arrival_waits_for_its_step():
     assert b.step(3) == [rid]
 
 
+def test_single_token_request_at_exact_step_time():
+    b = SimContinuousBatcher(2, 10, 1)
+    rid = b.submit(5.0, 1)
+    assert b.step(5) == [rid]
+    stats = b.stats()
+    assert stats["mean_ttft"] == pytest.approx(0.0)
+    assert stats["mean_throughput_tok_per_s"] > 0.0
+
+
 def test_stats_empty_run_is_all_zero():
     b = SimContinuousBatcher(2, 10, 1)
     b.submit(0.0, 3)

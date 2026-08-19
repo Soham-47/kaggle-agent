@@ -10,6 +10,7 @@ when every check passes.
 """
 
 import argparse
+import os
 import re
 import subprocess
 import sys
@@ -72,7 +73,12 @@ def validate_day(day_dir, smoke: bool = True, run_lesson: bool = True):
             cmd.append("--smoke")
         try:
             proc = subprocess.run(
-                cmd, cwd=str(day_dir), capture_output=True, text=True, timeout=LESSON_TIMEOUT_S
+                cmd,
+                cwd=str(day_dir),
+                capture_output=True,
+                text=True,
+                timeout=LESSON_TIMEOUT_S,
+                env={**os.environ, "PYTHONPATH": str(COURSE_ROOT)},
             )
         except subprocess.TimeoutExpired:
             ok = False

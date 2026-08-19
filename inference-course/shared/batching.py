@@ -90,5 +90,5 @@ class SimContinuousBatcher:
         return {
             "ttft": tokens[0] - req["arrival"],
             "tbt": tbt,
-            "throughput": req["gen_len"] / (tokens[-1] - req["arrival"]),
+            "throughput": req["gen_len"] / max(tokens[-1] - req["arrival"], 1e-9),
         }

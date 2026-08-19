@@ -52,7 +52,7 @@ def test_fixture_day_passes_in_smoke_mode(tmp_path):
     assert any(line == "[ok] files: 4 required files present" for line in report)
     assert any("[ok] readme sections:" in line for line in report)
     assert any(line == "[ok] lesson: exited 0" for line in report)
-    assert any(line == "[output] mode=smoke ttft_ms=12.5" for line in report)
+    assert any(line.startswith("[output] mode=smoke ttft_ms=12.5 device=") for line in report)
 
 
 def test_fixture_day_contract_only_when_not_running_lesson(tmp_path):
