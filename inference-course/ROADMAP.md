@@ -26,16 +26,16 @@ sources/sources.md) but all prose is original.
 
 | Done | Day | Topic | Sources |
 |------|-----|-------|---------|
-| - [ ] | 001 | What inference is; the runtime/infrastructure/tooling layers | Virk |
-| - [ ] | 002 | Latency, throughput, quality tradeoffs | Virk |
-| - [ ] | 003 | Metrics: TTFT, TPS, ITL; percentiles vs means | Virk |
-| - [ ] | 004 | Requirements: interface, latency budget, unit economics, usage pattern | Virk |
-| - [ ] | 005 | Model selection and evals; shared vs dedicated | Virk |
-| - [ ] | 006 | Tokenization and chat templates | aman |
-| - [ ] | 007 | Prefill vs decode; the autoregressive loop | Virk, Modular |
-| - [ ] | 008 | Sampling: temperature, top-k, top-p, logit bias | aman |
-| - [ ] | 009 | The roofline model; compute-bound vs memory-bound | Virk |
-| - [ ] | 010 | Arithmetic intensity; why decode is memory-bound | Virk |
+| - [x] | 001 | What inference is; the runtime/infrastructure/tooling layers | Virk |
+| - [x] | 002 | Latency, throughput, quality tradeoffs | Virk |
+| - [x] | 003 | Metrics: TTFT, TPS, ITL; percentiles vs means | Virk |
+| - [x] | 004 | Requirements: interface, latency budget, unit economics, usage pattern | Virk |
+| - [x] | 005 | Model selection and evals; shared vs dedicated | Virk |
+| - [x] | 006 | Tokenization and chat templates | aman |
+| - [x] | 007 | Prefill vs decode; the autoregressive loop | Virk, Modular |
+| - [x] | 008 | Sampling: temperature, top-k, top-p, logit bias | aman |
+| - [x] | 009 | The roofline model; compute-bound vs memory-bound | Virk |
+| - [x] | 010 | Arithmetic intensity; why decode is memory-bound | Virk |
 
 ## Phase 2 — Transformer execution and KV cache (days 11-20)
 

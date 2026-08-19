@@ -18,8 +18,13 @@ def test_roadmap_has_exactly_100_rows():
     assert len(_rows()) == 100
 
 
-def test_all_rows_unchecked():
-    assert all(match.group(1) == " " for match in _rows())
+def test_checked_rows_have_day_folders():
+    days_dir = ROADMAP.parent / "days"
+    for match in _rows():
+        if match.group(1) == "x":
+            assert (days_dir / f"day-{match.group(2)}").is_dir(), (
+                f"row {match.group(2)} is checked but has no day folder"
+            )
 
 
 def test_day_numbers_are_001_to_100_in_order():
