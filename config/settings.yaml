@@ -1,7 +1,7 @@
 # Global agent settings (no secrets — use env vars)
 
 repo_name: kaggle-agent
-default_competition: rsna_knee
+default_competition: null
 
 supervisor:
   enabled: false
@@ -44,50 +44,6 @@ deepseek:
   default_code_model: deepseek-v4-flash
   default_distill_model: deepseek-v4-flash
   default_vision_model: deepseek-v4-flash
-
-# Legacy reference block; not selected by production runtime.
-agentrouter:
-  base_url: https://agentrouter.org/v1
-  timeout_s: 90
-  default_plan_model: glm-5.2
-  default_code_model: glm-5.2
-  default_distill_model: gpt-5.5
-  default_vision_model: gpt-5.5
-
-# Legacy reference block; not selected by production runtime.
-nvidia:
-  base_url: https://integrate.api.nvidia.com/v1
-  default_plan_model: deepseek-ai/deepseek-v4-flash-0731
-  default_code_model: deepseek-ai/deepseek-v4-flash-0731
-  default_distill_model: nvidia/nemotron-3-nano-30b-a3b
-  default_vision_model: nvidia/nemotron-3-nano-30b-a3b
-
-# Legacy reference block; not selected by production runtime.
-hetznez:
-  base_url: ""
-  timeout_s: 90
-  default_plan_model: deepseek-ai/deepseek-v4-flash-0731
-  default_code_model: deepseek-ai/deepseek-v4-flash-0731
-  default_distill_model: deepseek-ai/deepseek-v4-flash-0731
-  default_vision_model: deepseek-ai/deepseek-v4-flash-0731
-
-zen:
-  base_url: https://opencode.ai/zen/v1
-  timeout_s: 180
-  # Legacy reference only; production does not select this block.
-  # Explicit compatibility tests may use these OpenAI-compatible ids.
-  default_plan_model: deepseek-v4-flash-free
-  default_code_model: deepseek-v4-flash-free
-  default_distill_model: nemotron-3.5-lightning-free
-  default_vision_model: big-pickle
-  # Rotate on 429 / 504 / timeout. Still Zen free only.
-  free_models:
-    - deepseek-v4-flash-free
-    - nemotron-3.5-lightning-free
-    - big-pickle
-    - mimo-v2.5-free
-    - hy3-free
-    - laguna-s-2.1-free
 
 code_agent:
   # Shell command template; {prompt_file} is filled at runtime

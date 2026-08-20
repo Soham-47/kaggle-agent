@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from kaggle_agent.code.workspace import ensure_pipeline_ready
-from kaggle_agent.config import CompetitionConfig, Settings, load_competition, load_settings
+from kaggle_agent.config import ConfigError, CompetitionConfig, Settings, load_competition, load_settings
 from kaggle_agent.kaggle_api import KaggleClient
 from kaggle_agent.kaggle_api.models import SubmissionRow
 from kaggle_agent.judge import (
@@ -2886,6 +2886,8 @@ def run_daily(
 ) -> CycleResult:
     settings = load_settings(root)
     cid = competition_id or settings.default_competition
+    if not cid:
+        raise ConfigError("no competition configured; pass --competition or run 'kaggle-agent init'")
     competition = load_competition(cid, root or settings.root)
     return Orchestrator(
         settings,

@@ -226,7 +226,7 @@ def make_plan_agent(
         ),
         stall_force=(
             "write_plan",
-            {"hypothesis": "improve the rsna_knee public score", "approach": "tune", "steps": ""},
+            {"hypothesis": "improve the competition public score", "approach": "tune", "steps": ""},
         ),
     )
     return agent, state

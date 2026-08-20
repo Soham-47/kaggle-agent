@@ -8,7 +8,7 @@ from kaggle_agent.paths import repo_root
 
 def test_load_settings():
     s = load_settings(repo_root())
-    assert s.default_competition == "rsna_knee"
+    assert s.default_competition is None
     assert "RESEARCH" in s.phases
     assert s.dry_run is True
     assert s.mcp_submit is False
@@ -242,3 +242,24 @@ def test_valid_minimal_settings_keep_optional_defaults(tmp_path: Path):
     settings = load_settings(tmp_path)
     assert settings.kernel_poll_seconds == 30
     assert settings.require_telegram_approve is True
+
+
+def test_default_competition_may_be_unset(tmp_path: Path):
+    _write_settings(tmp_path)
+    path = tmp_path / "config" / "settings.yaml"
+    path.write_text("default_competition: null\n", encoding="utf-8")
+
+    assert load_settings(tmp_path).default_competition is None
+
+
+def test_default_competition_rejects_non_string_value(tmp_path: Path):
+    path = tmp_path / "config"
+    path.mkdir()
+    (path / "settings.yaml").write_text("default_competition: 42\n", encoding="utf-8")
+
+    try:
+        load_settings(tmp_path)
+    except ConfigError as exc:
+        assert "default_competition" in str(exc)
+    else:
+        raise AssertionError("numeric default competition was accepted")

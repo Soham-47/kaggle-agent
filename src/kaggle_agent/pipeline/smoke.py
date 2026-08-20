@@ -18,7 +18,7 @@ class SmokeResult:
     errors: list[str] = field(default_factory=list)
 
 
-def read_study_ids(sample_csv: Path, id_column: str = "StudyInstanceUID") -> list[str]:
+def read_study_ids(sample_csv: Path, id_column: str = "id") -> list[str]:
     with sample_csv.open(newline="", encoding="utf-8") as f:
         reader = csv.DictReader(f)
         if not reader.fieldnames or id_column not in reader.fieldnames:

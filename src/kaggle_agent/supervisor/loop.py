@@ -70,15 +70,18 @@ class Supervisor:
                 except SafetyViolation as exc:
                     return SupervisorRun("DIRTY_SOURCE_BASELINE", reason=str(exc))
             generation = self._active_generation(managed=config.mode == "auto_safe")
+            selected_competition = competition or self.settings.default_competition
+            if not selected_competition:
+                return SupervisorRun("NO_COMPETITION", reason="pass --competition or initialize a competition")
             worker_id = f"worker-{uuid.uuid4().hex[:12]}"
-            request = WorkerRequest(worker_id, generation.generation_id, competition or self.settings.default_competition, None, config.mode, None, None, generation.revision)
+            request = WorkerRequest(worker_id, generation.generation_id, selected_competition, None, config.mode, None, None, generation.revision)
             process = WorkerLauncher(self.layout).start(request, cwd=Path(generation.path))
             self.store.write_json(f"workers/{worker_id}/metadata.json", {"pid": process.pid, "worker_id": worker_id, "generation_id": generation.generation_id, "supervisor_token": self.lock.owner_token})
             if wait:
                 process.wait()
                 result = self.store.read_json(f"workers/{worker_id}/result.json", {}) or {}
                 if result.get("status"):
-                    follow_up = self._handle_worker_result(result, config.mode, competition or self.settings.default_competition)
+                    follow_up = self._handle_worker_result(result, config.mode, selected_competition)
                     if follow_up is not None:
                         return SupervisorRun(follow_up[0], worker_id=worker_id, reason=follow_up[1])
                     return SupervisorRun(str(result["status"]), worker_id=worker_id, reason=str(result.get("exit_reason") or ""))

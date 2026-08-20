@@ -773,20 +773,7 @@ def _labels_from_workspace(workspace: Path) -> list[str]:
         labels = ns.get("LABELS")
         if isinstance(labels, list) and all(isinstance(label, str) for label in labels):
             return labels
-    return [
-        "ACL",
-        "MCL",
-        "Medial Meniscus",
-        "Lateral Meniscus",
-        "Medial OA",
-        "Lateral OA",
-        "PF OA",
-        "Effusion",
-        "Synovitis",
-        "Baker's",
-        "Contusion",
-        "Fracture",
-    ]
+    return ["target"]
 
 
 def _bounded_image_parameters(parameters: dict[str, Any]) -> dict[str, Any]:

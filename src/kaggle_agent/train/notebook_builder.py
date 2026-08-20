@@ -34,7 +34,7 @@ def _recipe_source(root: Path | None, competition: CompetitionConfig | None = No
     rel = (
         competition.workspace_relative
         if competition is not None
-        else "competitions/rsna_knee"
+        else "competitions/example"
     )
     path = root / rel / "pipeline" / "kernel_recipe.py"
     if not path.is_file():
@@ -51,7 +51,7 @@ def build_baseline_notebook(
     labels: list[str],
     study_ids: list[str] | None = None,
     recipe_source: str | None = None,
-    id_column: str = "StudyInstanceUID",
+    id_column: str = "id",
     manifest: dict[str, object] | None = None,
     seed: int = 42,
 ) -> dict:
