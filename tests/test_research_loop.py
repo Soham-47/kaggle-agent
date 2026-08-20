@@ -2,15 +2,68 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 from fakes import FakeKaggleApi
 from helpers import copy_min_workspace as _copy_min
 from kaggle_agent.config import load_competition, load_settings
 from kaggle_agent.kaggle_api import KaggleClient
-from kaggle_agent.orchestrator import Orchestrator
+from kaggle_agent.orchestrator import CycleResult, Orchestrator
 from kaggle_agent.research.deep import DeepResearchResult
 from kaggle_agent.research.source_cards import cards_feasible
+
+
+class _ScriptedZen:
+    def __init__(self, replies: list[dict]) -> None:
+        self.replies = list(replies)
+        self.calls = 0
+
+    def chat(self, model, messages, **kwargs):  # noqa: ANN001
+        self.calls += 1
+        if not self.replies:
+            return json.dumps({"tool": "done", "args": {"reason": "empty script"}})
+        return json.dumps(self.replies.pop(0))
+
+
+def _fake_judge(monkeypatch, verdicts):  # noqa: ANN001
+    """Patch orchestrator.judge_cards_ready; verdicts is callable or iterable.
+
+    Honors the interface: the real judge records each verdict into ``state``
+    (streak tracking lives in ``judge_stage``), so the double does the same.
+    """
+    from kaggle_agent.judge import record_verdict
+
+    calls = {"n": 0}
+
+    def fake(zen, model, cards, our, state=None, **kwargs):  # noqa: ANN001
+        calls["n"] += 1
+        if callable(verdicts):
+            v = verdicts(calls["n"])
+        else:
+            seq = iter(verdicts)
+            v = next(seq, (False, f"reason {calls['n']}"))
+        if state is not None:
+            record_verdict(state, *v)
+        return v
+
+    monkeypatch.setattr("kaggle_agent.orchestrator.judge_cards_ready", fake)
+    return calls
+
+
+class _ZenRouter:
+    def __init__(self, zen) -> None:  # noqa: ANN001
+        self.client = zen
+
+    def available(self) -> bool:
+        return True
+
+
+def _daily_logs(root: Path) -> str:
+    return "".join(
+        p.read_text(encoding="utf-8")
+        for p in (root / "memory" / "daily").glob("*.md")
+    )
 
 
 class _EmptyKernelsApi(FakeKaggleApi):
@@ -38,17 +91,35 @@ def _orch(
     kaggle: KaggleClient,
     *,
     loop_passes: int | None = None,
+    zen=None,  # noqa: ANN001
 ) -> Orchestrator:
     settings = load_settings(root)
     settings.raw.setdefault("orchestrator", {})["phases"] = ["LOCK", "RESEARCH"]
     if loop_passes is not None:
         settings.raw.setdefault("research", {})["loop_passes"] = loop_passes
+    if zen is not None:
+        return Orchestrator(
+            settings,
+            load_competition("rsna_knee", root),
+            root=root,
+            kaggle=kaggle,
+            browser_fetch=lambda u, m=12000: "overview " * 20,
+            router=_ZenRouter(zen),
+        )
+
+    class _NoZen:
+        client = None
+
+        def available(self) -> bool:
+            return False
+
     return Orchestrator(
         settings,
         load_competition("rsna_knee", root),
         root=root,
         kaggle=kaggle,
         browser_fetch=lambda u, m=12000: "overview " * 20,
+        router=_NoZen(),
     )
 
 
@@ -77,6 +148,28 @@ def _stub_deep(monkeypatch) -> None:  # noqa: ANN001
     )
 
 
+def _stub_cards(monkeypatch) -> None:  # noqa: ANN001
+    """Harvest writes cards without consuming scripted zen replies."""
+
+    def card(*, title: str, ref: str, **kwargs) -> str:  # noqa: ANN001, ANN003
+        return (
+            f"# {title}\n"
+            f"- ref: {ref}\n"
+            f"- claimed_public: unknown\n"
+            f"- backbone / input: see source\n"
+            "- labels: see source\n"
+            "- CV: prefer grouped splits\n"
+            "- inference: discover hidden test IDs from study folders\n"
+            "- copyable next step: attach public weights Our score=unknown.\n"
+            "- do not copy: H-flip\n"
+            f"- kind: {kwargs.get('kind') or 'kernel'}\n"
+        )
+
+    monkeypatch.setattr(
+        "kaggle_agent.research.source_cards.card_from_source_llm", card
+    )
+
+
 def test_cards_feasible_needs_sidecar_step_and_section(tmp_path: Path):
     workspace = tmp_path / "comp"
     (workspace / "pipeline").mkdir(parents=True)
@@ -86,7 +179,8 @@ def test_cards_feasible_needs_sidecar_step_and_section(tmp_path: Path):
     research.write_text("## Method cards\n", encoding="utf-8")
     assert cards_feasible(workspace, research) is False
     (workspace / "pipeline" / "methods.json").write_text(
-        '{"implement_steps": ["attach public weights"]}\n',
+        '{"implement_steps": ["attach public weights"], '
+        '"dataset_sources": ["owner/public-weights"]}\n',
         encoding="utf-8",
     )
     research.write_text("notes only; no method or digest heading\n", encoding="utf-8")
@@ -113,39 +207,367 @@ def test_one_kernel_one_pass_then_stop(tmp_path: Path, monkeypatch):
     )
 
 
-def test_missing_methods_json_attempts_second_pass(tmp_path: Path, monkeypatch):
+def test_missing_methods_json_harvest_then_done(tmp_path: Path, monkeypatch):
     _stub_deep(monkeypatch)
     calls = _count_source_cards(monkeypatch)
     root = _setup(tmp_path, drop_methods=True)
     result = _orch(
         root,
         KaggleClient(api=_EmptyKernelsApi()).connect(),
-        loop_passes=3,
     ).run_cycle(dry_run=True)
     assert not result.skipped
     assert not _methods_path(root).is_file()
-    assert calls["n"] >= 2
+    assert calls["n"] == 1
+    logs = "".join(
+        p.read_text(encoding="utf-8")
+        for p in (root / "memory" / "daily").glob("*.md")
+    )
+    assert "research fleet" in logs
+    assert "research cards still thin; continuing" in logs
 
 
-def test_pass_cap_respected(tmp_path: Path, monkeypatch):
+def test_snapshot_and_browser_once_then_agent(tmp_path: Path, monkeypatch):
     _stub_deep(monkeypatch)
-    cards = _count_source_cards(monkeypatch)
     snaps = _count_method(monkeypatch, "_kaggle_snapshot")
     browsers = _count_method(monkeypatch, "_browser_research")
     root = _setup(tmp_path, drop_methods=True)
     result = _orch(
         root,
         KaggleClient(api=_EmptyKernelsApi()).connect(),
-        loop_passes=2,
     ).run_cycle(dry_run=True)
     assert not result.skipped
     assert result.kaggle_ok is True
-    assert result.errors == []
-    assert cards["n"] == 2
     assert snaps["n"] == 1
     assert browsers["n"] == 1
+
+
+def test_fleet_disabled_uses_sequential_research(tmp_path: Path, monkeypatch):
+    _stub_deep(monkeypatch)
+    root = _setup(tmp_path, drop_methods=True)
+    settings = load_settings(root)
+    settings.raw.setdefault("research", {}).setdefault("fleet", {})["enabled"] = False
+    settings.raw.setdefault("orchestrator", {})["phases"] = ["LOCK", "RESEARCH"]
+    competition = load_competition("rsna_knee", root)
+    competition.raw.setdefault("research", {})["fleet"] = False
+
+    class _NoZen:
+        client = None
+
+        def available(self) -> bool:
+            return False
+
+    result = Orchestrator(
+        settings,
+        competition,
+        root=root,
+        kaggle=KaggleClient(api=_EmptyKernelsApi()).connect(),
+        browser_fetch=lambda u, m=12000: "overview " * 20,
+        router=_NoZen(),
+    ).run_cycle(dry_run=True)
+    assert not result.skipped
     logs = "".join(
         p.read_text(encoding="utf-8")
         for p in (root / "memory" / "daily").glob("*.md")
     )
-    assert "research cards still thin; continuing" in logs
+    assert "research agent stop=" in logs
+    assert "research fleet" not in logs
+
+
+def _judge_gate_orch(
+    root: Path,
+    zen,  # noqa: ANN001
+    *,
+    drop_methods: bool = True,
+) -> Orchestrator:
+    settings = load_settings(root)
+    settings.raw.setdefault("research", {}).setdefault("fleet", {})["enabled"] = False
+    settings.raw.setdefault("orchestrator", {})["phases"] = ["LOCK", "RESEARCH"]
+    settings.raw.setdefault("browser_research", {})["enabled"] = False
+    competition = load_competition("rsna_knee", root)
+    competition.raw.setdefault("research", {})["fleet"] = False
+    return Orchestrator(
+        settings,
+        competition,
+        root=root,
+        kaggle=KaggleClient(api=FakeKaggleApi()).connect(),
+        browser_fetch=lambda u, m=12000: "overview " * 20,
+        router=_ZenRouter(zen),
+    )
+
+
+def test_sequential_judge_rejects_until_convergence(tmp_path: Path, monkeypatch):
+    """Two identical not-ready verdicts accept (convergence); the gate re-judges done."""
+    _stub_deep(monkeypatch)
+    _stub_cards(monkeypatch)
+    calls = _fake_judge(monkeypatch, [(False, "generic steps"), (False, "generic steps")])
+    root = _setup(tmp_path, drop_methods=True)
+    zen = _ScriptedZen(
+        [
+            {"tool": "judge_cards"},
+            {"tool": "done", "args": {"reason": "ok"}},
+        ]
+    )
+    result = _judge_gate_orch(root, zen).run_cycle(dry_run=True)
+    assert not result.skipped
+    assert zen.calls == 2
+    assert calls["n"] == 2
+    logs = _daily_logs(root)
+    assert "research agent stop=done" in logs
+    assert "research judge" in logs
+
+
+def test_sequential_judge_accepts_when_ready(tmp_path: Path, monkeypatch):
+    _stub_deep(monkeypatch)
+    _stub_cards(monkeypatch)
+    _fake_judge(monkeypatch, [(True, "ready"), (True, "ready")])
+    root = _setup(tmp_path, drop_methods=True)
+    zen = _ScriptedZen(
+        [
+            {"tool": "judge_cards"},
+            {"tool": "done", "args": {"reason": "ok"}},
+        ]
+    )
+    result = _judge_gate_orch(root, zen).run_cycle(dry_run=True)
+    assert not result.skipped
+    logs = _daily_logs(root)
+    assert "research agent stop=done" in logs
+    assert "research judge" in logs
+
+
+def test_sequential_done_without_judge_gets_judged_by_gate(tmp_path: Path, monkeypatch):
+    """done before judge_cards: the gate judges each done; tool and gate share streak."""
+    _stub_deep(monkeypatch)
+    _stub_cards(monkeypatch)
+    calls = _fake_judge(
+        monkeypatch,
+        [(False, "generic steps"), (False, "generic steps"), (False, "generic steps")],
+    )
+    root = _setup(tmp_path, drop_methods=True)
+    zen = _ScriptedZen(
+        [
+            {"tool": "done", "args": {"reason": "first"}},
+            {"tool": "judge_cards"},
+            {"tool": "done", "args": {"reason": "second"}},
+        ]
+    )
+    result = _judge_gate_orch(root, zen).run_cycle(dry_run=True)
+    assert not result.skipped
+    assert zen.calls == 3
+    assert calls["n"] == 3
+    logs = _daily_logs(root)
+    assert "research agent stop=done" in logs
+    assert "research judge" in logs
+
+
+def test_fleet_polish_skipped_when_judge_ready(tmp_path: Path, monkeypatch):
+    """Fleet ends with a ready verdict: no polish pass runs."""
+    _stub_deep(monkeypatch)
+    polish = _count_method(monkeypatch, "_fleet_polish")
+    _fake_judge(monkeypatch, [(True, "ready")])
+    root = _setup(tmp_path, drop_methods=True)
+    result = _orch(
+        root, KaggleClient(api=FakeKaggleApi()).connect()
+    ).run_cycle(dry_run=True)
+    assert not result.skipped
+    assert polish["n"] == 0
+    logs = _daily_logs(root)
+    assert "research judge post-fleet" in logs
+
+
+def test_fleet_polish_improves_cards_when_judge_not_ready(tmp_path: Path, monkeypatch):
+    """Not-ready verdict triggers one polish agent; improved card is merged."""
+    _stub_deep(monkeypatch)
+    verdicts = [(False, "generic steps"), (True, "better")]
+    calls = _fake_judge(monkeypatch, verdicts)
+    root = _setup(tmp_path, drop_methods=True)
+    zen = _ScriptedZen(
+        [
+            {"tool": "read_cards"},
+            {"tool": "write_card", "args": {"ref": "u/polish", "markdown": "# x\n- copyable next step: attach u/weights\n- do not copy: H-flip\n"}},
+            {"tool": "judge_cards"},
+            {"tool": "done", "args": {"reason": "ok"}},
+        ]
+    )
+    orch = _orch(root, KaggleClient(api=FakeKaggleApi()).connect(), zen=zen)
+    orch._fleet_polish(CycleResult(competition="rsna_knee", dry_run=True), "generic steps")  # noqa: SLF001
+    assert calls["n"] == 2
+    logs = _daily_logs(root)
+    assert "research polish stop=" in logs
+    assert "research judge post-polish" in logs
+    cards = list((root / "memory" / "research-deep").glob("source-polish-*.md"))
+    assert cards
+
+
+def test_fleet_agents_write_owned_namespaced_cards(tmp_path: Path, monkeypatch):
+    _stub_deep(monkeypatch)
+    _fake_judge(monkeypatch, [(True, "ready")])
+    _stub_cards(monkeypatch)
+    root = _setup(tmp_path, drop_methods=True)
+    monkeypatch.setattr(
+        Orchestrator,
+        "_source_tool_closures",
+        lambda self: {
+            "list_kernels": lambda **_: "owner/kernel",
+            "pull_kernel": lambda **_: "kernel source",
+            "fetch_url": lambda *args, **kwargs: "fetched source",
+            "search": lambda query, kind, limit: f"hit {kind}",
+        },
+    )
+
+    class _PerAgentZen:
+        def __init__(self) -> None:
+            self.turns: dict[str, int] = {}
+
+        def chat(self, model, messages, **kwargs):  # noqa: ANN001
+            system = str(messages[0]["content"])
+            name = next(
+                item
+                for item in ("notebooks", "papers", "github", "web", "discussions", "datasets")
+                if f"the {item} research agent" in system
+            )
+            turn = self.turns.get(name, 0)
+            self.turns[name] = turn + 1
+            if turn == 0:
+                if name == "notebooks":
+                    return json.dumps({"tool": "list_kernels", "args": {}})
+                kind = {
+                    "papers": "arxiv",
+                    "github": "github",
+                    "web": "web",
+                    "discussions": "discussion",
+                    "datasets": "dataset",
+                }[name]
+                return json.dumps(
+                    {"tool": "search", "args": {"kind": kind, "query": name}}
+                )
+            if turn == 1:
+                if name == "notebooks":
+                    return json.dumps(
+                        {"tool": "pull_kernel", "args": {"ref": "owner/kernel"}}
+                    )
+                return json.dumps(
+                    {
+                        "tool": "write_card",
+                        "args": {
+                            "ref": f"owner/{name}",
+                            "markdown": (
+                                "# finding\n- ref: owner/"
+                                f"{name}\n- copyable next step: attach weights\n"
+                                "- do not copy: P100\n"
+                            ),
+                        },
+                    }
+                )
+            if name == "notebooks" and turn == 2:
+                return json.dumps(
+                    {
+                        "tool": "write_card",
+                        "args": {
+                            "ref": "owner/kernel",
+                            "markdown": (
+                                "# finding\n- ref: owner/kernel\n"
+                                "- copyable next step: attach weights\n"
+                                "- do not copy: P100\n"
+                            ),
+                        },
+                    }
+                )
+            return json.dumps({"tool": "done", "args": {}})
+
+    result = _orch(
+        root,
+        KaggleClient(api=FakeKaggleApi()).connect(),
+        zen=_PerAgentZen(),
+    ).run_cycle(dry_run=True)
+
+    assert result.research_verified is True
+    owned = sorted(
+        path
+        for path in (root / "memory" / "research-deep").glob("source-*.md")
+        if "- agent: fallback" not in path.read_text(encoding="utf-8")
+        and "- agent:" in path.read_text(encoding="utf-8")
+    )
+    assert any("source-notebook-" in path.name for path in owned)
+    assert any("source-paper-" in path.name for path in owned)
+    assert len(owned) == 6
+
+
+def test_stalled_fleet_agents_force_owned_cards(tmp_path: Path, monkeypatch):
+    _stub_deep(monkeypatch)
+    _stub_cards(monkeypatch)
+    _fake_judge(monkeypatch, [(True, "ready")])
+    root = _setup(tmp_path, drop_methods=True)
+    monkeypatch.setattr(
+        Orchestrator,
+        "_source_tool_closures",
+        lambda self: {
+            "list_kernels": lambda **_: "owner/kernel",
+            "pull_kernel": lambda **_: "kernel source",
+            "fetch_url": lambda *args, **kwargs: "fetched source",
+            "search": lambda query, kind, limit: f"hit {kind}",
+        },
+    )
+
+    class _StallingZen:
+        def __init__(self) -> None:
+            self.notebook_pulled = False
+
+        def chat(self, model, messages, **kwargs):  # noqa: ANN001
+            system = str(messages[0]["content"])
+            name = next(
+                item
+                for item in ("notebooks", "papers", "github", "web", "discussions", "datasets")
+                if f"the {item} research agent" in system
+            )
+            if isinstance(kwargs.get("tool_choice"), dict):
+                forced = kwargs["tool_choice"]["function"]["name"]
+                if name == "notebooks" and forced == "pull_kernel":
+                    self.notebook_pulled = True
+                    return json.dumps(
+                        {"tool": "pull_kernel", "args": {"ref": "owner/kernel"}}
+                    )
+                return json.dumps(
+                    {
+                        "tool": "write_card",
+                        "args": {
+                            "ref": f"owner/{name}",
+                            "markdown": (
+                                f"# {name} finding\n- ref: owner/{name}\n"
+                                "- copyable next step: inspect source\n"
+                                "- do not copy: unverified claims\n"
+                            ),
+                        },
+                    }
+                )
+            if name == "notebooks":
+                if self.notebook_pulled:
+                    return json.dumps(
+                        {
+                            "tool": "write_card",
+                            "args": {
+                                "ref": "owner/kernel",
+                                "markdown": (
+                                    "# notebooks finding\n- ref: owner/kernel\n"
+                                    "- copyable next step: inspect source\n"
+                                    "- do not copy: unverified claims\n"
+                                ),
+                            },
+                        }
+                    )
+                return json.dumps({"tool": "list_kernels", "args": {}})
+            kind = {
+                "papers": "arxiv",
+                "github": "github",
+                "web": "web",
+                "discussions": "discussion",
+                "datasets": "dataset",
+            }[name]
+            return json.dumps({"tool": "search", "args": {"kind": kind, "query": name}})
+
+    result = _orch(
+        root,
+        KaggleClient(api=FakeKaggleApi()).connect(),
+        zen=_StallingZen(),
+    ).run_cycle(dry_run=True)
+
+    assert result.research_verified is True

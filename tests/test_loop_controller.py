@@ -48,7 +48,11 @@ def test_next_n_two_trains_once_submit(tmp_path: Path):
     assert result.research_passes >= 1
     notebooks = root / "competitions" / "rsna_knee" / "notebooks"
     pkgs = (
-        [p for p in notebooks.iterdir() if p.is_dir() and "-s" in p.name]
+        [
+            p
+            for p in notebooks.iterdir()
+            if p.is_dir() and "-s" in p.name and "-submit-offline" not in p.name
+        ]
         if notebooks.is_dir()
         else []
     )

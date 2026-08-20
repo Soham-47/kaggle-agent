@@ -7,6 +7,7 @@ from kaggle_agent.loop import (
     next_loop_count,
     record_run_score,
     save_loop,
+    score_is_better,
 )
 from kaggle_agent.paths import repo_root
 
@@ -70,6 +71,12 @@ def test_load_loop_missing_file_defaults(tmp_path: Path):
     assert loaded.last_score == "none"
     assert loaded.prev_score == "none"
     assert loaded.next_n == "3"
+
+
+def test_score_is_better_max():
+    assert score_is_better("0.53", "0.52", "max") is True
+    assert score_is_better("0.50", "0.52", "max") is False
+    assert score_is_better("0.52", "none", "max") is True
 
 
 def test_record_run_score_typical_gain():

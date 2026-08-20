@@ -1,4 +1,4 @@
-from kaggle_agent.memory.ingest import CORE, build_context_pack
+from kaggle_agent.memory.ingest import CORE, build_context_pack, retrieve
 from kaggle_agent.paths import repo_root
 
 
@@ -39,6 +39,71 @@ def test_context_pack_prefers_digest_and_source_cards(tmp_path):
     pack = build_context_pack(tmp_path)
     block = pack.as_prompt_block()
     assert "Deep research digest" in block
-    assert block.find("Deep research digest") < block.find("long snapshot")
+    assert "long snapshot" not in pack.sections["research.md"] or block.find(
+        "Deep research digest"
+    ) < block.find("long snapshot")
     assert any(k.startswith("research-deep/") for k in pack.sections)
     assert "rank-mean folds" in block
+
+
+def test_research_view_includes_experiments_and_cards(tmp_path):
+    mem = tmp_path / "memory"
+    mem.mkdir()
+    (mem / "MEMORY.md").write_text("## Lessons\n- x\n## Active contest\n- id: t\n", encoding="utf-8")
+    (mem / "COMPETITION.md").write_text("c", encoding="utf-8")
+    (mem / "state.md").write_text("- public_best: 0.5\n- proposals_used: 0\n- max_proposals: 2\n- note: n\n", encoding="utf-8")
+    (mem / "research.md").write_text("## Method cards\n- step\n", encoding="utf-8")
+    (mem / "experiments").mkdir()
+    (mem / "experiments" / "a.md").write_text("- public_score: none\n", encoding="utf-8")
+    (mem / "research-deep").mkdir()
+    (mem / "research-deep" / "source-a.md").write_text("card", encoding="utf-8")
+    pack = build_context_pack(tmp_path, view="research")
+    assert pack.view == "research"
+    assert any(k.startswith("experiments/") for k in pack.sections)
+    assert any(k.startswith("research-deep/") for k in pack.sections)
+    assert pack.experiment_paths == [mem / "experiments" / "a.md"]
+
+
+def test_scored_experiments_preferred(tmp_path):
+    mem = tmp_path / "memory"
+    mem.mkdir()
+    for name in CORE:
+        (mem / name).write_text(name, encoding="utf-8")
+    exp = mem / "experiments"
+    exp.mkdir()
+    (exp / "old.md").write_text("- public_score: 0.9\n", encoding="utf-8")
+    (exp / "new.md").write_text("- public_score: none\n", encoding="utf-8")
+    pack = build_context_pack(tmp_path, view="plan", last_experiments=1)
+    assert "experiments/old.md" in pack.sections
+
+
+def test_competition_memory_records_ground_truth():
+    from kaggle_agent.paths import repo_root
+
+    text = (repo_root() / "memory" / "COMPETITION.md").read_text(encoding="utf-8")
+    assert "## Ground truth" in text
+    assert "58" in text
+    assert "reports" in text
+    assert "metadata ranker" in text
+
+
+def test_retrieve_ranks_token_overlap_when_phrase_order_differs(tmp_path):
+    mem = tmp_path / "memory"
+    mem.mkdir()
+    for name in CORE:
+        (mem / name).write_text(name, encoding="utf-8")
+    experiments = mem / "experiments"
+    experiments.mkdir()
+    (experiments / "relevant.md").write_text(
+        "- result: DINO weights were not mounted, so the image model scored as a ranker.\n",
+        encoding="utf-8",
+    )
+    (experiments / "noise.md").write_text(
+        "- result: a different baseline completed.\n",
+        encoding="utf-8",
+    )
+
+    found = retrieve(tmp_path, "ranker image weights mounted", scope="experiments")
+
+    assert "relevant.md" in found
+    assert "not mounted" in found

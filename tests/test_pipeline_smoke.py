@@ -57,6 +57,46 @@ def test_validate_rejects_out_of_range(tmp_path: Path):
     assert not r.ok
 
 
+def test_validate_rejects_constant_kernel_output(tmp_path: Path):
+    path = write_constant_submission(
+        tmp_path / "kernel.csv",
+        [f"s{i}" for i in range(1000)],
+        id_column="StudyInstanceUID",
+        labels=LABELS,
+        value=0.525,
+    )
+
+    r = validate_submission_csv(
+        path,
+        id_column="StudyInstanceUID",
+        labels=LABELS,
+        require_prediction_variation=True,
+    )
+
+    assert not r.ok
+    assert any("constant" in error for error in r.errors)
+
+
+def test_validate_rejects_output_shorter_than_required_minimum(tmp_path: Path):
+    path = write_constant_submission(
+        tmp_path / "short.csv",
+        ["s1", "s2", "s3"],
+        id_column="StudyInstanceUID",
+        labels=LABELS,
+        value=0.5,
+    )
+
+    r = validate_submission_csv(
+        path,
+        id_column="StudyInstanceUID",
+        labels=LABELS,
+        require_min_rows=1000,
+    )
+
+    assert not r.ok
+    assert any("1000" in error for error in r.errors)
+
+
 def test_run_local_smoke(tmp_path: Path):
     out = run_local_smoke(
         study_ids=["a", "b", "c"],
@@ -81,3 +121,32 @@ def test_competition_smoke_and_workspace():
     assert outcome.ok
     assert outcome.smoke and outcome.smoke.submission_path
     assert outcome.smoke.submission_path.is_file()
+
+
+def test_competition_smoke_reports_cv_auc(tmp_path: Path, monkeypatch):
+    import shutil
+
+    from kaggle_agent.paths import repo_root
+
+    root = tmp_path / "kaggle-agent"
+    workspace = root / "competitions" / "rsna_knee"
+    shutil.copytree(
+        repo_root() / "competitions" / "rsna_knee" / "pipeline",
+        workspace / "pipeline",
+    )
+    data = root / "data"
+    data.mkdir(parents=True)
+    (data / "sample_submission.csv").write_text(
+        "StudyInstanceUID," + ",".join(LABELS) + "\ns1," + ",".join(["0.5"] * 12) + "\n",
+        encoding="utf-8",
+    )
+    (data / "train.csv").write_text("train\n", encoding="utf-8")
+    (data / "train_series.csv").write_text("series\n", encoding="utf-8")
+    monkeypatch.setattr(
+        "kaggle_agent.pipeline.cv.evaluate_ranker_cv",
+        lambda *args, **kwargs: {"macro_auc": 0.5312, "n_studies": 10, "folds": 5},
+    )
+    comp = load_competition("rsna_knee", repo_root())
+    outcome = run_competition_smoke(comp, root=root, exp_id="cv-smoke")
+    assert outcome.ok
+    assert outcome.cv_auc == 0.5312

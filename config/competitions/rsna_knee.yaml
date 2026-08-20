@@ -27,6 +27,7 @@ labels:
 
 submission:
   id_column: StudyInstanceUID
+  min_rows: 1000
   # Header must match sample_submission.csv exactly (including Baker's apostrophe)
   probability_columns:
     - ACL
@@ -52,6 +53,11 @@ models:
   distill: null
   vision: null    # set a multimodal Zen model for screenshot / image research
 
+research:
+  # Parallel per-source research fleet (one StageAgent loop per source).
+  # A roster list enables the fleet; `true` uses the settings default roster.
+  fleet: [notebooks, papers, github, web, discussions, datasets]
+
 train:
   backend: kaggle_kernel
   local_smoke_only: true  # full DICOM train stays on Kaggle
@@ -59,7 +65,7 @@ train:
 submit:
   # This competition is notebooks-only (isKernelsSubmissionsOnly).
   # CSV API upload returns 400; must push kernel then submit_code.
-  # browser_fallback (settings): UI path if API notebook submit fails.
+  # API-only: push the kernel, await completion, then use submit_code.
   mode: notebook
   output_file: submission.csv
 

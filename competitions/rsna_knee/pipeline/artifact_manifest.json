@@ -1,0 +1,26 @@
+{
+  "template_version": "rsna-2d-dino-mil-v1",
+  "competition_id": "rsna_knee",
+  "source_card_refs": [
+    "source-model-metaresearch-dinov2-small",
+    "source-dataset-https-www-kaggle-com-datasets-barun2104-rsna-knee-stratified",
+    "source-github-https-github-com-tranbadat2607-rsna-knee-abnormality-detecti",
+    "source-rsna-train-series-mapping"
+  ],
+  "dataset_sources": [
+    "sohamgawd47foden/rsna-knee-test-mirror-private",
+    "barun2104/rsna-knee-mri-processed-3d-volumes",
+    "barun2104/rsna-knee-stratified-folds-and-llm-soft-labels",
+    "stevenleehans/rsna-knee-llm-report-labels",
+    "sohamgawd47foden/rsna-knee-train-series-map-private"
+  ],
+  "model_sources": [
+    "metaresearch/dinov2/pytorch/small/1"
+  ],
+  "model_load_path": "/kaggle/input",
+  "contract_sha256": "ec9d5440327641580080b99d8d456511bce0027681258546b7e508204d62d18d",
+  "recipe_sha256": "0adf130491fb3c54655608ca991c958004eb6fcf26af32fe4503b9121eed2bb2",
+  "fold_outputs": [],
+  "prediction_hashes": [],
+  "semantic_evidence": {}
+}

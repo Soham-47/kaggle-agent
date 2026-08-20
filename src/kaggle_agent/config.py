@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -24,6 +25,29 @@ DEFAULT_PHASES = (
     "HEAL",
     "REPORT",
 )
+
+
+@dataclass(frozen=True)
+class ResearchAgentSettings:
+    max_minutes: float = 15.0
+    max_tool_turns: int = 40
+    max_tokens: int = 2048
+
+
+@dataclass(frozen=True)
+class ResearchFleetSettings:
+    enabled: bool = False
+    agents: tuple[str, ...] = (
+        "notebooks",
+        "papers",
+        "github",
+        "web",
+        "discussions",
+        "datasets",
+    )
+    max_minutes: float = 15.0
+    max_tool_turns: int = 24
+    max_tokens: int = 2048
 
 
 @dataclass(frozen=True)
@@ -62,10 +86,13 @@ class Settings:
     def max_proposals_per_day(self) -> int:
         return int(self.raw.get("submit", {}).get("max_proposals_per_day", 2))
 
+    def llm_provider(self) -> str:
+        raw = str((self.raw.get("llm") or {}).get("provider") or "deepseek").lower()
+        return "deepseek"
+
     def zen_model(self, role: str) -> str:
-        zen = self.raw.get("zen", {})
-        key = f"default_{role}_model"
-        return str(zen.get(key, "gpt-5.5"))
+        block = self.raw.get("deepseek") or {}
+        return str(block.get(f"default_{role}_model", "deepseek-v4-flash"))
 
     @property
     def browser_research_enabled(self) -> bool:
@@ -88,6 +115,35 @@ class Settings:
         except (TypeError, ValueError):
             n = 3
         return max(1, n)
+
+    def _agent_config(self, section: str, *, minutes: float = 15, turns: int = 40) -> ResearchAgentSettings:
+        raw = (self.raw.get(section) or {}).get("agent") or {}
+        return ResearchAgentSettings(
+            max_minutes=float(raw.get("max_minutes", minutes)),
+            max_tool_turns=max(1, int(raw.get("max_tool_turns", turns))),
+            max_tokens=max(256, int(raw.get("max_tokens", 2048))),
+        )
+
+    def research_agent_config(self) -> ResearchAgentSettings:
+        return self._agent_config("research", minutes=15, turns=40)
+
+    def research_fleet_config(self) -> ResearchFleetSettings:
+        fleet = self.raw.get("research", {}).get("fleet") or {}
+        agent = fleet.get("agent") or {}
+        agents = fleet.get("agents") or ResearchFleetSettings.agents
+        return ResearchFleetSettings(
+            enabled=bool(fleet.get("enabled", False)),
+            agents=tuple(str(a) for a in agents),
+            max_minutes=float(agent.get("max_minutes", 15.0)),
+            max_tool_turns=max(1, int(agent.get("max_tool_turns", 24))),
+            max_tokens=max(256, int(agent.get("max_tokens", 2048))),
+        )
+
+    def plan_agent_config(self) -> ResearchAgentSettings:
+        return self._agent_config("plan", minutes=10, turns=20)
+
+    def code_agent_config(self) -> ResearchAgentSettings:
+        return self._agent_config("code", minutes=10, turns=20)
 
     def deep_research_config(self) -> "DeepResearchSettings":
         deep = self.raw.get("research", {}).get("deep", {}) or {}
@@ -118,6 +174,24 @@ class Settings:
         return bool(self.raw.get("kernel", {}).get("enable_gpu", False))
 
     @property
+    def kernel_machine_shape(self) -> str | None:
+        """Accelerator name (e.g. NvidiaTeslaT4). Overrides boolean GPU flags."""
+        raw = self.raw.get("kernel", {}).get("machine_shape")
+        return str(raw) if raw else None
+
+    @property
+    def kernel_enable_internet(self) -> bool:
+        return bool(self.raw.get("kernel", {}).get("enable_internet", False))
+
+    @property
+    def kernel_poll_seconds(self) -> int:
+        return max(5, int(self.raw.get("kernel", {}).get("poll_seconds", 30)))
+
+    @property
+    def kernel_poll_attempts(self) -> int:
+        return max(1, int(self.raw.get("kernel", {}).get("poll_attempts", 40)))
+
+    @property
     def kernel_username(self) -> str | None:
         raw = self.raw.get("kernel", {}).get("username")
         return str(raw) if raw else None
@@ -131,9 +205,14 @@ class Settings:
         return bool(self.raw.get("submit", {}).get("require_telegram_approve", True))
 
     @property
+    def judge_train(self) -> bool:
+        """LLM-judge TRAIN/SUBMIT output behind a flag (mechanical checks always run)."""
+        return bool((self.raw.get("judges") or {}).get("train", False))
+
+    @property
     def browser_submit_fallback(self) -> bool:
-        """If MCP+API submit fail, try browser-harness UI (needs logged-in Chrome)."""
-        return bool(self.raw.get("submit", {}).get("browser_fallback", True))
+        """Deprecated: browser submission is forbidden; always disabled."""
+        return False
 
     @property
     def mcp_submit(self) -> bool:
@@ -174,6 +253,19 @@ class Settings:
         return float(self.raw.get("loop", {}).get("max_minutes", 90))
 
     @property
+    def feedback_wait_minutes(self) -> int:
+        """How long FEEDBACK polls the LB for the just-submitted score (0 = no wait)."""
+        return max(0, int(self.raw.get("feedback", {}).get("wait_minutes", 12)))
+
+    @property
+    def feedback_poll_seconds(self) -> int:
+        return max(5, int(self.raw.get("feedback", {}).get("poll_seconds", 30)))
+
+    @property
+    def block_submit(self) -> bool:
+        return bool(self.raw.get("eval", {}).get("block_submit", False))
+
+    @property
     def cron_hour(self) -> int:
         return int(self.raw.get("cron", {}).get("hour_utc", 6))
 
@@ -204,6 +296,11 @@ class CompetitionConfig:
         return str(self.raw.get("submission", {}).get("id_column", "StudyInstanceUID"))
 
     @property
+    def submission_min_rows(self) -> int | None:
+        raw = self.raw.get("submission", {}).get("min_rows")
+        return int(raw) if raw is not None else None
+
+    @property
     def workspace_relative(self) -> str:
         return str(
             self.raw.get("workspace", {}).get("relative", f"competitions/{self.id}")
@@ -217,6 +314,21 @@ class CompetitionConfig:
     @property
     def submit_output_file(self) -> str:
         return str(self.raw.get("submit", {}).get("output_file", "submission.csv"))
+
+    @property
+    def fleet_enabled(self) -> bool:
+        """True when research.fleet is `true` (default roster) or a roster list."""
+        raw = self.raw.get("research", {}).get("fleet")
+        if isinstance(raw, list):
+            return bool(raw)
+        return raw is True
+
+    @property
+    def fleet_agents(self) -> list[str]:
+        raw = self.raw.get("research", {}).get("fleet")
+        if isinstance(raw, list):
+            return [str(a) for a in raw]
+        return []
 
     def model_for(self, role: str, settings: Settings) -> str:
         models = self.raw.get("models") or {}
@@ -233,6 +345,24 @@ def _read_yaml(path: Path) -> dict[str, Any]:
     if not isinstance(data, dict):
         raise ValueError(f"Config must be a mapping: {path}")
     return data
+
+
+def load_dotenv(root: Path | None = None) -> None:
+    """Load KEY=value from repo .env without overwriting a set env var."""
+    path = (root or repo_root()) / ".env"
+    if not path.is_file():
+        return
+    for raw in path.read_text(encoding="utf-8").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        if line.startswith("export "):
+            line = line[7:].strip()
+        key, _, val = line.partition("=")
+        key = key.strip()
+        val = val.strip().strip("'").strip('"')
+        if key and key not in os.environ:
+            os.environ[key] = val
 
 
 def load_settings(root: Path | None = None) -> Settings:

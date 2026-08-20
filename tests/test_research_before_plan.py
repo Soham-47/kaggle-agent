@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -15,12 +16,63 @@ from kaggle_agent.orchestrator import Orchestrator, run_daily
 from kaggle_agent.research.deep import DeepResearchResult
 
 
+class RecordingZen:
+    """Records chat messages; one scripted tool per stage."""
+
+    def __init__(self) -> None:
+        self.users: list[str] = []
+        self._n: dict[str, int] = {"research": 0, "plan": 0, "code": 0}
+        self.last_tool_calls: list = []
+
+    def chat(self, model, messages, **kwargs):  # noqa: ANN001
+        system = ""
+        user = ""
+        for m in messages:
+            if m.get("role") == "system":
+                system = str(m.get("content") or "")
+            if m.get("role") == "user":
+                user = str(m.get("content") or "")
+        self.users.append(user)
+        if "implementable Kaggle method card" in system:
+            return self._reply("done", {})
+        if "plan the next" in system:
+            self._n["plan"] += 1
+            if self._n["plan"] == 1:
+                return self._reply(
+                    "write_plan",
+                    {
+                        "hypothesis": "use grouped folds from public notebooks",
+                        "approach": "tune",
+                        "steps": "pull winner notebook; keep Baker's header",
+                    },
+                )
+            return self._reply("done", {})
+        if "coding agent" in system:
+            self._n["code"] += 1
+            if self._n["code"] == 1:
+                return self._reply(
+                    "write_brief",
+                    {"text": "attach listed datasets; discover test dirs; rank-mean"},
+                )
+            return self._reply("done", {})
+        self._n["research"] += 1
+        if self._n["research"] == 1:
+            return self._reply("deep_research", {})
+        if self._n["research"] == 2:
+            return self._reply("harvest_cards", {})
+        return self._reply("done", {})
+
+    def _reply(self, tool: str, args: dict) -> str:
+        self.last_tool_calls = [(tool, args)]
+        return json.dumps({"tool": tool, "args": args})
+
+
 @dataclass
 class RecordingRouter:
-    """Stand-in ModelRouter: records plan prompts; exposes a dummy Zen client."""
+    """Stand-in ModelRouter: records plan/code agent chat."""
 
     plan_calls: list[tuple[str, str]] = field(default_factory=list)
-    client: object = field(default_factory=lambda: object())
+    client: RecordingZen = field(default_factory=RecordingZen)
 
     def available(self) -> bool:
         return True
@@ -98,14 +150,18 @@ def test_plan_prompt_includes_memory_competition_and_research(tmp_path: Path, mo
     )
     result = orch.run_cycle(dry_run=True)
     assert result.deep_ok is True
-    assert rec.plan_calls, "PLAN must call the router after research"
-    user = rec.plan_calls[0][1]
-    assert "## MEMORY.md" in user
-    assert "## COMPETITION.md" in user
-    assert "## research.md" in user
-    assert "Deep research digest" in user
-    assert "copyable next step" in user or "Must implement" in user
-    assert "Baker" in user  # contest header rule lives in COMPETITION.md
+    users = "\n".join(rec.client.users)
+    assert rec.client.users, "PLAN/CODE must chat after research"
+    assert "## MEMORY.md" in users
+    assert "## COMPETITION.md" in users
+    assert "## research.md" in users
+    assert (
+        "Deep research digest" in users
+        or "Method cards" in users
+        or "copyable next step" in users
+        or "Must implement" in users
+    )
+    assert "Baker" in users  # contest header rule lives in COMPETITION.md
 
 
 def test_deep_research_wires_kaggle_arxiv_github_web(tmp_path: Path, monkeypatch):
@@ -166,3 +222,99 @@ def test_deep_prompt_uses_active_competition_not_hardcoded_host(tmp_path: Path):
     assert competition.slug in prompt
     assert "site:kaggle.com/code" in prompt
     assert "implementable" in prompt.lower() or "coding agent" in prompt.lower()
+
+
+class _NoDeepZen(RecordingZen):
+    """Research turns: harvest_cards then done. Never calls deep_research."""
+
+    def chat(self, model, messages, **kwargs):  # noqa: ANN001
+        system = ""
+        for m in messages:
+            if m.get("role") == "system":
+                system = str(m.get("content") or "")
+        if "implementable Kaggle method card" in system:
+            return self._reply("done", {})
+        if "plan the next" in system:
+            self._n["plan"] += 1
+            if self._n["plan"] == 1:
+                return self._reply(
+                    "write_plan",
+                    {
+                        "hypothesis": "use grouped folds from public notebooks",
+                        "approach": "tune",
+                        "steps": "pull winner notebook; keep Baker's header",
+                    },
+                )
+            return self._reply("done", {})
+        if "coding agent" in system:
+            self._n["code"] += 1
+            if self._n["code"] == 1:
+                return self._reply(
+                    "write_brief",
+                    {"text": "attach listed datasets; discover test dirs; rank-mean"},
+                )
+            return self._reply("done", {})
+        self._n["research"] += 1
+        if self._n["research"] == 1:
+            return self._reply("harvest_cards", {})
+        return self._reply("done", {})
+
+
+class _NoDeepRouter:
+    """ModelRouter stand-in whose client never chooses deep_research."""
+
+    def __init__(self) -> None:
+        self.client = _NoDeepZen()
+
+    def available(self) -> bool:
+        return True
+
+
+def test_deep_research_runs_even_when_agent_skips_tool(tmp_path: Path, monkeypatch):
+    root = tmp_path / "kaggle-agent"
+    real = Path(__file__).resolve().parents[1]
+    _copy_min(root, real)
+
+    captured: dict[str, object] = {}
+    runs = {"n": 0}
+
+    import kaggle_agent.research.deep as deep_mod
+
+    orig_init = deep_mod.DeepResearcher.__init__
+
+    def capturing_init(self, client, model, config, sources, root, **kwargs):  # noqa: ANN001
+        captured["sources"] = sources
+        captured["relevance_terms"] = kwargs.get("relevance_terms")
+        return orig_init(self, client, model, config, sources, root, **kwargs)
+
+    def fake_run(self, prompt, research_md):  # noqa: ANN001
+        runs["n"] += 1
+        return DeepResearchResult(
+            learnings=["2.5D MRI CNN"],
+            sources=["https://www.kaggle.com/code/u/nb"],
+            queries_run=3,
+        )
+
+    monkeypatch.setattr(deep_mod.DeepResearcher, "__init__", capturing_init)
+    monkeypatch.setattr("kaggle_agent.orchestrator.DeepResearcher.run", fake_run)
+
+    browser_fetch = lambda u, m=12000: "overview " * 20  # noqa: E731
+    settings = load_settings(root)
+    competition = load_competition("rsna_knee", root)
+    orch = Orchestrator(
+        settings,
+        competition,
+        root=root,
+        kaggle=KaggleClient(api=FakeKaggleApi()).connect(),
+        browser_fetch=browser_fetch,
+        telegram=FakeTelegram(),
+        router=_NoDeepRouter(),
+    )
+    result = orch.run_cycle(dry_run=True)
+    assert runs["n"] == 1, "deep research must run even when the agent never picks the tool"
+    assert result.deep_ok is True
+    web = [s for s in captured["sources"] if getattr(s, "kind", "") == "web"]
+    assert web, "deep research must include a web source"
+    assert web[0]._fetch is browser_fetch, "web source must use the browser-backed fetch"
+    terms = tuple(captured["relevance_terms"] or ())
+    assert "rsna" in terms and "knee" in terms

@@ -17,12 +17,14 @@ Auth: ~/.kaggle/kaggle.json (see docs above). Never log key contents.
 
 from __future__ import annotations
 
+import time
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any, Protocol
 
 from kaggle_agent.kaggle_api import submit_ops
 from kaggle_agent.kaggle_api.models import (
+    CompetitionInfo,
     KernelRow,
     LeaderboardRow,
     MetaFile,
@@ -33,9 +35,32 @@ from kaggle_agent.kaggle_api.models import (
 )
 from kaggle_agent.kaggle_api.sdk_get import get as _g
 from kaggle_agent.kaggle_api.sdk_get import get_str as _s
+from kaggle_agent.heal.submit_errors import is_network_error
 
 _META_SUFFIXES = (".csv", ".json", ".md", ".txt", ".parquet")
 _MAX_META_BYTES = 50 * 1024 * 1024
+
+_NETWORK_MAX_ATTEMPTS = 3
+_NETWORK_BASE_DELAY = 2.0
+
+
+def _retry_network(
+    fn: Callable,
+    *,
+    attempts: int = _NETWORK_MAX_ATTEMPTS,
+    base_delay: float = _NETWORK_BASE_DELAY,
+    _sleep: Callable = time.sleep,
+) -> Any:
+    """Retry *fn* on transient network errors with exponential backoff."""
+    delay = base_delay
+    for i in range(attempts):
+        try:
+            return fn()
+        except Exception as exc:  # noqa: BLE001
+            if i >= attempts - 1 or not is_network_error(str(exc)):
+                raise
+            _sleep(delay)
+            delay *= 2
 
 
 class KaggleApiError(RuntimeError):
@@ -48,6 +73,8 @@ class SupportsKaggleApi(Protocol):
     def authenticate(self) -> None: ...
 
     def competition_get_submission_limits(self, competition_name: str) -> Any: ...
+
+    def competitions_list(self, **kwargs: Any) -> Any: ...
 
     def competition_list_files(
         self, competition: str, page_token: str | None = None, page_size: int = 20
@@ -155,6 +182,40 @@ class KaggleClient:
             limited_by_total=bool(_g(raw, "limited_by_total", "limitedByTotal", default=False)),
         )
 
+    def competition_info(self, slug: str) -> CompetitionInfo:
+        """Return exact competition metadata from the official API search."""
+        response = self.api.competitions_list(search=slug)
+        rows = _g(response, "competitions", default=response) or []
+        wanted = slug.rstrip("/").split("/")[-1]
+        matches = []
+        for row in rows:
+            ref = _s(row, "ref", "url")
+            row_slug = ref.rstrip("/").split("/")[-1]
+            if row_slug == wanted:
+                matches.append(row)
+        if len(matches) != 1:
+            raise KaggleApiError(
+                f"competition metadata must match exactly once for {slug!r}; found {len(matches)}"
+            )
+        row = matches[0]
+        tags = tuple(
+            _s(tag, "name", "ref").lower()
+            for tag in (_g(row, "tags", default=[]) or [])
+            if _s(tag, "name", "ref")
+        )
+        raw = row.to_dict() if hasattr(row, "to_dict") else {}
+        return CompetitionInfo(
+            slug=wanted,
+            title=_s(row, "title"),
+            url=_s(row, "url", "ref"),
+            deadline=_s(row, "deadline"),
+            evaluation_metric=_s(row, "evaluationMetric", "evaluation_metric"),
+            kernels_only=bool(_g(row, "isKernelsSubmissionsOnly", "is_kernels_submissions_only", default=False)),
+            max_daily_submissions=int(_g(row, "maxDailySubmissions", "max_daily_submissions", default=1) or 1),
+            tags=tags,
+            raw=raw,
+        )
+
     def list_meta_files(
         self,
         competition: str,
@@ -250,7 +311,9 @@ class KaggleClient:
         return out
 
     def submissions(self, competition: str, *, top: int = 20) -> list[SubmissionRow]:
-        rows = self.api.competition_submissions(competition) or []
+        rows = _retry_network(
+            lambda: self.api.competition_submissions(competition)
+        ) or []
         out: list[SubmissionRow] = []
         for s in rows[:top]:
             if s is None:
@@ -277,6 +340,7 @@ class KaggleClient:
         mode: str = "file",
         kernel_folder: Path | None = None,
         kernel_ref: str | None = None,
+        kernel_version: int | None = None,
         output_file: str = "submission.csv",
         poll_seconds: int = 30,
         poll_attempts: int = 40,
@@ -301,6 +365,7 @@ class KaggleClient:
                     message=message,
                     kernel_folder=Path(kernel_folder or "."),
                     kernel_ref=kernel_ref,
+                    kernel_version=kernel_version,
                     output_file=output_file,
                     status_fn=self.kernels_status,
                     poll_seconds=poll_seconds,
@@ -336,10 +401,17 @@ class KaggleClient:
         Source: KaggleApi.kernels_push
         """
         try:
-            resp = self.api.kernels_push(str(folder))
+            resp = _retry_network(lambda: self.api.kernels_push(str(folder)))
         except Exception as exc:  # noqa: BLE001
             raise KaggleApiError(f"kernels_push failed: {exc}") from exc
         return _s(resp, "message", "ref", "errorMessage", default=str(resp))
+
+    def kernels_push_result(self, folder: Path | str) -> Any:
+        """Push a kernel and preserve the API response, including its version."""
+        try:
+            return _retry_network(lambda: self.api.kernels_push(str(folder)))
+        except Exception as exc:  # noqa: BLE001
+            raise KaggleApiError(f"kernels_push failed: {exc}") from exc
 
     def kernels_status(self, kernel_ref: str) -> str:
         """Return status string e.g. COMPLETE / RUNNING.
@@ -350,7 +422,7 @@ class KaggleClient:
 
         ref = normalize_kernel_ref(kernel_ref)
         try:
-            resp = self.api.kernels_status(ref)
+            resp = _retry_network(lambda: self.api.kernels_status(ref))
         except Exception as exc:  # noqa: BLE001
             raise KaggleApiError(f"kernels_status failed: {exc}") from exc
         return _s(resp, "status", default=str(resp))

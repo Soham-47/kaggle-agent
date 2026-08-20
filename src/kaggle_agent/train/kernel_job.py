@@ -30,6 +30,7 @@ class KernelJob:
     status: str = "none"
     competition: str = "none"
     exp_id: str = "none"
+    kernel_version: str = "none"
     updated_at: str = "never"
 
     def to_dict(self) -> dict[str, str]:
@@ -49,6 +50,8 @@ class KernelJob:
         if self.kernel_ref in {"none", ""} or self.status in {"none", ""}:
             return False
         st = self.status.lower().replace(" ", "")
+        if st.startswith("kernelworkerstatus."):
+            st = st.split(".", 1)[1]
         if st in DONE:
             return False
         if st in RUNNING:

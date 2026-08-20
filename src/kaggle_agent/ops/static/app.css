@@ -1,0 +1,170 @@
+:root {
+  --bg: #0d0e0b;
+  --panel: #161711;
+  --line: #2a2c22;
+  --text: #ece6d5;
+  --muted: #8a8474;
+  --amber: #d4a017;
+  --ok: #3f9a62;
+  --bad: #c44b3a;
+  --warn: #c4921a;
+  --font: "IBM Plex Sans", "Segoe UI", sans-serif;
+  --mono: "IBM Plex Mono", ui-monospace, "SFMono-Regular", menlo, monospace;
+}
+
+* { box-sizing: border-box; }
+html, body {
+  margin: 0;
+  min-height: 100%;
+  background: var(--bg);
+  color: var(--text);
+  font: 15px/1.4 var(--font);
+}
+.skip, .sr {
+  position: absolute;
+  left: -999px;
+}
+.skip:focus { left: 8px; top: 8px; background: var(--panel); padding: 8px; }
+.top {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 16px 20px 12px;
+  border-bottom: 1px solid var(--line);
+  flex-wrap: wrap;
+}
+.kicker {
+  margin: 0;
+  color: var(--amber);
+  font-size: 11px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+h1 { margin: 2px 0 0; font-size: 20px; font-weight: 600; }
+h2 {
+  margin: 0 0 8px;
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.status { display: flex; gap: 16px; margin: 0; }
+.status dt { font-size: 10px; color: var(--muted); text-transform: uppercase; }
+.status dd { margin: 0; font-family: var(--mono); font-size: 13px; }
+.actions { display: flex; gap: 8px; }
+button {
+  font: inherit;
+  cursor: pointer;
+  border: 1px solid var(--line);
+  background: var(--panel);
+  color: var(--text);
+  padding: 8px 14px;
+}
+#run-live { background: var(--amber); color: #1a1404; border-color: var(--amber); font-weight: 600; }
+button.ghost { color: var(--muted); }
+button:disabled { opacity: 0.5; cursor: not-allowed; }
+main { padding: 16px 20px 88px; }
+.banner { background: #3a1d18; color: #f2c8c2; padding: 10px 12px; }
+.board {
+  border: 1px solid var(--line);
+  background: var(--panel);
+  padding: 16px;
+}
+.flow {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: stretch;
+  gap: 6px;
+}
+.node {
+  min-width: 88px;
+  padding: 10px 10px 8px;
+  border: 1px solid var(--line);
+  background: #10120d;
+}
+.node .lab { display: block; font-size: 13px; font-weight: 600; }
+.node .hint { display: block; color: var(--muted); font-size: 11px; margin-top: 2px; }
+.node.active {
+  border-color: var(--amber);
+  box-shadow: 0 0 0 1px var(--amber);
+  animation: pulse 1.4s ease-in-out infinite;
+}
+.node.done { border-color: #2e5c3d; }
+.arrow {
+  color: var(--muted);
+  align-self: center;
+  padding: 0 2px;
+  font-size: 16px;
+}
+@keyframes pulse {
+  50% { box-shadow: 0 0 0 3px rgba(212, 160, 23, 0.35); }
+}
+.meta {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+  margin-top: 16px;
+  padding-top: 12px;
+  border-top: 1px solid var(--line);
+}
+.pills { display: flex; flex-wrap: wrap; gap: 6px; }
+.pill {
+  font-family: var(--mono);
+  font-size: 11px;
+  padding: 4px 8px;
+  border: 1px solid var(--line);
+}
+.pill.ok { border-color: var(--ok); color: #9ed4b1; }
+.pill.bad { border-color: var(--bad); color: #f2c8c2; }
+.ops-line { margin: 0; font-family: var(--mono); font-size: 13px; color: var(--muted); }
+.term-wrap { margin-top: 16px; border: 1px solid var(--line); background: #090a08; }
+.term-head {
+  display: flex;
+  justify-content: space-between;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--line);
+  color: var(--muted);
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+#term {
+  margin: 0;
+  min-height: 220px;
+  max-height: 42vh;
+  overflow: auto;
+  padding: 10px 12px;
+  font: 12px/1.5 var(--mono);
+  white-space: pre-wrap;
+}
+#term .info { color: var(--text); }
+#term .ok { color: #9ed4b1; }
+#term .warn { color: #e3c06a; }
+#term .error { color: #f2c8c2; }
+#term .ts { color: var(--muted); }
+.cmd {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  display: flex;
+  gap: 8px;
+  padding: 10px 20px 14px;
+  background: #11130e;
+  border-top: 1px solid var(--line);
+}
+.cmd input {
+  flex: 1;
+  background: #0d0e0b;
+  border: 1px solid var(--line);
+  color: var(--text);
+  font: 14px var(--mono);
+  padding: 10px 12px;
+}
+.cmd button { background: var(--panel); }
+@media (max-width: 720px) {
+  .meta { grid-template-columns: 1fr; }
+  .status { width: 100%; }
+  main { padding-bottom: 100px; }
+}

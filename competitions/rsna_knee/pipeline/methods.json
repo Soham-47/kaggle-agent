@@ -1,22 +1,52 @@
 {
   "dataset_sources": [
-    "pilkwang/rsna-knee-llm-labels",
-    "pilkwang/rsna-knee-weights",
-    "pilkwang/pilkwang-public-dataset-for-notebooks-figures"
+    "barun2104/rsna-knee-mri-processed-3d-volumes",
+    "riachk/rsna-knee-abnormality-detection-tool",
+    "stevenleehans/rsna-knee-llm-report-labels",
+    "trnhquangminh140/rsna-knee-abnormality-detection-link-datasets",
+    "datasets/notebooks",
+    "scripts/llm_label_gold"
   ],
-  "model_sources": [
-    "metaresearch/dinov2/PyTorch/small/1"
-  ],
+  "model_sources": [],
   "infer_hints": [
     "discover_test_ids_from_folders",
-    "rank_mean_ensemble",
     "train_on_report_or_llm_labels",
+    "rank_mean_ensemble",
     "grouped_cv"
   ],
   "implement_steps": [
-    "Attach pilkwang/rsna-knee-llm-labels and train heads on those columns; regex only when a study is missing.",
-    "Attach pilkwang/rsna-knee-weights; rank-average any prediction CSVs; do not probability-mean.",
-    "Discover hidden test IDs from study folders, not only the public test.csv."
+    "Use these preprocessed 3D volumes as input to a 3D CNN (e.g., 3D ResNet / SlowFast) instead of per-slice 2D models; this captures volumetric context across sagittal slices which is critical for meniscus/ACL tear detection.",
+    "Use this as a tooling/utility dataset (e.g., preprocessing helpers, data-loading utilities) to standardize MRI loading and normalization across folds; integrate with a grouped CV scheme keyed on study_id.",
+    "Use LLM-extracted labels from radiology reports as a weak/auxiliary supervision signal or as a label-cleaning step to correct noisy competition labels; can also be used to build a text-based prior that is fused with image features.",
+    "Use this as a curated index of related datasets/notebooks to quickly locate preprocessed versions and proven pipelines; cross-reference the linked sources to find the highest-quality preprocessed MRI volumes before committing to a 3D",
+    "At inference time, glob all study folders under the test directory (e.g. `os.listdir(test_dir)`) and predict on every image, rather than trusting only the rows in sample test.csv; this captures any hidden test studies not present in the",
+    "Replace the rule-based report extractor with an LLM prompt (`scripts/llm_label_gold.py`, model via `OPENAI_MODEL` env) that emits a graded 0\u20131 label for each of the twelve targets per study, and validate on the gold-annotated subset before"
   ],
-  "n_cards": 6
+  "source_card_refs": [
+    "source-dataset-https-www-kaggle-com-datasets-barun2104-rsna-knee-mri-proces",
+    "source-dataset-https-www-kaggle-com-datasets-riachk-rsna-knee-abnormality-d",
+    "source-dataset-https-www-kaggle-com-datasets-stevenleehans-rsna-knee-llm-re",
+    "source-dataset-https-www-kaggle-com-datasets-trnhquangminh140-rsna-knee-abn",
+    "source-discussion-https-www-kaggle-com-competitions-rsna-knee-abnormality-dete",
+    "source-github-https-github-com-tranbadat2607-rsna-knee-abnormality-detecti",
+    "source-mattiaangeli-bend-the-knee-to-dinov3-ensembled",
+    "source-notebook-mattiaangeli-bend-the-knee-to-dinov3-ensembled",
+    "source-notebook-prvsiyan-rsna-knee-read-the-report-then-the-knee",
+    "source-paper-http-arxiv-org-abs-1903-03929v1",
+    "source-paper-http-arxiv-org-abs-2112-09177v1",
+    "source-paper-http-arxiv-org-abs-2207-12521v1",
+    "source-paper-http-arxiv-org-abs-2407-09515v1",
+    "source-pilkwang-rsna-knee-baseline-v1",
+    "source-prvsiyan-rsna-knee-read-the-report-then-the-knee",
+    "source-romanrozen-rsna-knee-data-structure-eda-baseline",
+    "source-sakhawathossen-rsna-knee-enhanced-ensemble",
+    "source-tonylica-rsna-knee-dino-radimagenet-rank-ensemble",
+    "source-web-https-www-kaggle-com-competitions-rsna-knee-abnormality-dete",
+    "source-web-search-rsna-2024-knee-abnormality-detection-kaggle-discussio",
+    "source-web-search-rsna-2024-knee-abnormality-detection-kaggle-solutions",
+    "source-web-search-rsna-2024-knee-abnormality-detection-top-solution-blo",
+    "source-web-search-rsna-knee-abnormality-detection-2024-winner-solution",
+    "source-web-search-rsna-knee-abnormality-detection-github-solution"
+  ],
+  "n_cards": 24
 }

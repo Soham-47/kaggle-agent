@@ -8,15 +8,32 @@ Never used for submit. Skill: browser-harness (new_tab + js body text).
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import shutil
 import subprocess
+import urllib.parse
+import urllib.request
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
 FetchFn = Callable[[str, int], str]
+SerpFn = Callable[[str, int], list[tuple[str, str, str]]]  # (title, url, snippet)
+
+
+def _harness_cli() -> str | None:
+    """Locate the browser-harness CLI even when ~/.local/bin is off PATH."""
+    cli = shutil.which("browser-use") or shutil.which("browser-harness")
+    if cli:
+        return cli
+    home = Path.home() / ".local" / "bin"
+    for name in ("browser-use", "browser-harness"):
+        candidate = home / name
+        if candidate.is_file() and os.access(candidate, os.X_OK):
+            return str(candidate)
+    return None
 
 _EMPTY_MARKERS = frozenset({"", "{}", "None", "null"})
 _BROWSER_MARKER = "## Browser (read-only)"
@@ -115,7 +132,7 @@ def _normalize_harness_stdout(stdout: str) -> str:
 
 def fetch_via_browser_harness(url: str, max_chars: int = 12000) -> str:
     """Extract document body text via browser-harness."""
-    cli = shutil.which("browser-use") or shutil.which("browser-harness")
+    cli = _harness_cli()
     if not cli:
         raise BrowserResearchError("browser-use / browser-harness not on PATH")
 
@@ -188,9 +205,148 @@ def fetch_via_http(url: str, max_chars: int = 12000) -> str:
     return re.sub(r"\s+", " ", text).strip()[:max_chars]
 
 
+def search_via_browser_harness(query: str, limit: int = 5) -> list[tuple[str, str, str]]:
+    """SERP through the headed research Chrome. Returns (title, url, snippet)."""
+    cli = _harness_cli()
+    if not cli:
+        raise BrowserResearchError("browser-use / browser-harness not on PATH")
+
+    url = "https://www.google.com/search?" + urllib.parse.urlencode({"q": query})
+    js_consent = """(() => {
+  const btns = Array.from(document.querySelectorAll("button"));
+  const ok = btns.find(b => /ok,\\s*got it/i.test(b.innerText || ""));
+  if (ok) ok.click();
+  return true;
+})()"""
+    js_extract = """(() => {
+  const items = [];
+  const skipHosts = /^(https?:\\/\\/)?(www\\.)?(google|scholar\\.google|support\\.google)\\./i;
+  document.querySelectorAll('a').forEach(a => {
+    const href = a.href || '';
+    if (!href.startsWith('http')) return;
+    if (skipHosts.test(href)) return;
+    const txt = (a.innerText || '').trim().split('\\n')[0];
+    if (txt.length < 15) return;
+    const block = a.closest('div.g') || a.closest('div');
+    const desc = block ? block.querySelector('div.VwiC3b') : null;
+    const snippet = (desc ? desc.innerText : block.innerText).trim().slice(0, 300);
+    items.push({title: txt.slice(0, 120), url: href, snippet: snippet});
+  });
+  return JSON.stringify(items.slice(0, 10));
+})()"""
+    script = (
+        "import time\n"
+        f"new_tab({url!r})\n"
+        "wait_for_load()\n"
+        "time.sleep(1)\n"
+        f"js({js_consent!r})\n"
+        "time.sleep(2)\n"
+        f"raw = js({js_extract!r})\n"
+        "if isinstance(raw, dict):\n"
+        "    raw = raw.get('text') or raw.get('result') or raw.get('value') or ''\n"
+        "print(raw if isinstance(raw, str) else str(raw or ''))\n"
+    )
+    env = os.environ.copy()
+    if not env.get("BU_CDP_URL") and not env.get("BU_CDP_WS"):
+        # Headed research Chrome from scripts/start_research_chrome.sh (not daily 9222).
+        env.setdefault("BU_CDP_URL", "http://127.0.0.1:9224")
+    try:
+        proc = subprocess.run(
+            [cli],
+            input=script,
+            capture_output=True,
+            text=True,
+            timeout=60,
+            check=False,
+            env=env,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise BrowserResearchError(f"browser-harness timeout for {url}") from exc
+
+    if proc.returncode != 0:
+        err = (proc.stderr or proc.stdout or "")[:400]
+        raise BrowserResearchError(f"browser-harness exit {proc.returncode}: {err}")
+
+    out = _normalize_harness_stdout(proc.stdout or "")
+    if out in _EMPTY_MARKERS:
+        return []
+    try:
+        items = json.loads(out)
+    except json.JSONDecodeError:
+        return []
+    results: list[tuple[str, str, str]] = []
+    skip_hosts = re.compile(
+        r"^(https?://)?(www\.)?(google|scholar\.google|support\.google)\.",
+        re.IGNORECASE,
+    )
+    for it in items[:limit]:
+        if not isinstance(it, dict):
+            continue
+        title = str(it.get("title") or "").strip()
+        url_text = str(it.get("url") or "").strip()
+        snippet = str(it.get("snippet") or "").strip()
+        if url_text.startswith("http") and title and not skip_hosts.match(url_text):
+            results.append((title, url_text, snippet))
+    return results
+
+
+def search_via_ddg_http(query: str, limit: int = 5) -> list[tuple[str, str, str]]:
+    """DuckDuckGo HTML SERP via stdlib (no key). Returns (title, url, snippet)."""
+    url = "https://html.duckduckgo.com/html/?" + urllib.parse.urlencode({"q": query})
+    try:
+        req = urllib.request.Request(
+            url,
+            headers={
+                "User-Agent": (
+                    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+                    "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+                )
+            },
+        )
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            html = resp.read().decode("utf-8", errors="replace")
+    except Exception:  # noqa: BLE001
+        return []
+    out: list[tuple[str, str, str]] = []
+    for m in re.finditer(
+        r'<a[^>]+class="[^"]*result__a[^"]*"[^>]*href="([^"]+)"[^>]*>(.*?)</a>', html
+    ):
+        if len(out) >= limit:
+            break
+        href = m.group(1)
+        if "uddg=" in href:
+            url_text = urllib.parse.unquote(href.split("uddg=")[-1].split("&")[0])
+        else:
+            url_text = href
+        if not url_text.startswith("http"):
+            continue
+        title = re.sub(r"<[^>]+>", "", m.group(2)).strip()
+        out.append((title, url_text, ""))
+    return out
+
+
+def _default_serp(prefer_browser_harness: bool) -> SerpFn:
+    def smart_serp(query: str, limit: int = 5) -> list[tuple[str, str, str]]:
+        if prefer_browser_harness and _harness_cli() is not None:
+            try:
+                hits = search_via_browser_harness(query, limit)
+                if hits:
+                    return hits
+            except BrowserResearchError:
+                pass
+        return search_via_ddg_http(query, limit)
+
+    return smart_serp
+
+
+def default_serp(prefer_browser_harness: bool = True) -> SerpFn:
+    """Browser-harness SERP with an HTTP fallback; safe outside tests."""
+    return _default_serp(prefer_browser_harness)
+
+
 def _default_fetch(prefer_browser_harness: bool) -> FetchFn:
     def smart_fetch(url: str, max_chars: int = 12000) -> str:
-        if prefer_browser_harness and shutil.which("browser-harness"):
+        if prefer_browser_harness and _harness_cli() is not None:
             try:
                 return fetch_via_browser_harness(url, max_chars)
             except BrowserResearchError:
@@ -200,6 +356,11 @@ def _default_fetch(prefer_browser_harness: bool) -> FetchFn:
     return smart_fetch
 
 
+def default_fetch(prefer_browser_harness: bool = True) -> FetchFn:
+    """Browser-harness fetch with an HTTP fallback; safe outside tests."""
+    return _default_fetch(prefer_browser_harness)
+
+
 @dataclass
 class BrowserResearcher:
     fetch: FetchFn
@@ -207,7 +368,7 @@ class BrowserResearcher:
 
     @classmethod
     def default(cls, *, prefer_browser_harness: bool = True) -> BrowserResearcher:
-        return cls(fetch=_default_fetch(prefer_browser_harness))
+        return cls(fetch=default_fetch(prefer_browser_harness))
 
     def collect(
         self, slug: str, *, pages: tuple[str, ...] = ("overview", "discussion")

@@ -2,12 +2,18 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
 
 from kaggle_agent.config import CompetitionConfig
+from kaggle_agent.experiment_fingerprint import (
+    canonical_hash,
+    experiment_fingerprint,
+    recipe_hash,
+)
 
 
 def _cell(kind: str, source: str) -> dict:
@@ -46,6 +52,8 @@ def build_baseline_notebook(
     study_ids: list[str] | None = None,
     recipe_source: str | None = None,
     id_column: str = "StudyInstanceUID",
+    manifest: dict[str, object] | None = None,
+    seed: int = 42,
 ) -> dict:
     """Notebook that writes submission.csv from mounted data or embedded IDs.
 
@@ -71,6 +79,14 @@ Path("submission.csv").write_text(out.to_csv(index=False))
 print("fallback constant wrote", len(out))
 """
     recipe = recipe_source if recipe_source and "submission.csv" in recipe_source else fallback
+    recipe = recipe.replace("SEED = 42", f"SEED = {int(seed)}", 1)
+    if manifest:
+        manifest_source = (
+            "EXPERIMENT_MANIFEST = "
+            + repr(manifest)
+            + "\nprint('EXPERIMENT_MANIFEST', EXPERIMENT_MANIFEST)\n"
+        )
+        recipe = manifest_source + recipe
     cells = [
         _cell(
             "markdown",
@@ -101,6 +117,28 @@ build_rsna_baseline_notebook = build_baseline_notebook
 
 def _load_methods(root: Path, competition: CompetitionConfig) -> dict:
     path = root / competition.workspace_relative / "pipeline" / "methods.json"
+    if not path.is_file():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _load_artifact_manifest(root: Path, competition: CompetitionConfig) -> dict:
+    path = root / competition.workspace_relative / "pipeline" / "artifact_manifest.json"
+    if not path.is_file():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _load_resume_manifest(root: Path, competition: CompetitionConfig) -> dict:
+    path = root / competition.workspace_relative / "pipeline" / "resume_manifest.json"
     if not path.is_file():
         return {}
     try:
@@ -146,7 +184,16 @@ def _bundle_recipe_files(
 ) -> None:
     """Ship train tables + extractor so the kernel can train without mounted CSVs."""
     pipe = root / competition.workspace_relative / "pipeline"
-    for name in ("reports.py", "schema.py", "ranker.py", "methods.json", "methods_applied.md"):
+    for name in (
+        "reports.py",
+        "schema.py",
+        "ranker.py",
+        "methods.json",
+        "methods_applied.md",
+        "image_contract.json",
+        "artifact_manifest.json",
+        "resume_manifest.json",
+    ):
         src = pipe / name
         if src.is_file():
             shutil.copy2(src, folder / name)
@@ -166,8 +213,10 @@ def write_kernel_package(
     username: str,
     exp_id: str,
     enable_gpu: bool = False,
+    machine_shape: str | None = None,
     is_private: bool = True,
     enable_internet: bool = False,
+    plan_text: str = "",
 ) -> KernelPackage:
     """Write notebook + kernel-metadata.json under competitions/<id>/notebooks/<exp_id>/."""
     prefix = competition.id.replace("_", "-")
@@ -183,18 +232,59 @@ def write_kernel_package(
     nb_path = folder / nb_name
     meta_path = folder / "kernel-metadata.json"
 
+    methods = _load_methods(root, competition)
+    recipe_source = _recipe_source(root, competition) or ""
+    artifact_manifest = _load_artifact_manifest(root, competition)
+    resume_manifest = _load_resume_manifest(root, competition)
+    seed = 42
+    if plan_text.strip():
+        seed += int.from_bytes(hashlib.sha256(exp_id.encode("utf-8")).digest()[:2], "big") % 10000
+    manifest = {
+        "experiment_id": exp_id,
+        "experiment_fingerprint": experiment_fingerprint(
+            plan_text,
+            methods,
+            recipe_source,
+            root / competition.workspace_relative / "pipeline" / "code_brief.md",
+            seed=seed,
+        ),
+        "plan_sha256": canonical_hash(plan_text.strip()),
+        "recipe_sha256": recipe_hash(recipe_source),
+        "methods_sha256": canonical_hash(methods),
+        "seed": seed,
+        "seed_sha256": canonical_hash(seed),
+    }
+    if artifact_manifest:
+        manifest["artifact_manifest"] = artifact_manifest
     notebook = build_baseline_notebook(
         competition_slug=competition.slug,
         labels=competition.labels,
         study_ids=_load_study_ids(root, competition),
-        recipe_source=_recipe_source(root, competition),
+        recipe_source=recipe_source,
         id_column=competition.id_column,
+        manifest=manifest,
+        seed=seed,
     )
     nb_path.write_text(json.dumps(notebook, indent=1) + "\n", encoding="utf-8")
 
-    methods = _load_methods(root, competition)
-    datasets = [str(x) for x in (methods.get("dataset_sources") or []) if x][:6]
-    models = [str(x) for x in (methods.get("model_sources") or []) if x][:3]
+    from kaggle_agent.heal.pins import sanitize_datasets, sanitize_models
+
+    datasets = sanitize_datasets(
+        [str(x) for x in (methods.get("dataset_sources") or []) if x]
+    )
+    resume_dataset = str(resume_manifest.get("dataset_source") or "").strip()
+    if resume_dataset:
+        resume_sources = sanitize_datasets([resume_dataset])
+        if not resume_sources:
+            raise ValueError("resume manifest dataset_source is invalid")
+        # The resume artifact is required to reproduce the approved fold and
+        # always owns one of Kaggle's six attachment slots.  Research-card
+        # attachments are optional and are truncated deterministically.
+        resume_source = resume_sources[0]
+        datasets = [resume_source] + [x for x in datasets if x != resume_source][:5]
+    else:
+        datasets = datasets[:6]
+    models = sanitize_models([str(x) for x in (methods.get("model_sources") or []) if x])[:3]
 
     # Official template fields from kernels_initialize (kaggle API).
     # Source: KaggleApi.kernels_initialize / https://www.kaggle.com/docs/api
@@ -212,7 +302,10 @@ def write_kernel_package(
         "competition_sources": [competition.slug],
         "kernel_sources": [],
         "model_sources": models,
+        "experiment_manifest": manifest,
     }
+    if machine_shape:
+        meta["machine_shape"] = machine_shape
     meta_path.write_text(json.dumps(meta, indent=2) + "\n", encoding="utf-8")
     _bundle_recipe_files(root, competition, folder)
     return KernelPackage(

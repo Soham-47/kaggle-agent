@@ -1,0 +1,55 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>kaggle-agent</title>
+  <link rel="stylesheet" href="/static/app.css" />
+</head>
+<body>
+  <a class="skip" href="#term">Skip to terminal</a>
+  <header class="top">
+    <div class="brand">
+      <p class="kicker">kaggle-agent</p>
+      <h1>Live cycle</h1>
+    </div>
+    <dl class="status" id="status-bar" aria-live="polite"></dl>
+    <div class="actions">
+      <button type="button" id="run-dry" class="ghost">Dry run</button>
+      <button type="button" id="run-live">Run live</button>
+    </div>
+  </header>
+
+  <main>
+    <p id="load-error" class="banner" hidden></p>
+    <section class="board" aria-label="System design">
+      <div id="arch" class="flow"></div>
+      <div class="meta">
+        <div>
+          <h2>Eval gate</h2>
+          <div id="evals" class="pills"></div>
+        </div>
+        <div>
+          <h2>LLM ops</h2>
+          <p id="ops" class="ops-line"></p>
+        </div>
+      </div>
+    </section>
+
+    <section class="term-wrap" aria-label="Cycle terminal">
+      <div class="term-head">
+        <span>output</span>
+        <span id="term-state">idle</span>
+      </div>
+      <pre id="term" tabindex="0"></pre>
+    </section>
+  </main>
+
+  <form id="cmd" class="cmd" autocomplete="off">
+    <label class="sr" for="cmd-in">Command</label>
+    <input id="cmd-in" name="cmd" placeholder="/run   /run dry   /status   /pause" />
+    <button type="submit">Send</button>
+  </form>
+  <script src="/static/app.js"></script>
+</body>
+</html>

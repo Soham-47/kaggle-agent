@@ -24,10 +24,14 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from kaggle_agent.llm.zen_client import ZenClient
+from kaggle_agent.kaggle_api.sdk_get import get as _g
+from kaggle_agent.kaggle_api.sdk_get import get_str as _s
 from kaggle_agent.research.browser import (
     FetchFn,
+    SerpFn,
     fetch_via_http,
     merge_section_into_research_md,
+    search_via_ddg_http,
 )
 
 _DEEP_MARKER = "## Deep research digest"
@@ -125,6 +129,133 @@ class KaggleSource:
         if cached is None:
             return ""
         return _notebook_text(cached)[:max_chars]
+
+
+class DiscussionSource:
+    """Kaggle competition discussion topics via the official API.
+
+    ``competition_list_topics`` returns top-voted topics; content fetches the
+    topic body plus all comments via ``forums_topic_show``.
+    """
+
+    kind = "discussion"
+
+    def __init__(self, client: Any, competition: str) -> None:
+        self._client = client
+        self._competition = competition
+
+    def search(self, query: str, limit: int = 5) -> list[SourceHit]:
+        try:
+            resp = self._client.api.competition_list_topics(
+                self._competition, sort_by="top"
+            )
+        except Exception:  # noqa: BLE001
+            return []
+        out: list[SourceHit] = []
+        for t in (getattr(resp, "topics", None) or [])[:limit]:
+            if t is None:
+                continue
+            topic_id = _g(t, "id", default=0)
+            title = _s(t, "title") or f"discussion {topic_id}"
+            url = _s(t, "topic_url")
+            if not url:
+                url = (
+                    f"https://www.kaggle.com/c/{self._competition}"
+                    f"/discussion/{topic_id}"
+                )
+            votes = _g(t, "votes", default=0)
+            comments = _g(t, "comment_count", default=0)
+            out.append(
+                SourceHit(
+                    url=url,
+                    title=title,
+                    snippet=f"{votes} votes, {comments} comments",
+                    kind="discussion",
+                )
+            )
+        return out
+
+    def content(self, hit: SourceHit, max_chars: int = _MAX_CONTENT_CHARS) -> str:
+        topic_id = _topic_id_from_url(hit.url)
+        if topic_id is None:
+            return ""
+        try:
+            topic, comments, _ = self._client.api.forums_topic_show(topic_id)
+        except Exception:  # noqa: BLE001
+            return ""
+        parts: list[str] = []
+        body = _s(topic, "content") or _s(topic, "title")
+        if body:
+            parts.append(body)
+        for c in (comments or [])[:20]:
+            text = _s(c, "content")
+            if text:
+                parts.append(text)
+        return "\n\n".join(parts)[:max_chars]
+
+
+class DatasetSource:
+    """Kaggle dataset search via the official API; content = description."""
+
+    kind = "dataset"
+
+    def __init__(self, client: Any, competition: str) -> None:
+        self._client = client
+        self._competition = competition
+
+    def search(self, query: str, limit: int = 5) -> list[SourceHit]:
+        try:
+            resp = self._client.api.dataset_list_with_response(
+                search=query, sort_by="hottest", page_size=limit
+            )
+        except Exception:  # noqa: BLE001
+            return []
+        out: list[SourceHit] = []
+        for d in (getattr(resp, "datasets", None) or [])[:limit]:
+            if d is None:
+                continue
+            title = _s(d, "title") or _s(d, "ref") or "dataset"
+            subtitle = _s(d, "subtitle")
+            downloads = _g(d, "download_count", default=0)
+            votes = _g(d, "vote_count", default=0)
+            snippet = " — ".join(
+                x for x in (subtitle, f"{downloads} downloads", f"{votes} votes") if x
+            )
+            out.append(
+                SourceHit(
+                    url=_s(d, "url") or f"https://www.kaggle.com/datasets/{_s(d, 'ref')}",
+                    title=title,
+                    snippet=snippet,
+                    kind="dataset",
+                )
+            )
+        return out
+
+    def content(self, hit: SourceHit, max_chars: int = _MAX_CONTENT_CHARS) -> str:
+        slug = hit.url.rstrip("/").rsplit("/", 2)[-2:]
+        if len(slug) != 2:
+            return hit.snippet[:max_chars]
+        try:
+            resp = self._client.api.dataset_list_with_response(
+                search=slug[-1], sort_by="hottest", page_size=10
+            )
+        except Exception:  # noqa: BLE001
+            return hit.snippet[:max_chars]
+        for d in (getattr(resp, "datasets", None) or [])[:10]:
+            if d is None:
+                continue
+            if not (_s(d, "url") or "").rstrip("/").endswith("/".join(slug)):
+                continue
+            desc = _s(d, "description")
+            if desc:
+                return desc[:max_chars]
+        return hit.snippet[:max_chars]
+
+
+def _topic_id_from_url(url: str) -> int | None:
+    """Pull the numeric topic id from a discussion URL."""
+    match = re.search(r"/discussion/(\d+)", url or "")
+    return int(match.group(1)) if match else None
 
 
 def _prefer_primary_sources(urls: list[str]) -> list[str]:
@@ -265,45 +396,28 @@ class GithubSource:
 
 
 class WebSource:
-    """Generic web: DuckDuckGo HTML SERP + fetched page text."""
+    """Generic web: SERP search + fetched page text."""
 
     kind = "web"
 
-    def __init__(self, fetch: FetchFn | None = None) -> None:
+    def __init__(
+        self,
+        fetch: FetchFn | None = None,
+        serp: SerpFn | None = None,
+    ) -> None:
         self._fetch = fetch or fetch_via_http
+        self._serp = serp or search_via_ddg_http
 
     def search(self, query: str, limit: int = 5) -> list[SourceHit]:
-        url = "https://html.duckduckgo.com/html/?" + urllib.parse.urlencode({"q": query})
         try:
-            req = urllib.request.Request(
-                url,
-                headers={
-                    "User-Agent": (
-                        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-                        "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-                    )
-                },
-            )
-            with urllib.request.urlopen(req, timeout=20) as resp:
-                html = resp.read().decode("utf-8", errors="replace")
+            raw = self._serp(str(query), int(limit)) or []
         except Exception:  # noqa: BLE001
             return []
-        out: list[SourceHit] = []
-        for m in re.finditer(
-            r'<a[^>]+class="[^"]*result__a[^"]*"[^>]*href="([^"]+)"[^>]*>(.*?)</a>', html
-        ):
-            if len(out) >= limit:
-                break
-            href = m.group(1)
-            if "uddg=" in href:
-                url_text = urllib.parse.unquote(href.split("uddg=")[-1].split("&")[0])
-            else:
-                url_text = href
-            if not url_text.startswith("http"):
-                continue
-            title = re.sub(r"<[^>]+>", "", m.group(2)).strip()
-            out.append(SourceHit(url=url_text, title=title, kind="web"))
-        return out
+        return [
+            SourceHit(url=url_text, title=title, snippet=snippet, kind="web")
+            for title, url_text, snippet in raw
+            if url_text.startswith("http")
+        ]
 
     def content(self, hit: SourceHit, max_chars: int = _MAX_CONTENT_CHARS) -> str:
         try:
@@ -320,8 +434,14 @@ def _json_completion(
     *,
     max_tokens: int = 2048,
     retries: int = 1,
+    plain_wrap_key: str | None = None,
 ) -> dict[str, Any]:
-    """One strict-JSON LLM call; returns parsed dict. Raises on failure."""
+    """One strict-JSON LLM call; returns a dict. Raises on failure.
+
+    If every attempt returns prose (flash models do this) and plain_wrap_key
+    is set, return {plain_wrap_key: raw} instead of raising. Used for the
+    final report, where prose is still a usable report.
+    """
     raw = client.chat(
         model,
         [
@@ -342,16 +462,27 @@ def _json_completion(
         pass
     if retries > 0:
         return _json_completion(
-            client, model, system, user, max_tokens=max_tokens, retries=retries - 1
+            client,
+            model,
+            system,
+            user,
+            max_tokens=max_tokens,
+            retries=retries - 1,
+            plain_wrap_key=plain_wrap_key,
         )
+    if plain_wrap_key is not None:
+        return {plain_wrap_key: (raw or "").strip()}
     raise ResearchSourceError(f"LLM returned invalid JSON: {raw[:200]!r}")
 
 
 _SYSTEM = (
     "You are an expert researcher for Kaggle competitions. "
-    "You gather dense, accurate facts with exact numbers, metrics, methods, "
-    "architectures, and entity names. Value correctness over brevity. "
-    "Mistakes erode trust, so be precise. Today is "
+    "Follow the dzhng/deep-research loop: SERP queries with a researchGoal, "
+    "dense learnings, then follow-up directions. "
+    "Prefer site:kaggle.com/code, pinned discussions, and papers notebooks cite. "
+    "Ignore off-topic arXiv that only shares an AUC keyword. "
+    "Gather exact numbers, methods, architectures, and entity names. "
+    "Today is "
     + time.strftime("%Y-%m-%d")
     + "."
 )
@@ -392,6 +523,7 @@ class DeepResearcher:
         root: Path,
         *,
         log: Any = None,
+        relevance_terms: tuple[str, ...] = (),
     ) -> None:
         self._client = client
         self._model = model
@@ -399,9 +531,11 @@ class DeepResearcher:
         self._sources = sources
         self._root = root
         self._log = log
+        self._relevance_terms = tuple(t.lower() for t in relevance_terms if t)
         self._deadline = time.monotonic() + config.max_minutes * 60
         self._query_count = 0
         self._fetch_count = 0
+        self._seen_queries: set[str] = set()
 
     def _logmsg(self, msg: str) -> None:
         if self._log is not None:
@@ -410,13 +544,40 @@ class DeepResearcher:
     def _budget_left(self) -> bool:
         return self._query_count < self._config.max_queries and time.monotonic() < self._deadline
 
+    def _mark_query(self, query: str) -> bool:
+        """True when the query is new (normalized); records it as issued."""
+        key = re.sub(r"\W+", "", (query or "").lower())
+        if not key or key in self._seen_queries:
+            return False
+        self._seen_queries.add(key)
+        return True
+
+    def _findings_enough(self, learnings: list[str]) -> bool:
+        """Waku-style judge: stop adding depth when facts are implementable."""
+        if self._client is None or len(learnings) < 3:
+            return False
+        user = (
+            "Do these learnings give a coding agent datasets to attach, "
+            "how to find hidden test IDs, and an ensemble rule? "
+            'Return JSON: {"enough": bool, "gap": str}\n\n'
+            + "\n".join(f"- {x}" for x in learnings[:16])
+        )
+        try:
+            parsed = _json_completion(
+                self._client, self._model, _SYSTEM, user, max_tokens=300
+            )
+        except Exception:  # noqa: BLE001
+            return False
+        return bool(parsed.get("enough"))
+
     def _generate_queries(self, query: str, learnings: list[str], num: int) -> list[dict[str, str]]:
         if self._client is None:
             return [{"query": query, "researchGoal": query}]
         learn = "\n".join(f"- {x}" for x in learnings[-12:])
         user = (
-            f"Given the prompt, generate up to {num} unique web research queries. "
-            f"Each must state its researchGoal and deeper follow-up directions. "
+            f"Given the prompt, generate up to {num} unique search queries "
+            f"(dzhng SERP style). At least one query must include site:kaggle.com. "
+            f"Each must state its researchGoal. "
             f"Return JSON: {{\"queries\": [{{\"query\": str, \"researchGoal\": str}}]}}\n\n"
             f"<prompt>{query}</prompt>\n\n"
             + (f"Learnings so far:\n{learn}" if learn else "")
@@ -429,6 +590,13 @@ class DeepResearcher:
             if q:
                 out.append({"query": q, "researchGoal": str(it.get("researchGoal", ""))})
         return out or [{"query": query, "researchGoal": query}]
+
+    def _relevant(self, text: str) -> bool:
+        """Keep fetched content that mentions at least one relevance term."""
+        if not self._relevance_terms:
+            return True
+        low = text.lower()
+        return any(t in low for t in self._relevance_terms)
 
     def _fetch_all(self, hits: list[SourceHit]) -> list[str]:
         out: list[str] = []
@@ -448,18 +616,32 @@ class DeepResearcher:
                     text = fut.result()
                 except Exception:  # noqa: BLE001
                     text = ""
-                if text:
-                    self._fetch_count += 1
+                if not text:
+                    continue
+                self._fetch_count += 1
+                if self._relevant(text):
                     out.append(text[: _MAX_CONTENT_CHARS])
         return out
 
     def _distill(self, query: str, hits: list[SourceHit], num_learn: int, num_follow: int) -> dict[str, Any]:
         contents = self._fetch_all(hits)
-        if self._client is None or not contents:
+        if self._client is None:
             return {
-                "learnings": [h.snippet for h in hits if h.snippet][:num_learn],
+                "learnings": [
+                    h.snippet for h in hits if h.snippet and self._relevant(h.snippet)
+                ][:num_learn],
                 "followUpQuestions": [],
             }
+        if not contents:
+            # Fetches were empty or filtered out: give the LLM titles + snippets
+            # instead of starving the distill step.
+            contents = [
+                f"{h.title}\n{h.snippet}"
+                for h in hits
+                if h.title or h.snippet
+            ]
+            if not contents:
+                return {"learnings": [], "followUpQuestions": []}
         blocks = "\n".join(f"<content>\n{c}\n</content>" for c in contents)
         user = (
             f"Given the search results for <query>{query}</query>, return up to "
@@ -487,47 +669,96 @@ class DeepResearcher:
             return learnings, visited
         self._query_count += 1
         queries = self._generate_queries(query, learnings, breadth)
-        self._logmsg(f"deep depth={depth} queries={len(queries)} total={self._query_count}")
+        fresh = [q for q in queries if self._mark_query(q["query"])]
+        skipped = len(queries) - len(fresh)
+        if skipped:
+            self._logmsg(f"deep dedup: {skipped} repeated queries skipped")
+        self._logmsg(f"deep depth={depth} queries={len(fresh)} total={self._query_count}")
 
-        for item in queries:
-            if not self._budget_left():
-                break
+        def _one(item: dict[str, str]) -> tuple[dict[str, str], list[SourceHit], dict[str, Any]]:
             try:
                 hits = self._gather_hits(item["query"], self._config.per_query_limit)
             except Exception:  # noqa: BLE001
                 hits = []
-            visited.extend(h.url for h in hits)
-            if not hits:
-                continue
-            new_breadth = max(1, breadth // 2)
-            distilled = self._distill(
-                item["query"], hits, self._config.max_learnings, self._config.max_followups
+            distilled = (
+                self._distill(
+                    item["query"],
+                    hits,
+                    self._config.max_learnings,
+                    self._config.max_followups,
+                )
+                if hits
+                else {"learnings": [], "followUpQuestions": []}
             )
+            return item, hits, distilled
+
+        packed: list[tuple[dict[str, str], list[SourceHit], dict[str, Any]]] = []
+        if fresh:
+            with ThreadPoolExecutor(max_workers=min(4, len(fresh))) as pool:
+                for item, hits, distilled in pool.map(_one, fresh):
+                    if not self._budget_left():
+                        break
+                    packed.append((item, hits, distilled))
+
+        new_breadth = max(1, breadth // 2)
+        for item, hits, distilled in packed:
+            visited.extend(h.url for h in hits)
             learnings = _dedupe(learnings + distilled["learnings"])
-            if depth - 1 > 0 and distilled["followUpQuestions"]:
-                follow = (
-                    f"Previous research goal: {item['researchGoal']}\n"
-                    "Follow-up directions: "
-                    + "\n".join(f"- {q}" for q in distilled["followUpQuestions"])
-                )
+            if depth - 1 > 0:
+                # Recurse while budget allows, even with no follow-up questions.
+                # Otherwise a single empty followUpQuestions list kills the run.
                 learnings, visited = self.research(
-                    follow, new_breadth, depth - 1, learnings, visited
+                    self._follow_up_text(item, distilled, learnings),
+                    new_breadth,
+                    depth - 1,
+                    learnings,
+                    visited,
                 )
+        if self._client is not None and learnings and depth <= 1:
+            if self._findings_enough(learnings):
+                self._logmsg("deep judge: enough implementable facts")
         return learnings, visited
+
+    def _follow_up_text(
+        self,
+        item: dict[str, str],
+        distilled: dict[str, Any],
+        learnings: list[str],
+    ) -> str:
+        """Build the next-level prompt from follow-ups, or from learnings."""
+        parts = [f"Previous research goal: {item['researchGoal']}"]
+        if distilled["followUpQuestions"]:
+            parts.append(
+                "Follow-up directions:\n"
+                + "\n".join(f"- {q}" for q in distilled["followUpQuestions"])
+            )
+        elif learnings:
+            parts.append(
+                "Explore related work for:\n"
+                + "\n".join(f"- {x}" for x in learnings[-3:])
+            )
+        return "\n".join(parts)
 
     def _gather_hits(self, query: str, limit: int) -> list[SourceHit]:
         hits: list[SourceHit] = []
         for src in self._sources:
             try:
-                hits.extend(src.search(query, limit))
+                found = src.search(query, limit)
             except Exception:  # noqa: BLE001
                 continue
+            if src.kind == "kaggle" or not self._relevance_terms:
+                hits.extend(found)
+                continue
+            for h in found:
+                blob = f"{h.title} {h.snippet}".lower()
+                if any(t in blob for t in self._relevance_terms):
+                    hits.append(h)
         return hits
 
     def _write_report(self, prompt: str, learnings: list[str], visited: list[str]) -> Path:
         report_dir = self._root / self._config.report_dir
         report_dir.mkdir(parents=True, exist_ok=True)
-        stamp = time.strftime("%Y%m%d-%H%M%S")
+        stamp = time.strftime("%Y%m%d-%H%M%S", time.gmtime())
         path = report_dir / f"deep-{stamp}.md"
 
         body = self._report_markdown(prompt, learnings)
@@ -536,6 +767,12 @@ class DeepResearcher:
         return path
 
     def _report_markdown(self, prompt: str, learnings: list[str]) -> str:
+        if not learnings:
+            return (
+                f"# Deep research: {prompt[:80]}\n\n"
+                "No learnings distilled this run. Sources were searched but yielded "
+                "nothing usable. Check the daily log for the deep line."
+            )
         if self._client is None:
             return (
                 f"# Deep research: {prompt[:80]}\n\n"
@@ -548,12 +785,23 @@ class DeepResearcher:
             "Return JSON: {\"reportMarkdown\": str}\n\n"
             f"<prompt>{prompt}</prompt>\n\n<learnings>\n{learn}\n</learnings>"
         )
-        parsed = _json_completion(self._client, self._model, _SYSTEM, user, max_tokens=8192)
+        parsed = _json_completion(
+            self._client,
+            self._model,
+            _SYSTEM,
+            user,
+            max_tokens=8192,
+            retries=2,
+            plain_wrap_key="reportMarkdown",
+        )
         return str(parsed.get("reportMarkdown") or "").strip() or "# Deep research report"
 
     def digest_markdown(self, learnings: list[str], sources: list[str]) -> str:
         lines = [_DEEP_MARKER, "", "Distilled from articles, papers, notebooks, repos, web.", ""]
-        lines += [f"- {l}" for l in learnings[:20]]
+        if not learnings:
+            lines.append("No learnings distilled this run (deep research found nothing usable).")
+        else:
+            lines += [f"- {l}" for l in learnings[:20]]
         lines.append("")
         lines += [f"- source: {u}" for u in _prefer_primary_sources(sources)[:15]]
         return "\n".join(lines)
@@ -561,7 +809,18 @@ class DeepResearcher:
     def run(self, prompt: str, research_path: Path | None = None) -> DeepResearchResult:
         result = DeepResearchResult()
         if self._client is None and not any(
-            isinstance(s, (KaggleSource, ArxivSource, GithubSource, WebSource)) for s in self._sources
+            isinstance(
+                s,
+                (
+                    KaggleSource,
+                    ArxivSource,
+                    GithubSource,
+                    WebSource,
+                    DiscussionSource,
+                    DatasetSource,
+                ),
+            )
+            for s in self._sources
         ):
             result.error = "no llm and no sources"
             return result
@@ -570,7 +829,7 @@ class DeepResearcher:
             result.learnings = learnings
             result.sources = list(dict.fromkeys(visited))
             result.queries_run = self._query_count
-            if learnings:
+            if learnings or visited or self._query_count:
                 result.report_path = self._write_report(prompt, learnings, visited)
                 if research_path is not None:
                     merge_section_into_research_md(

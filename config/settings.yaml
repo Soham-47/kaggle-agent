@@ -8,14 +8,63 @@ paths:
   competitions_dir: competitions
   config_competitions_dir: config/competitions
 
+llm:
+  # Official DeepSeek only (DEEPSEEK_API_KEY from .env). Zen is not used.
+  provider: deepseek
+
+deepseek:
+  base_url: https://api.deepseek.com
+  timeout_s: 180
+  # Official Flash id only — do not use deepseek-v4-pro
+  default_plan_model: deepseek-v4-flash
+  default_code_model: deepseek-v4-flash
+  default_distill_model: deepseek-v4-flash
+  default_vision_model: deepseek-v4-flash
+
+# https://docs.agentrouter.org — OpenAI-compatible. Key: AGENTROUTER_API_KEY
+agentrouter:
+  base_url: https://agentrouter.org/v1
+  timeout_s: 90
+  default_plan_model: glm-5.2
+  default_code_model: glm-5.2
+  default_distill_model: gpt-5.5
+  default_vision_model: gpt-5.5
+
+# Hosted NIM workhorses (high catalog traffic), not Ultra / GLM-5.2 flagship
+nvidia:
+  base_url: https://integrate.api.nvidia.com/v1
+  # API key from env: NVIDIA_API_KEY
+  default_plan_model: deepseek-ai/deepseek-v4-flash-0731
+  default_code_model: deepseek-ai/deepseek-v4-flash-0731
+  default_distill_model: nvidia/nemotron-3-nano-30b-a3b
+  default_vision_model: nvidia/nemotron-3-nano-30b-a3b
+
+# Chinese OpenAI-compatible relay. Key: HETZNEZ_API_KEY. Host: HETZNEZ_BASE_URL or here.
+hetznez:
+  base_url: ""
+  timeout_s: 90
+  default_plan_model: deepseek-ai/deepseek-v4-flash-0731
+  default_code_model: deepseek-ai/deepseek-v4-flash-0731
+  default_distill_model: deepseek-ai/deepseek-v4-flash-0731
+  default_vision_model: deepseek-ai/deepseek-v4-flash-0731
+
 zen:
   base_url: https://opencode.ai/zen/v1
+  timeout_s: 180
   # API key from env: OPENCODE_API_KEY
-  # Default model ids (competition config can override)
-  default_plan_model: gpt-5.5
-  default_code_model: gpt-5.5
-  default_distill_model: gpt-5.5
-  default_vision_model: gpt-5.5  # override per competition when multimodal needed
+  # Free Zen ids only (https://opencode.ai/docs/zen/#pricing). Do not use gpt-5.5.
+  default_plan_model: deepseek-v4-flash-free
+  default_code_model: deepseek-v4-flash-free
+  default_distill_model: nemotron-3.5-lightning-free
+  default_vision_model: big-pickle
+  # Rotate on 429 / 504 / timeout. Still Zen free only.
+  free_models:
+    - deepseek-v4-flash-free
+    - nemotron-3.5-lightning-free
+    - big-pickle
+    - mimo-v2.5-free
+    - hy3-free
+    - laguna-s-2.1-free
 
 code_agent:
   # Shell command template; {prompt_file} is filled at runtime
@@ -34,7 +83,11 @@ submit:
   # MCP notebook submit cannot push a kernel you do not already own.
   mcp: false
   api: true
-  browser_fallback: true
+  # Submission is API-only. Browser access is research-only.
+  browser_fallback: false
+judges:
+  # LLM-judge TRAIN/SUBMIT output (mechanical kernel judge always runs).
+  train: false
 
 browser_research:
   enabled: true
@@ -46,8 +99,21 @@ browser_research:
   # fail-soft: cycle continues if browser scrape fails
 
 research:
-  # RESEARCH may retry source cards until methods.json is implementable
+  # RESEARCH is an LLM tool-loop (done / time / turn cap). loop_passes is unused.
   loop_passes: 3
+  agent:
+    max_minutes: 15
+    max_tool_turns: 40
+    max_tokens: 2048
+  fleet:
+    # Parallel per-source research subagents; replaces the sequential loop
+    # when enabled here or via the competition yaml (research.fleet: true).
+    enabled: false
+    agents: [notebooks, papers, github, web, discussions, datasets]
+    agent:
+      max_minutes: 15
+      max_tool_turns: 24
+      max_tokens: 2048
   deep:
     # deep-research style stage: articles, papers, notebooks, repos, web
     enabled: true
@@ -61,16 +127,40 @@ research:
     max_minutes: 15  # cron-safe time budget
     report_dir: memory/research-deep
 
+plan:
+  agent:
+    max_minutes: 10
+    max_tool_turns: 20
+    max_tokens: 2048
+
+code:
+  agent:
+    max_minutes: 10
+    # write_kernel_recipe emits the full ~9K-token recipe body in one tool call;
+    # extra turns let the agent iterate on validation rejections
+    max_tool_turns: 26
+    max_tokens: 16384
+
+eval:
+  # Live submissions require the current cycle's mechanical eval report to pass.
+  block_submit: true
+
 kernel:
   # Build package always; push only if push=true AND orchestrator.dry_run=false
   push: true
-  enable_gpu: false  # honor host accelerator policy; runner retries CPU on P100/GPU ban
+  # T4 is allowed by this host; P100 is not. machine_shape asks Kaggle for T4.
+  # The runner still retries CPU if the host bans the requested accelerator.
+  enable_gpu: true
+  machine_shape: NvidiaTeslaT4
+  enable_internet: false
+  poll_seconds: 30
+  poll_attempts: 120  # allow up to 60 minutes for a CPU kernel
   # username: null  # default: from ~/.kaggle/kaggle.json
 
 orchestrator:
   dry_run: true
   # research: Kaggle API first, then browser read-only pages
-  # submit: API (notebook push + submit_code) → browser_fallback
+  # submit: API only (notebook push + submit_code)
   phases:
     - LOCK
     - RESEARCH
@@ -89,6 +179,10 @@ heal:
   max_tune_attempts: 3
   max_no_improve_days: 5
   # ladder: tune → recipe → new → pause (sets state.paused)
+
+feedback:
+  wait_minutes: 12   # poll LB after submit for the score; 0 = never wait
+  poll_seconds: 30
 
 loop:
   n_min: 2

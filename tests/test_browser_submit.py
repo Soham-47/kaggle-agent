@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from fakes import FakeKaggleApi
+from fakes import FakeKaggleApi, successful_kernel_train
 from kaggle_agent.kaggle_api import KaggleClient
 from kaggle_agent.kaggle_api.models import SubmitResult
 from kaggle_agent.notify.telegram import FakeTelegram
@@ -33,14 +33,22 @@ def _fake_browser(url: str, max_chars: int = 12000) -> str:
     return "Overview knee MRI macro AUC discussion. " * 6
 
 
+def _write_live_submission(path: Path, header: list[str]) -> None:
+    rows = "\n".join(
+        f"study-{i}," + ",".join([str(0.5 + (i % 2) * 0.1)] * (len(header) - 1))
+        for i in range(1000)
+    )
+    path.write_text(",".join(header) + "\n" + rows + "\n", encoding="utf-8")
+
+
 class _FailSubmitApi(FakeKaggleApi):
     """API that rejects competition_submit / submit_code."""
 
     def competition_submit(self, *args, **kwargs):
         raise RuntimeError("400 CreateSubmission forced")
 
-    def kernels_push(self, folder, timeout=None, acc=None):
-        raise RuntimeError("kernels_push forced fail")
+    def competition_submit_code(self, *args, **kwargs):
+        raise RuntimeError("submit_code forced fail")
 
 
 def test_browser_submit_dry_run(tmp_path: Path):
@@ -79,7 +87,7 @@ def test_browser_submit_injected(tmp_path: Path):
     assert r.success and r.message == "ui ok"
 
 
-def test_orchestrator_browser_fallback_on_api_fail(tmp_path: Path):
+def test_orchestrator_does_not_submit_via_browser_when_api_fails(tmp_path: Path, monkeypatch):
     root = tmp_path / "kaggle-agent"
     real = Path(__file__).resolve().parents[1]
     _copy_min(root, real)
@@ -114,9 +122,9 @@ def test_orchestrator_browser_fallback_on_api_fail(tmp_path: Path):
 
     comp = load_competition("rsna_knee", root)
     header = [comp.id_column, *comp.labels]
-    csv.write_text(
-        ",".join(header) + "\nstudy-1," + ",".join(["0.5"] * len(comp.labels)) + "\n",
-        encoding="utf-8",
+    _write_live_submission(csv, header)
+    monkeypatch.setattr(
+        "kaggle_agent.orchestrator.Orchestrator._kernel_train", successful_kernel_train(root)
     )
 
     calls: list[str] = []
@@ -140,9 +148,8 @@ def test_orchestrator_browser_fallback_on_api_fail(tmp_path: Path):
         browser_submit=browser_ok,
         mcp_submit_fn=mcp_fail,
     )
-    assert result.submit_ok is True
-    assert calls, "browser fallback should run"
-    assert "browser recovered" in (result.submit_message or "")
-    assert load_pending(root).status == "submitted"
+    assert result.submit_ok is False
+    assert calls == []
+    assert load_pending(root).status != "submitted"
     st = load_state(root)
     assert st.lock_held is False

@@ -1,0 +1,18 @@
+[project]
+name = "inference-engineering-100-days"
+version = "0.1.0"
+description = "A 100-day, GPU-first course on LLM inference engineering"
+requires-python = ">=3.10"
+dependencies = [
+    "numpy",
+    "torch",
+    "pytest",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = ["-q"]
+pythonpath = ["."]
+markers = [
+    "gpu: tests that require a CUDA GPU",
+]

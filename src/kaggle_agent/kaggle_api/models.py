@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import Any
 
 
 @dataclass(frozen=True)
@@ -28,6 +29,19 @@ class MetaFile:
     name: str
     total_bytes: int
     ref: str = ""
+
+
+@dataclass(frozen=True)
+class CompetitionInfo:
+    slug: str
+    title: str
+    url: str
+    deadline: str
+    evaluation_metric: str
+    kernels_only: bool
+    max_daily_submissions: int
+    tags: tuple[str, ...] = ()
+    raw: dict[str, Any] = field(default_factory=dict, compare=False)
 
 
 @dataclass(frozen=True)

@@ -29,6 +29,8 @@ def validate_submission_csv(
     id_column: str,
     labels: list[str],
     require_rows: bool = True,
+    require_min_rows: int | None = None,
+    require_prediction_variation: bool = False,
 ) -> ValidationResult:
     result = ValidationResult(ok=True, path=path)
     if not path.is_file():
@@ -47,6 +49,7 @@ def validate_submission_csv(
             result.fail(f"header mismatch\n  expected: {expected}\n  got:      {header}")
 
         n = 0
+        prediction_values: list[float] = []
         for i, row in enumerate(reader, start=2):
             n += 1
             if not (row.get(id_column) or "").strip():
@@ -60,9 +63,14 @@ def validate_submission_csv(
                     continue
                 if not 0.0 <= val <= 1.0:
                     result.fail(f"line {i}: {lab}={val} outside [0,1]")
+                prediction_values.append(val)
 
         result.n_rows = n
         if require_rows and n == 0:
             result.fail("no data rows")
+        if require_min_rows is not None and n < require_min_rows:
+            result.fail(f"only {n} data rows; require at least {require_min_rows}")
+        if require_prediction_variation and n > 1 and len(set(prediction_values)) < 2:
+            result.fail("prediction output is constant across all labels and rows")
 
     return result

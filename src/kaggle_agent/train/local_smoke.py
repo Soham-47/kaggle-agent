@@ -20,6 +20,7 @@ SYNTHETIC_STUDY_IDS = (
 class LocalSmokeOutcome:
     ok: bool
     smoke: SmokeResult | None = None
+    cv_auc: float | None = None
     errors: list[str] = field(default_factory=list)
 
 
@@ -152,9 +153,44 @@ def run_competition_smoke(
             labels=competition.labels,
             value=value,
         )
+    cv_auc: float | None = None
+    train_csv = _first_file(
+        root / "data" / "train.csv",
+        root / competition.workspace_relative / "data" / "train.csv",
+    )
+    train_series_csv = _first_file(
+        root / "data" / "train_series.csv",
+        root / competition.workspace_relative / "data" / "train_series.csv",
+    )
+    if train_csv is not None and train_series_csv is not None:
+        from kaggle_agent.pipeline.cv import evaluate_ranker_cv
+
+        try:
+            result = evaluate_ranker_cv(
+                train_csv,
+                train_series_csv,
+                root / competition.workspace_relative,
+            )
+        except Exception as exc:  # noqa: BLE001
+            result = None
+            notes.append(f"info: cv skipped ({exc})")
+        if result is not None:
+            cv_auc = float(result["macro_auc"])
+            notes.append(
+                f"info: cv_auc={cv_auc:.4f} n={result['n_studies']} folds={result['folds']}"
+            )
+
     # notes are informational; only validation failures are real errors
     return LocalSmokeOutcome(
         ok=smoke.ok,
         smoke=smoke,
+        cv_auc=cv_auc,
         errors=notes + list(smoke.errors),
     )
+
+
+def _first_file(*paths: Path) -> Path | None:
+    for path in paths:
+        if path.is_file():
+            return path
+    return None

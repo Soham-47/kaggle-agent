@@ -2,6 +2,11 @@
 
 from __future__ import annotations
 
+import os
+import json
+import re
+import threading
+import time
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
@@ -10,73 +15,115 @@ from typing import Any
 from kaggle_agent.code.workspace import ensure_pipeline_ready
 from kaggle_agent.config import CompetitionConfig, Settings, load_competition, load_settings
 from kaggle_agent.kaggle_api import KaggleClient
+from kaggle_agent.kaggle_api.models import SubmissionRow
+from kaggle_agent.judge import (
+    judge_kernel,
+    judge_plan,
+    judge_train_llm,
+    new_judge_state,
+)
 from kaggle_agent.llm.router import ModelRouter
 from kaggle_agent.memory.ingest import build_context_pack
-from kaggle_agent.memory.write import append_daily_log, write_experiment
+from kaggle_agent.memory.write import (
+    append_daily_event,
+    append_daily_log,
+    patch_experiment,
+    patch_memory_public_score,
+    write_experiment,
+)
 from kaggle_agent.notify.telegram import SupportsTelegram, TelegramClient
 from kaggle_agent.paths import memory_dir
 from kaggle_agent.pipeline.validate import validate_submission_csv
+from kaggle_agent.pipeline.image_template import validate_image_runtime_evidence
 from kaggle_agent.research.apply_snapshot import apply_kaggle_research
 from kaggle_agent.research.browser import (
     BrowserResearcher,
     FetchFn,
+    default_fetch,
+    default_serp,
     merge_browser_into_research_md,
 )
+from kaggle_agent.agents.code import make_code_agent
+from kaggle_agent.agents.loop import StageAgent, StageAgentConfig
+from kaggle_agent.agents.plan import make_plan_agent, write_plan_text
+from kaggle_agent.agents.verification import (
+    verify_code_stage,
+    verify_plan_stage,
+    verify_research_fleet,
+)
+from kaggle_agent.research.agent import ResearchAgent
+from kaggle_agent.research.fleet import (
+    AGENT_SPECS,
+    clone_client_for_agent,
+    fleet_tool_schemas,
+    make_fleet_tools,
+    make_write_card,
+    run_fleet,
+    subagent_system,
+)
 from kaggle_agent.research.source_cards import (
+    _PULL_LOCK,
     cards_feasible,
+    judge_cards_ready,
+    load_methods,
+    merge_digest,
     run_source_card_research,
     write_methods_sidecar,
 )
+from kaggle_agent.stages import Stage, build_stage_registry
+from kaggle_agent.state_access import DiskStateAccessor, StateAccessor
 from kaggle_agent.research.deep import (
     ArxivSource,
+    DatasetSource,
     DeepResearcher,
+    DiscussionSource,
     GithubSource,
     KaggleSource,
     WebSource,
 )
-from kaggle_agent.state_md import AgentState, RunLock, load_state, save_state
+from kaggle_agent.state_md import AgentState
 from kaggle_agent.kaggle_api.mcp_submit import submit_via_mcp
 from kaggle_agent.kaggle_api.submit_ops import normalize_kernel_ref
-from kaggle_agent.submit.browser_submit import (
-    BrowserSubmitFn,
-    BrowserSubmitRequest,
-    submit_via_browser,
-)
 from kaggle_agent.submit.pending import (
-    load_pending,
     mark_submitted,
     request_approval,
-    save_pending,
     set_decision,
     usable_approval,
 )
 from kaggle_agent.heal.policy import decide_next, load_heal, save_heal
+from kaggle_agent.heal.feedback import (
+    already_recorded,
+    exp_id_from_description,
+)
 from kaggle_agent.loop import (
     load_loop,
     next_loop_count,
     parse_loop_score,
+    score_is_better,
     update_loop_from_score,
 )
-from kaggle_agent.train.kernel_job import load_kernel_job
-from kaggle_agent.train.kernel_runner import run_kernel_phase
+from kaggle_agent.experiment_fingerprint import submission_output_hash
+from kaggle_agent.train.kernel_history import record_output, seen_output
+from kaggle_agent.train.kernel_history import package_fingerprint as kernel_package_fingerprint
+from kaggle_agent.train.kernel_job import KernelJob, save_kernel_job
+from kaggle_agent.train.kernel_runner import (
+    KernelRunResult,
+    package_matches_existing,
+    run_kernel_phase,
+)
 from kaggle_agent.train.local_smoke import run_competition_smoke
 from kaggle_agent.train.notebook_builder import write_kernel_package
-
-PLAN_SYSTEM = """You plan the next Kaggle experiment. Be brief.
-Reply with exactly 3 lines:
-hypothesis: <one sentence>
-approach: baseline|tune|recipe|new
-steps: <semicolon-separated minimal steps>
-Prefer the copyable next step from method cards (research-deep/source-*.md
-and the Deep research digest) over a constant-score baseline. No code."""
-
-CODE_SYSTEM = """You are the coding agent for this Kaggle cycle.
-Read the method cards. Reply with at most 8 short lines:
-1. Which public datasets/models to attach
-2. How to find hidden test IDs
-3. How to combine scores (rank-mean vs other)
-4. What not to copy
-Do not invent a new architecture. Do not include secrets."""
+from kaggle_agent.ops.evals import evaluate_cycle, persist_report
+from kaggle_agent.ops.tracing import Tracer
+from kaggle_agent.autonomy.approval import SubmissionAutonomy
+from kaggle_agent.autonomy.outcomes import OutcomeState, StageOutcome, failure_signature
+from kaggle_agent.autonomy.repair_tools import IncidentStore
+from kaggle_agent.autonomy.runtime import StageExecutor, StageInput, StageLedger
+from kaggle_agent.autonomy.outbox import (
+    ExternalAction,
+    ExternalActionOutbox,
+    reconcile_with_kaggle,
+)
 
 DEFAULT_HYPOTHESIS = "dry-run default: schema-valid 0.5 baseline then improve"
 
@@ -99,14 +146,21 @@ class CycleResult:
     kaggle_ok: bool | None = None
     browser_ok: bool | None = None
     deep_ok: bool | None = None
+    research_verified: bool | None = None
+    research_verification_detail: str = ""
     deep_learnings: int = 0
     deep_sources: int = 0
     code_ok: bool | None = None
     smoke_ok: bool | None = None
     smoke_path: str | None = None
     kernel_ok: bool | None = None
+    kernel_pending: bool = False
+    kernel_duplicate: bool = False
+    output_duplicate: bool = False
     kernel_ref: str | None = None
+    kernel_version: int | None = None
     kernel_path: str | None = None
+    kernel_judge_ok: bool | None = None
     validate_ok: bool | None = None
     candidate_csv: str | None = None
     approve_ok: bool | None = None
@@ -114,11 +168,20 @@ class CycleResult:
     submit_message: str | None = None
     waiting_approve: bool = False  # live run OK, needs /yes (not a failure)
     feedback_score: str | None = None
+    feedback_pending: bool = False
+    submission_pending: bool = False
     heal_decision: str | None = None
     kernel_resumed: bool | None = None
     train_slices: int = 0
     research_passes: int = 0
+    wrote_custom_infer: bool = False
+    wrote_methods: bool = False
+    wrote_recipe: bool = False
+    plan_verified: bool | None = None
+    code_verified: bool | None = None
+    code_agent: str | None = None
     errors: list[str] = field(default_factory=list)
+    stage_outcomes: list[StageOutcome] = field(default_factory=list)
 
     @property
     def hard_errors(self) -> list[str]:
@@ -154,21 +217,73 @@ class Orchestrator:
         kaggle: KaggleClient | None = None,
         browser_fetch: FetchFn | None = None,
         telegram: SupportsTelegram | None = None,
-        browser_submit: BrowserSubmitFn | None = None,
+        browser_submit: Any | None = None,
         mcp_submit_fn: Any | None = None,
         router: Any | None = None,
+        skip_phases: frozenset[str] | None = None,
+        state_access: StateAccessor | None = None,
+        debug_runner: Any | None = None,
     ) -> None:
         self.settings = settings
         self.competition = competition
         self.root = root if root is not None else settings.root
         self.router = router if router is not None else ModelRouter.build(settings, competition)
+        self._sa = state_access if state_access is not None else DiskStateAccessor(self.root)
         self._kaggle = kaggle
         self._browser_fetch = browser_fetch
         self._telegram = telegram
-        self._browser_submit = browser_submit
+        # Kept as an ignored compatibility argument for callers that previously
+        # injected a browser fallback. Submission is API-only by policy.
+        _ = browser_submit
         self._mcp_submit_fn = mcp_submit_fn  # tests inject call_tool
         self._assume_approved = False
         self._loop_n_used = 0
+        self._tracer: Tracer | None = None
+        self._skip_phases = skip_phases or frozenset()
+        self._stages: dict[str, Stage] = build_stage_registry(self)
+        self._stage_executor = StageExecutor(StageLedger(self.root))
+        self._outbox = ExternalActionOutbox(self.root)
+        self._debug_runner = debug_runner
+        if self._debug_runner is None and self._llm_available():
+            from kaggle_agent.autonomy.debug_agent import CodingDebugAgent
+
+            self._debug_runner = CodingDebugAgent(
+                self.root,
+                self.router.client,
+                self.competition.model_for("code", self.settings),
+                self.settings.code_agent_config(),
+            ).run
+
+    def _submission_autonomy(self) -> SubmissionAutonomy | None:
+        if not isinstance(self.competition.raw.get("autonomy"), dict):
+            return None
+        return SubmissionAutonomy(self.competition.path)
+
+    def _auto_submit_allowed(self, state: AgentState) -> bool:
+        policy = self._submission_autonomy()
+        if policy is None:
+            return False
+        try:
+            used = int(state.proposals_used or "0")
+        except ValueError:
+            used = 0
+        return policy.can_submit_without_approval(proposals_used=used)
+
+    def _reconcile_outbox_action(self, item: ExternalAction) -> ExternalAction:
+        """Use only Kaggle's authoritative records to settle an external intent."""
+        try:
+            if self._kaggle is None:
+                self._kaggle = KaggleClient().connect()
+            return reconcile_with_kaggle(
+                self._outbox,
+                item,
+                kernel_status=self._kaggle.kernels_status,
+                submissions=lambda competition: self._kaggle.submissions(
+                    competition, top=20
+                ),
+            )
+        except Exception:  # noqa: BLE001
+            return self._outbox.get(item.action_id) or item
 
     def run_cycle(
         self, *, dry_run: bool | None = None, assume_approved: bool = False
@@ -178,17 +293,24 @@ class Orchestrator:
         self._loop_n_used = 0
         result = CycleResult(competition=self.competition.id, dry_run=dry)
         now = datetime.now(timezone.utc)
-        state = load_state(self.root)
+        state = self._sa.load_state()
 
         if state.paused:
             return self._skip(result, "paused", now)
-        lock = RunLock(self.root)
-        if not lock.acquire():
+        if not self._sa.acquire_lock():
             return self._skip(result, "lock_held", now)
+        if self._sa.lock_took_over():
+            append_daily_log("run lock stale; taken over", self.root)
 
         try:
             state = self._begin(state, dry, now, result)
             result.context_sections = len(build_context_pack(self.root).sections)
+
+            if not dry:
+                try:
+                    self._catch_up_scores(state)
+                except Exception as exc:  # noqa: BLE001
+                    append_daily_log(f"score catch-up failed: {exc}", self.root)
 
             # Block order is fixed (RESEARCH before the slice). Each block
             # is intersected with settings.phases so yaml can still drop steps.
@@ -198,21 +320,59 @@ class Orchestrator:
             state = self._run_named_phases(
                 self._enabled_phases(("RESEARCH",)), state, dry, result
             )
-            state = self._run_train_slices(state, dry, result, started=now)
-            state = self._run_named_phases(
-                self._enabled_phases(SUBMIT_PHASES), state, dry, result
-            )
-            self._update_loop_after_feedback(result)
-            state = self._run_named_phases(
-                self._enabled_phases(TAIL_PHASES), state, dry, result
-            )
+            research_blocked = not dry and result.research_verified is False
+            if research_blocked:
+                result.errors.append(
+                    "research verification failed; training blocked: "
+                    f"{result.research_verification_detail}"
+                )
+                append_daily_log("research verification failed; training blocked", self.root)
+            else:
+                state = self._run_train_slices(state, dry, result, started=now)
+            if not result.kernel_pending and not self._submission_blocked(result):
+                state = self._run_named_phases(
+                    self._enabled_phases(
+                        tuple(phase for phase in SUBMIT_PHASES if phase != "FEEDBACK")
+                    ), state, dry, result
+                )
+                if result.submission_pending:
+                    append_daily_log(
+                        "submission intent pending; feedback and HEAL deferred", self.root
+                    )
+                else:
+                    state = self._run_named_phases(
+                        self._enabled_phases(("FEEDBACK",)), state, dry, result
+                    )
+                    self._update_loop_after_feedback(result)
+                    state = self._run_named_phases(
+                        self._enabled_phases(TAIL_PHASES), state, dry, result
+                    )
 
             self._finish_ok(state, result)
         except Exception as exc:  # noqa: BLE001
             self._finish_error(result, exc)
+        except BaseException as exc:
+            # Interrupts and process-control exceptions still own a persisted
+            # lock.  Record and release it before propagating to the caller.
+            self._finish_error(result, exc)
+            raise
         finally:
-            lock.release()
+            self._sa.release_lock()
         return result
+
+    @staticmethod
+    def _submission_blocked(result: CycleResult) -> bool:
+        blocking = {
+            OutcomeState.RECOVERABLE_FAILURE,
+            OutcomeState.NEEDS_AUTHORITY,
+            OutcomeState.EXHAUSTED,
+            OutcomeState.FATAL,
+        }
+        latest: dict[str, OutcomeState] = {}
+        for outcome in result.stage_outcomes:
+            if outcome.stage != "DEBUG":
+                latest[outcome.stage] = outcome.state
+        return any(state in blocking for state in latest.values())
 
     def _skip(self, result: CycleResult, reason: str, now: datetime) -> CycleResult:
         result.skipped = True
@@ -225,6 +385,8 @@ class Orchestrator:
     ) -> AgentState:
         exp_id = now.strftime("%Y%m%d-%H%M%S") + ("-dry" if dry else "")
         result.experiment_id = exp_id
+        self._tracer = Tracer(self.root, cycle_id=exp_id)
+        self._tracer.emit("cycle_start", competition=self.competition.id, dry=dry)
         state.lock_held = True
         state.dry_run = dry
         state.competition = self.competition.id
@@ -233,7 +395,7 @@ class Orchestrator:
         state.last_result = "running"
         state.last_error = "none"
         state.note = "running"
-        save_state(state, self.root)
+        self._sa.save_state(state)
         append_daily_log(f"start {self.competition.id} dry={dry}", self.root, when=now)
         return state
 
@@ -243,17 +405,18 @@ class Orchestrator:
         state.last_cycle_end = datetime.now(timezone.utc).isoformat()
         if result.hard_errors:
             state.last_result = "error"
+            state.last_error = result.hard_errors[0][:200]
         elif result.waiting_approve:
             state.last_result = "waiting_approve"
         else:
             state.last_result = "ok"
         if state.note in {"none", "running", "done", ""}:
             state.note = (
-                "waiting /yes"
-                if result.waiting_approve
-                else "done"
+                "kernel pending"
+                if result.kernel_pending
+                else ("waiting /yes" if result.waiting_approve else "done")
             )
-        save_state(state, self.root)
+        self._sa.save_state(state)
         if result.hard_errors:
             msg = f"end errors={result.hard_errors}"
         elif result.waiting_approve:
@@ -261,21 +424,35 @@ class Orchestrator:
         else:
             msg = "end ok"
         append_daily_log(msg, self.root)
+        self._ops_close(result, state.last_result)
 
     def _finish_error(self, result: CycleResult, exc: Exception) -> None:
         result.errors.append(str(exc))
-        state = load_state(self.root)
+        state = self._sa.load_state()
         state.phase = "IDLE"
         state.lock_held = False
         state.last_result = "error"
         state.last_error = str(exc)[:200]
         state.note = "error"
-        save_state(state, self.root)
+        self._sa.save_state(state)
         append_daily_log(f"error: {exc}", self.root)
+        self._ops_close(result, "error")
+
+    def _ops_close(self, result: CycleResult, status: str) -> None:
+        if self._tracer is not None:
+            self._tracer.emit("cycle_end", status=status, errors=result.hard_errors[:5])
+        try:
+            persist_report(self.root, evaluate_cycle(self.root))
+        except Exception:  # noqa: BLE001
+            pass
 
     def _enabled_phases(self, phases: tuple[str, ...]) -> tuple[str, ...]:
         allowed = set(self.settings.phases)
-        return tuple(p for p in phases if p in allowed)
+        return tuple(p for p in phases if p in allowed and p not in self._skip_phases)
+
+    def _llm_available(self) -> bool:
+        client = self.router.client if self.router is not None else None
+        return client is not None and hasattr(client, "chat")
 
     def _run_named_phases(
         self,
@@ -286,10 +463,176 @@ class Orchestrator:
     ) -> AgentState:
         for phase in phases:
             state.phase = phase
-            save_state(state, self.root)
+            self._sa.save_state(state)
             append_daily_log(phase, self.root)
-            state = self._phase(phase, state=state, dry=dry, result=result)
+            append_daily_event(
+                "phase_start",
+                {
+                    "phase": phase,
+                    "experiment_id": result.experiment_id or "",
+                    "competition": self.competition.id,
+                },
+                self.root,
+            )
+            if self._tracer is not None:
+                self._tracer.emit("phase", phase=phase)
+            errors_before = len(result.errors)
+            stage = self._stages.get(phase)
+            if stage is None:
+                # LOCK is intentionally a lifecycle marker rather than a handler.
+                result.phases_run.append(phase)
+                continue
+            request = self._stage_input(phase, dry, result)
+
+            def run_stage(_: StageInput) -> StageOutcome:
+                nonlocal state
+                result.phases_run.append(phase)
+                run = stage.run_typed(state, dry, result)
+                state = run.state
+                return run.outcome or self._stage_outcome(phase, result, errors_before)
+
+            execution = self._stage_executor.execute(request, run_stage)
+            outcome = execution.outcome
+            if execution.replayed:
+                append_daily_log(f"{phase} replayed from durable stage ledger", self.root)
+            result.stage_outcomes.append(outcome)
+            if self._tracer is not None:
+                # Keep the operational event compact and secret-free; the durable
+                # ledger retains the detailed evidence for incident diagnosis.
+                self._tracer.emit(
+                    "stage_outcome",
+                    stage=phase,
+                    state=outcome.state.value,
+                    attempt=execution.attempt,
+                    replayed=execution.replayed,
+                    idempotency_key=request.idempotency_key,
+                    failure_signature=outcome.failure_signature or "",
+                    external_job=outcome.external_job or "",
+                )
+            if (
+                outcome.state is OutcomeState.RECOVERABLE_FAILURE
+                and self._debug_runner is not None
+            ):
+                incident = IncidentStore(self.root).record(
+                    outcome,
+                    experiment_id=result.experiment_id or "unknown",
+                    package_fingerprint=self._package_fingerprint(result),
+                )
+                repaired = self._debug_runner(outcome, incident)
+                result.stage_outcomes.append(repaired)
+                if repaired.state is OutcomeState.SUCCESS:
+                    del result.errors[errors_before:]
+                    def retry_stage(_: StageInput) -> StageOutcome:
+                        nonlocal state
+                        result.phases_run.append(phase)
+                        retried = stage.run_typed(state, dry, result)
+                        state = retried.state
+                        return retried.outcome or self._stage_outcome(
+                            phase, result, errors_before
+                        )
+
+                    result.stage_outcomes.append(
+                        self._stage_executor.execute(request, retry_stage).outcome
+                    )
         return state
+
+    def _stage_input(self, phase: str, dry: bool, result: CycleResult) -> StageInput:
+        """Build a secret-free idempotency identity for one phase attempt."""
+        contract_hash = str(
+            self.competition.raw.get("contract_hash")
+            or self.competition.raw.get("compatibility_hash")
+            or "unversioned"
+        )
+        return StageInput.create(
+            stage=phase,
+            cycle_id=result.experiment_id or "unknown",
+            competition=self.competition.id,
+            inputs={
+                "contract_hash": contract_hash,
+                "dry_run": dry,
+                "kernel_ref": result.kernel_ref or "",
+                "package_fingerprint": self._package_fingerprint(result),
+            },
+        )
+
+    @staticmethod
+    def _package_fingerprint(result: CycleResult) -> str:
+        if result.kernel_path and Path(result.kernel_path).is_dir():
+            parts = []
+            for path in sorted(Path(result.kernel_path).glob("*")):
+                if path.is_file():
+                    parts.append(path.name + ":" + str(path.stat().st_size))
+            return failure_signature("|".join(parts))
+        return "none"
+
+    def _stage_outcome(
+        self, phase: str, result: CycleResult, errors_before: int
+    ) -> StageOutcome:
+        new_errors = tuple(result.errors[errors_before:])
+        if phase == "KERNEL_TRAIN" and result.kernel_pending:
+            return StageOutcome(
+                OutcomeState.PENDING_EXTERNAL,
+                phase,
+                "Kaggle kernel remains queued or running",
+                evidence=new_errors,
+                external_job=result.kernel_ref or "unknown",
+                retryable=True,
+            )
+        if phase == "FEEDBACK" and result.feedback_pending:
+            return StageOutcome(
+                OutcomeState.PENDING_EXTERNAL,
+                phase,
+                "leaderboard score remains pending",
+                external_job=result.experiment_id or "submission",
+                retryable=True,
+            )
+        if phase == "SUBMIT" and result.submission_pending:
+            return StageOutcome(
+                OutcomeState.PENDING_EXTERNAL,
+                phase,
+                "submission intent awaits authoritative Kaggle reconciliation",
+                external_job=result.experiment_id or "submission",
+                retryable=True,
+            )
+        if phase in {"RESEARCH", "PLAN"}:
+            verified = (
+                result.research_verified if phase == "RESEARCH" else result.plan_verified
+            )
+            if verified is False:
+                if result.dry_run:
+                    return StageOutcome.success(
+                        phase, f"{phase.lower()} is unverified (dry-run observation)"
+                    )
+                return StageOutcome(
+                    OutcomeState.NEEDS_AUTHORITY,
+                    phase,
+                    f"{phase.lower()} is unverified; an LLM-backed artifact is required",
+                )
+        if phase == "KERNEL_TRAIN" and result.kernel_duplicate:
+            return StageOutcome(
+                OutcomeState.NEEDS_AUTHORITY,
+                phase,
+                "kernel recipe is unchanged; a new training candidate is required",
+            )
+        failed = {
+            "RESEARCH": result.research_verified is False,
+            "PLAN": result.plan_verified is False,
+            "CODE": result.code_ok is False or result.code_verified is False,
+            "LOCAL_SMOKE": result.smoke_ok is False,
+            "KERNEL_TRAIN": result.kernel_ok is False,
+            "VALIDATE_SUB": result.validate_ok is False,
+            "SUBMIT": result.submit_ok is False and not result.waiting_approve,
+        }.get(phase, False)
+        if phase == "TELEGRAM_APPROVE" and result.waiting_approve:
+            return StageOutcome(
+                OutcomeState.NEEDS_AUTHORITY,
+                phase,
+                "first submission requires approval",
+            )
+        if failed:
+            summary = " | ".join(new_errors) or f"{phase} reported failure"
+            return StageOutcome.failure(phase, summary, evidence=new_errors)
+        return StageOutcome.success(phase, f"{phase} completed", evidence=new_errors)
 
     def _resolve_loop_n(self) -> int:
         n_min = self.settings.loop_n_min
@@ -315,14 +658,22 @@ class Orchestrator:
 
     def _clear_slice_fields(self, result: CycleResult) -> None:
         result.code_ok = None
+        result.code_verified = None
+        result.code_agent = None
         result.smoke_ok = None
         result.smoke_path = None
         result.kernel_ok = None
+        result.kernel_pending = False
+        result.kernel_duplicate = False
+        result.output_duplicate = False
         result.kernel_ref = None
         result.kernel_path = None
         result.kernel_resumed = None
         result.validate_ok = None
         result.candidate_csv = None
+        result.wrote_custom_infer = False
+        result.wrote_methods = False
+        result.wrote_recipe = False
 
     def _run_train_slices(
         self,
@@ -338,7 +689,7 @@ class Orchestrator:
         used = 0
         for i in range(1, n + 1):
             if i > 1:
-                if load_state(self.root).paused:
+                if self._sa.load_state().paused:
                     append_daily_log("train loop stop: paused", self.root)
                     break
                 limit = self.settings.loop_max_minutes
@@ -352,12 +703,15 @@ class Orchestrator:
             if n > 1:
                 result.experiment_id = f"{base_exp}-s{i}"
                 state.active_experiment = result.experiment_id
-                save_state(state, self.root)
+                self._sa.save_state(state)
             self._clear_slice_fields(result)
             err_before = len(result.errors)
             append_daily_log(f"train slice {i}/{n}", self.root)
             state = self._train_slice(state, dry, result)
             used = i
+            if result.kernel_pending:
+                append_daily_log("train loop stop: kernel remains pending", self.root)
+                break
             csv = result.candidate_csv
             if result.validate_ok and csv and Path(csv).is_file():
                 prior = [
@@ -372,6 +726,9 @@ class Orchestrator:
                     "candidate_csv": csv,
                     "smoke_path": result.smoke_path,
                     "kernel_ok": result.kernel_ok,
+                    "wrote_custom_infer": result.wrote_custom_infer,
+                    "wrote_methods": result.wrote_methods,
+                    "wrote_recipe": result.wrote_recipe,
                     "errors": prior + result.errors[err_before:],
                 }
         self._loop_n_used = used
@@ -383,10 +740,13 @@ class Orchestrator:
             result.candidate_csv = best["candidate_csv"]
             result.smoke_path = best["smoke_path"]
             result.kernel_ok = best["kernel_ok"]
+            result.wrote_custom_infer = bool(best.get("wrote_custom_infer"))
+            result.wrote_methods = bool(best.get("wrote_methods"))
+            result.wrote_recipe = bool(best.get("wrote_recipe"))
             result.validate_ok = True
             result.errors = list(best["errors"])
             state.active_experiment = result.experiment_id
-        else:
+        elif not result.kernel_pending:
             result.validate_ok = False
             result.candidate_csv = None
         return state
@@ -409,9 +769,28 @@ class Orchestrator:
     def _train_slice(
         self, state: AgentState, dry: bool, result: CycleResult
     ) -> AgentState:
-        return self._run_named_phases(
-            self._enabled_phases(TRAIN_SLICE_PHASES), state, dry, result
-        )
+        for phase in self._enabled_phases(TRAIN_SLICE_PHASES):
+            state = self._run_named_phases((phase,), state, dry, result)
+            if phase == "PLAN" and result.plan_verified is False and self._llm_available():
+                result.errors.append("plan verification failed; code blocked")
+                append_daily_log("plan verification failed; code blocked", self.root)
+                break
+            if phase == "CODE" and result.code_ok is False:
+                append_daily_log("train slice stopped: CODE produced no recipe change", self.root)
+                break
+            if phase == "LOCAL_SMOKE" and result.code_verified is False:
+                append_daily_log("code verification failed; train slice stopped", self.root)
+                break
+            if phase == "KERNEL_TRAIN" and result.kernel_duplicate:
+                append_daily_log("train slice stopped: kernel identical to a previous run", self.root)
+                break
+            if phase == "KERNEL_TRAIN" and result.kernel_pending:
+                append_daily_log("train slice stopped: kernel polling remains pending", self.root)
+                break
+            if phase == "VALIDATE_SUB" and result.output_duplicate:
+                append_daily_log("train slice stopped: output identical to a previous run", self.root)
+                break
+        return state
 
     def _phase(
         self,
@@ -422,22 +801,10 @@ class Orchestrator:
         result: CycleResult,
     ) -> AgentState:
         result.phases_run.append(phase)
-        handlers = {
-            "RESEARCH": lambda: self._research(state, result),
-            "PLAN": lambda: self._plan(state, dry, result) or state,
-            "CODE": lambda: self._code(state, result),
-            "LOCAL_SMOKE": lambda: self._local_smoke(state, result),
-            "KERNEL_TRAIN": lambda: self._kernel_train(state, dry, result),
-            "VALIDATE_SUB": lambda: self._validate_sub(state, result),
-            "TELEGRAM_APPROVE": lambda: self._telegram_approve(state, dry, result),
-            "SUBMIT": lambda: self._submit(state, dry, result),
-            "FEEDBACK": lambda: self._feedback(state, dry, result),
-            "REPORT": lambda: self._report(state, dry, result),
-            "HEAL": lambda: self._heal(state, result),
-        }
-        if phase in handlers:
-            return handlers[phase]()
-        return state
+        stage = self._stages.get(phase)
+        if stage is None:
+            return state
+        return stage.run(state, dry, result) or state
 
     def _merge_budget(self, state: AgentState, updated: AgentState) -> None:
         state.budget_date = updated.budget_date
@@ -446,30 +813,495 @@ class Orchestrator:
         state.note = updated.note
 
     def _research(self, state: AgentState, result: CycleResult) -> AgentState:
-        # Retry source cards until PLAN/CODE can implement; fail-soft if still thin.
-        max_passes = self.settings.research_loop_passes
         workspace = self.root / self.competition.workspace_relative
         research_md = memory_dir(self.root) / "research.md"
-        for pass_i in range(1, max_passes + 1):
-            need_snapshot = pass_i == 1 or result.kaggle_ok is not True
-            if need_snapshot:
-                self._kaggle_snapshot(state, result)
-            if self.settings.browser_research_enabled and need_snapshot:
-                self._browser_research(result)
-            self._source_cards(result)
-            later_queries = 4 if pass_i > 1 else None
-            self._deep_research(result, max_queries=later_queries)
-            result.research_passes = pass_i
-            append_daily_log(f"research pass {pass_i}/{max_passes}", self.root)
-            if cards_feasible(workspace, research_md):
-                append_daily_log("research cards feasible", self.root)
-                break
-        else:
+        self._kaggle_snapshot(state, result)
+        if self.settings.browser_research_enabled:
+            self._browser_research(result)
+        zen = self.router.client if self.router is not None else None
+        model = self.competition.model_for("distill", self.settings)
+        if self._fleet_enabled() and self._fleet_roster():
+            self._fleet_research(state, result)
+            if self.settings.deep_research_config().enabled:
+                self._deep_research(result)
+            return state
+        thin = not cards_feasible(workspace, research_md)
+        deep_ran = {"n": 0}
+        dest = memory_dir(self.root) / "research-deep"
+        our = str(self._sa.load_state().public_best or "unknown")
+        judge_state = new_judge_state()
+
+        def _judge_now() -> None:
+            cards = sorted(dest.glob("source-*.md")) if dest.is_dir() else []
+            judge_cards_ready(zen, model, cards, our, state=judge_state)
+
+        def _research_done() -> bool:
+            if not cards_feasible(workspace, research_md):
+                return False
+            _judge_now()
+            if judge_state["ready"] or judge_state["streak"] >= 2:
+                append_daily_log(
+                    "research judge ready="
+                    f"{judge_state['ready']} streak={judge_state['streak']} "
+                    f"{judge_state['last_reason']}",
+                    self.root,
+                )
+                return True
             append_daily_log(
-                "research cards still thin; continuing",
+                f"research judge reject reason={judge_state['last_reason']}",
                 self.root,
             )
+            return False
+
+        agent = ResearchAgent(
+            zen,
+            model,
+            self._research_tools(result, deep_ran, judge_state=judge_state),
+            self.settings.research_agent_config(),
+            log=lambda msg: append_daily_log(msg, self.root),
+            accept_done=_research_done,
+            reject_msg="done rejected: judge says cards not ready; improve the cards",
+            tracer=self._tracer,
+            must_first=["harvest_cards"] if thin else [],
+            must_first_args={"harvest_cards": {"reset": True}} if thin else None,
+            stall_after=6,
+            stall_nudge=(
+                "Stall: you have read enough. Call write_card or harvest_cards "
+                "now with your single best finding, then judge_cards, then done."
+            ),
+            stall_force=("done", {}),
+        )
+        pack = build_context_pack(self.root, view="research")
+        out = agent.run(pack.as_prompt_block() or self.competition.slug)
+        result.research_passes = max(1, out.turns)
+        append_daily_log(
+            f"research agent stop={out.stop_reason} turns={out.turns}",
+            self.root,
+        )
+        if out.stop_reason in ("turn_cap", "time"):
+            best = sorted(dest.glob("source-*.md")) if dest.is_dir() else []
+            append_daily_log(
+                f"research budget exhausted stop={out.stop_reason} "
+                f"best_so_far_cards={len(best)}",
+                self.root,
+            )
+        harvested = any("wrote " in (o or "") and "card" in (o or "") for o in out.observations)
+        if not cards_feasible(workspace, research_md) and not harvested:
+            self._source_cards(result, reset=True)
+            if self._tracer is not None:
+                self._tracer.emit(
+                    "tool", stage="research", tool="harvest_cards", source="safety_net"
+                )
+        if cards_feasible(workspace, research_md):
+            append_daily_log("research cards feasible", self.root)
+        else:
+            append_daily_log("research cards still thin; continuing", self.root)
+        deep = self.settings.deep_research_config()
+        if deep.enabled and not deep_ran["n"]:
+            self._deep_research(result)
         return state
+
+    def _fleet_enabled(self) -> bool:
+        cfg = self.settings.research_fleet_config()
+        return bool(cfg.enabled or self.competition.fleet_enabled)
+
+    def _fleet_roster(self) -> list[str]:
+        comp = self.competition.fleet_agents
+        roster = comp if comp else list(self.settings.research_fleet_config().agents)
+        dropped = [a for a in roster if a not in AGENT_SPECS]
+        if dropped:
+            append_daily_log(f"research fleet unknown agents dropped: {dropped}", self.root)
+        return [a for a in roster if a in AGENT_SPECS]
+
+    def _fleet_research(self, state: AgentState, result: CycleResult) -> None:
+        """Run one StageAgent loop per source in parallel; then converge cards."""
+        workspace = self.root / self.competition.workspace_relative
+        research_md = memory_dir(self.root) / "research.md"
+        dest = memory_dir(self.root) / "research-deep"
+        our = str(self._sa.load_state().public_best or "unknown")
+        zen = self.router.client if self.router is not None else None
+        model = self.competition.model_for("distill", self.settings)
+        cfg = self.settings.research_fleet_config()
+        roster = self._fleet_roster()
+        agent_config = StageAgentConfig(
+            max_minutes=cfg.max_minutes,
+            max_tool_turns=cfg.max_tool_turns,
+            max_tokens=cfg.max_tokens,
+        )
+        pack = build_context_pack(self.root, view="research")
+        context = pack.as_prompt_block() or self.competition.slug
+        thin = not cards_feasible(workspace, research_md)
+        shared = self._source_tool_closures()
+        search_fn = shared["search"]
+        fetch_fn = shared["fetch_url"]
+        kernel_list_fn = shared["list_kernels"]
+        kernel_pull_fn = shared["pull_kernel"]
+        harvested = {"n": 0}
+        harvest_lock = threading.Lock()
+
+        def harvest_cards(reset: bool | None = None, **_: Any) -> str:
+            with harvest_lock:
+                if harvested["n"] >= 1:
+                    return "already harvested this run; call write_card or done"
+                harvested["n"] += 1
+            self._source_cards(result, reset=bool(reset))
+            cards = sorted(dest.glob("source-*.md")) if dest.is_dir() else []
+            return f"wrote {len(cards)} cards"
+
+        agents: list[tuple[str, StageAgent]] = []
+        for name in roster:
+            spec = AGENT_SPECS[name]
+            wrote = {"n": 0}
+            base_write = make_write_card(
+                dest,
+                spec.card_kind,
+                agent=name,
+                run_id=result.experiment_id or "unknown",
+            )
+
+            def _write(
+                ref: str = "",
+                markdown: str = "",
+                *,
+                _base_write=base_write,
+                _wrote=wrote,
+            ) -> str:
+                path = _base_write(ref, markdown)
+                _wrote["n"] += 1
+                return path
+
+            tools = make_fleet_tools(
+                spec,
+                search_fn=search_fn,
+                fetch_fn=fetch_fn,
+                write_fn=_write,
+                kernel_list_fn=(
+                    kernel_list_fn if "list_kernels" in spec.tools else None
+                ),
+                kernel_pull_fn=(
+                    kernel_pull_fn if "pull_kernel" in spec.tools else None
+                ),
+                max_searches=2,
+            )
+            tools["harvest_cards"] = harvest_cards
+            agents.append(
+                (
+                    name,
+                    StageAgent(
+                        clone_client_for_agent(zen),
+                        model,
+                        tools,
+                        agent_config,
+                        system=subagent_system(name, self.competition.slug, our),
+                        log=lambda msg: append_daily_log(msg, self.root),
+                        accept_done=lambda _wrote=wrote: _wrote["n"] > 0,
+                        reject_msg="done rejected: write at least one card first",
+                        must_first=["harvest_cards"] if thin else [],
+                        must_first_args={"harvest_cards": {"reset": True}} if thin else None,
+                        stall_after=6,
+                        stall_nudge=(
+                            "Stall: you have read enough. Call write_card now with "
+                            "your single best finding (ref + markdown body). Call "
+                            "done only after write_card succeeded."
+                        ),
+                        stall_force=None,
+                        # Notebook cards must be grounded in a pulled kernel.  When
+                        # the model keeps relisting, recover by pulling the first
+                        # listed source rather than forcing an ungrounded card.
+                        force_after_stall=(
+                            "pull_kernel" if name == "notebooks" else "write_card"
+                        ),
+                        name="research",
+                        agent_id=name,
+                        tool_schemas=fleet_tool_schemas(spec),
+                        tracer=self._tracer,
+                    ),
+                )
+            )
+        out = run_fleet(agents, log=lambda msg: append_daily_log(msg, self.root))
+        result.research_passes = max(1, out.turns)
+        research_verification = verify_research_fleet(out.executions, roster)
+        result.research_verified = research_verification.ok
+        result.research_verification_detail = research_verification.detail
+        if self._tracer is not None:
+            for execution in out.executions:
+                self._tracer.emit(
+                    "agent_execution",
+                    stage="research",
+                    agent=execution.agent,
+                    stop_reason=execution.stop_reason,
+                    turns=execution.turns,
+                    tool_calls=execution.tool_calls,
+                    source_reads=execution.source_reads,
+                    writes=execution.writes,
+                    rejected_writes=execution.rejected_writes,
+                    errors=execution.errors,
+                    verified=verify_research_fleet([execution], [execution.agent]).ok,
+                )
+        cards = sorted(dest.glob("source-*.md")) if dest.is_dir() else []
+        if cards:
+            merge_digest(cards, research_md, our)
+            write_methods_sidecar(cards, workspace)
+            result.deep_ok = True
+            result.deep_sources = max(result.deep_sources, len(cards))
+        if self._tracer is not None:
+            self._tracer.emit(
+                "tool",
+                stage="research",
+                tool="fleet",
+                agents=len(agents),
+                required_agents=roster,
+                turns=out.turns,
+                verified=result.research_verified,
+                verification_detail=research_verification.detail,
+                errors=out.errors[:3],
+            )
+        append_daily_log(
+            f"research fleet agents={len(agents)} turns={out.turns} "
+            f"cards={len(cards)} verified={result.research_verified} "
+            f"verification={research_verification.detail} errors={out.errors or 'none'}",
+            self.root,
+        )
+        if not cards_feasible(workspace, research_md) and not harvested["n"]:
+            self._source_cards(result, reset=True)
+        if cards_feasible(workspace, research_md):
+            append_daily_log("research cards feasible", self.root)
+            ready, reason = judge_cards_ready(zen, model, cards, our)
+            append_daily_log(
+                f"research judge post-fleet ready={ready} {reason}",
+                self.root,
+            )
+            if not ready:
+                self._fleet_polish(result, reason)
+        else:
+            append_daily_log("research cards still thin; continuing", self.root)
+
+    def _fleet_polish(self, result: CycleResult, reason: str) -> None:
+        """One bounded StageAgent pass: judge, rewrite the weakest card, re-judge."""
+        workspace = self.root / self.competition.workspace_relative
+        research_md = memory_dir(self.root) / "research.md"
+        dest = memory_dir(self.root) / "research-deep"
+        our = str(self._sa.load_state().public_best or "unknown")
+        zen = self.router.client if self.router is not None else None
+        model = self.competition.model_for("distill", self.settings)
+        cfg = self.settings.research_fleet_config()
+        judge_state = new_judge_state()
+        wrote = {"n": 0}
+        reads = {"n": 0}
+        base_write = make_write_card(dest, "polish")
+
+        def read_cards(**_: Any) -> str:
+            cards = sorted(dest.glob("source-*.md")) if dest.is_dir() else []
+            parts = []
+            for p in cards[-6:]:
+                parts.append(f"### {p.name}\n{p.read_text(encoding='utf-8')[:2000]}")
+            text = "\n\n".join(parts) or "no cards"
+            if reads["n"] > 0:
+                text += (
+                    "\n\nYou already read the cards. Call write_card now with an "
+                    "improved card; do not read again."
+                )
+            reads["n"] += 1
+            return text
+
+        def write_card(ref: str = "", markdown: str = "", **_: Any) -> str:
+            path = base_write(ref, markdown)
+            wrote["n"] += 1
+            return path
+
+        def judge_cards(**_: Any) -> str:
+            cards = sorted(dest.glob("source-*.md")) if dest.is_dir() else []
+            ready, r = judge_cards_ready(zen, model, cards, our, state=judge_state)
+            feasible = cards_feasible(workspace, research_md)
+            return f"ready={ready} feasible={feasible} {r}"
+
+        agent = StageAgent(
+            clone_client_for_agent(zen),
+            model,
+            {
+                "read_cards": read_cards,
+                "write_card": write_card,
+                "judge_cards": judge_cards,
+            },
+            StageAgentConfig(
+                max_minutes=cfg.max_minutes,
+                max_tool_turns=min(cfg.max_tool_turns, 12),
+                max_tokens=cfg.max_tokens,
+            ),
+            system=(
+                "You polish one Kaggle contest's research cards. "
+                "Call one tool per turn. "
+                f"The research judge said: {reason}. "
+                "Call read_cards, then write_card to improve the weakest card, "
+                "then judge_cards. Call done only after write_card succeeded "
+                "or the judge approves. "
+                "Card body format (write_card rejects bodies missing these):\n"
+                "- copyable next step: <one implementable change>\n"
+                "- do not copy: <anti-patterns to avoid>\n"
+            ),
+            log=lambda msg: append_daily_log(msg, self.root),
+            accept_done=lambda: judge_state["ready"] is True
+            or judge_state["streak"] >= 2
+            or wrote["n"] > 0,
+            reject_msg="done rejected: judge says not ready; rewrite a weaker card",
+            must_first=["read_cards"],
+            stall_after=4,
+            stall_nudge=(
+                "Stall: call write_card with an improved card addressing the "
+                "judge, then judge_cards."
+            ),
+            stall_force=("done", {}),
+            name="research",
+            tracer=self._tracer,
+        )
+        pack = build_context_pack(self.root, view="research")
+        out = agent.run(pack.as_prompt_block() or self.competition.slug)
+        result.research_passes = max(result.research_passes, out.turns)
+        append_daily_log(
+            f"research polish stop={out.stop_reason} turns={out.turns} "
+            f"wrote={wrote['n']}",
+            self.root,
+        )
+        cards = sorted(dest.glob("source-*.md")) if dest.is_dir() else []
+        if cards:
+            merge_digest(cards, research_md, our)
+            write_methods_sidecar(cards, workspace)
+        ready, r = judge_cards_ready(zen, model, cards, our)
+        append_daily_log(
+            f"research judge post-polish ready={ready} {r}",
+            self.root,
+        )
+
+    def _source_tool_closures(self) -> dict[str, Callable[..., str]]:
+        """Source closures shared by the sequential research loop and the fleet."""
+        cache = (self.root / self.competition.workspace_relative) / "research-cache"
+
+        def list_kernels(query: str = "", limit: int = 6, **_: Any) -> str:
+            if self._kaggle is None:
+                return "no kaggle client"
+            rows = self._kaggle.kernels(self.competition.slug, top=int(limit) + 2)
+            refs = [r.ref for r in rows if r.ref][: int(limit)]
+            if query:
+                refs = [r for r in refs if query.lower() in r.lower()]
+            return "\n".join(refs) or "none"
+
+        def pull_kernel(ref: str = "", **_: Any) -> str:
+            if self._kaggle is None or not ref:
+                return "missing ref"
+            src = KaggleSource(self._kaggle, self.competition.slug, cache)
+            from kaggle_agent.research.deep import SourceHit
+
+            hit = SourceHit(url=ref, title=ref, kind="kaggle")
+            with _PULL_LOCK:
+                return src.content(hit)[:12000]
+
+        def fetch_url(url: str = "", **_: Any) -> str:
+            if url and not url.lower().startswith(("http://", "https://")):
+                return "refuse: only http(s) urls"
+            if self._browser_fetch is not None:
+                return str(self._browser_fetch(url, 12000))[:12000]
+            from kaggle_agent.research.browser import fetch_via_http
+
+            return fetch_via_http(url, 12000)[:12000]
+
+        def search(query: str = "", kind: str = "web", limit: int = 5, **_: Any) -> str:
+            sources = {
+                "kaggle": (
+                    KaggleSource(self._kaggle, self.competition.slug, cache)
+                    if self._kaggle is not None
+                    else None
+                ),
+                "arxiv": ArxivSource(),
+                "github": GithubSource(),
+                "web": WebSource(serp=default_serp(self.settings.browser_prefer_harness)),
+                "discussion": (
+                    DiscussionSource(self._kaggle, self.competition.slug)
+                    if self._kaggle is not None
+                    else None
+                ),
+                "dataset": (
+                    DatasetSource(self._kaggle, self.competition.slug)
+                    if self._kaggle is not None
+                    else None
+                ),
+            }
+            src = sources.get(str(kind), sources["web"])
+            if src is None:
+                return "no source"
+            hits = src.search(str(query), int(limit))
+            return "\n".join(f"{h.kind}\t{h.url}\t{h.title}" for h in hits) or "none"
+
+        return {
+            "list_kernels": list_kernels,
+            "pull_kernel": pull_kernel,
+            "fetch_url": fetch_url,
+            "search": search,
+        }
+
+    def _research_tools(
+        self,
+        result: CycleResult,
+        deep_ran: dict[str, int] | None = None,
+        judge_state: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        workspace = self.root / self.competition.workspace_relative
+        dest = memory_dir(self.root) / "research-deep"
+        our = str(self._sa.load_state().public_best or "unknown")
+        zen = self.router.client if self.router is not None else None
+        model = self.competition.model_for("distill", self.settings)
+        shared = self._source_tool_closures()
+        list_kernels = shared["list_kernels"]
+        pull_kernel = shared["pull_kernel"]
+        fetch_url = shared["fetch_url"]
+        search = shared["search"]
+
+        def write_card(ref: str = "", markdown: str = "", **_: Any) -> str:
+            dest.mkdir(parents=True, exist_ok=True)
+            slug = re.sub(r"[^a-z0-9]+", "-", (ref or "src").lower()).strip("-")[:60]
+            path = dest / f"source-{slug or 'src'}.md"
+            path.write_text(markdown or f"# {ref}\n- ref: {ref}\n", encoding="utf-8")
+            cards = sorted(dest.glob("source-*.md"))
+            merge_digest(cards, memory_dir(self.root) / "research.md", our)
+            write_methods_sidecar(cards, workspace)
+            result.deep_ok = True
+            result.deep_sources = max(result.deep_sources, len(cards))
+            return str(path)
+
+        def judge_cards(**_: Any) -> str:
+            cards = sorted(dest.glob("source-*.md")) if dest.is_dir() else []
+            ready, reason = judge_cards_ready(zen, model, cards, our, state=judge_state)
+            feasible = cards_feasible(workspace, memory_dir(self.root) / "research.md")
+            return f"ready={ready} feasible={feasible} {reason}"
+
+        harvested = {"n": 0}
+
+        def harvest_cards(reset: bool | None = None, **_: Any) -> str:
+            if harvested["n"] >= 1:
+                return "already harvested this run; call judge_cards or done"
+            research_md = memory_dir(self.root) / "research.md"
+            if reset is None:
+                reset = not cards_feasible(workspace, research_md)
+            self._source_cards(result, reset=bool(reset))
+            harvested["n"] += 1
+            cards = sorted(dest.glob("source-*.md")) if dest.is_dir() else []
+            return f"wrote {len(cards)} cards"
+
+        def deep_research(**_: Any) -> str:
+            if deep_ran is not None:
+                deep_ran["n"] += 1
+            self._deep_research(result)
+            return f"deep_ok={result.deep_ok} sources={result.deep_sources}"
+
+        return {
+            "list_kernels": list_kernels,
+            "pull_kernel": pull_kernel,
+            "fetch_url": fetch_url,
+            "search": search,
+            "write_card": write_card,
+            "judge_cards": judge_cards,
+            "harvest_cards": harvest_cards,
+            "deep_research": deep_research,
+        }
 
     def _kaggle_snapshot(self, state: AgentState, result: CycleResult) -> None:
         try:
@@ -519,21 +1351,45 @@ class Orchestrator:
             result.browser_ok = False
             append_daily_log(f"browser research failed: {exc}", self.root)
 
-    def _source_cards(self, result: CycleResult) -> None:
-        """One method card per top public kernel (in-process research workers)."""
+    def _cards_judged_ready(self) -> bool:
+        dest = memory_dir(self.root) / "research-deep"
+        cards = sorted(dest.glob("source-*.md")) if dest.is_dir() else []
+        zen = self.router.client if self.router is not None else None
+        model = self.competition.model_for("distill", self.settings)
+        our = str(self._sa.load_state().public_best or "unknown")
+        ready, reason = judge_cards_ready(zen, model, cards, our)
+        append_daily_log(f"research judge ready={ready} {reason}", self.root)
+        return ready
+
+    def _source_cards(self, result: CycleResult, *, reset: bool = True) -> None:
+        """One Zen worker per kernel, discussion, and paper. New cards each pass."""
         if self._kaggle is None:
             return
         try:
-            our = str(load_state(self.root).public_best or "unknown")
+            our = str(self._sa.load_state().public_best or "unknown")
             cache = self.root / self.competition.workspace_relative / "research-cache"
+            zen = self.router.client if self.router is not None else None
+            model = self.competition.model_for("distill", self.settings)
             cards = run_source_card_research(
                 client=self._kaggle,
                 competition=self.competition.slug,
                 cache_dir=cache,
                 root=self.root,
                 our_score=our,
+                zen=zen,
+                model=model,
+                reset=reset,
                 log=lambda msg: append_daily_log(msg, self.root),
             )
+            for path in cards:
+                lines = path.read_text(encoding="utf-8").splitlines()
+                if "- agent:" not in lines[:5]:
+                    insert_at = 1 if lines and lines[0].startswith("#") else 0
+                    lines[insert_at:insert_at] = [
+                        "- agent: fallback",
+                        f"- run_id: {result.experiment_id or 'unknown'}",
+                    ]
+                    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
             if cards:
                 sidecar = write_methods_sidecar(
                     cards, self.root / self.competition.workspace_relative
@@ -561,11 +1417,20 @@ class Orchestrator:
                 self._kaggle = KaggleClient().connect()
             zen = self.router.client if self.router is not None else None
             if zen is None:
-                append_daily_log("deep research skipped: no OPENCODE_API_KEY", self.root)
+                append_daily_log("deep research skipped: no DEEPSEEK_API_KEY", self.root)
                 return
             model = self.competition.model_for("distill", self.settings)
             cache = self.root / self.competition.workspace_relative / "research-cache"
             prompt = self._deep_prompt()
+            web_fetch = self._browser_fetch or default_fetch(
+                self.settings.browser_prefer_harness
+            )
+            web_serp = default_serp(self.settings.browser_prefer_harness)
+            terms = tuple(
+                dict.fromkeys(
+                    [self.competition.slug] + self.competition.slug.split("-")[:2]
+                )
+            )
             researcher = DeepResearcher(
                 zen,
                 model,
@@ -574,10 +1439,11 @@ class Orchestrator:
                     KaggleSource(self._kaggle, self.competition.slug, cache),
                     ArxivSource(),
                     GithubSource(),
-                    WebSource(),
+                    WebSource(fetch=web_fetch, serp=web_serp),
                 ],
                 root=self.root,
                 log=lambda msg: append_daily_log(msg, self.root),
+                relevance_terms=terms,
             )
             out = researcher.run(prompt, memory_dir(self.root) / "research.md")
             result.deep_ok = bool(out.learnings) and not out.error
@@ -618,52 +1484,144 @@ class Orchestrator:
 
     def _code(self, state: AgentState, result: CycleResult) -> AgentState:
         workspace = self.root / self.competition.workspace_relative
+        zen = self.router.client if self.router is not None else None
+        model = self.competition.model_for("code", self.settings)
         check = ensure_pipeline_ready(workspace)
-        if check.ok:
-            try:
-                import sys
-
-                sys.path.insert(0, str(workspace))
-                from pipeline.recipe import apply_from_cards, apply_recipe  # type: ignore
-
-                applied = apply_recipe(workspace, data_dir=self.root / "data")
-                cards = apply_from_cards(workspace)
-                result.code_ok = True
-                append_daily_log(
-                    f"code recipe {applied.message} cards={cards.message} "
-                    f"present={check.present}",
-                    self.root,
-                )
-                if not applied.ok:
-                    append_daily_log(
-                        f"code recipe skipped (kernel will train on Kaggle): {applied.message}",
-                        self.root,
-                    )
-                if (
-                    self.router is not None
-                    and self.router.available()
-                    and hasattr(self.router, "code")
-                ):
-                    try:
-                        pack = build_context_pack(self.root)
-                        brief = self.router.code(
-                            CODE_SYSTEM,
-                            f"Competition: {self.competition.slug}\n\n"
-                            f"{pack.as_prompt_block()}",
-                        )
-                        brief_path = workspace / "pipeline" / "code_brief.md"
-                        brief_path.write_text(brief, encoding="utf-8")
-                        append_daily_log("code agent brief written", self.root)
-                    except Exception as exc:  # noqa: BLE001
-                        append_daily_log(f"code agent brief skipped: {exc}", self.root)
-            except Exception as exc:  # noqa: BLE001
-                result.code_ok = False
-                result.errors.append(f"code: recipe failed: {exc}")
-                append_daily_log(f"code recipe failed: {exc}", self.root)
-        else:
+        if not check.ok:
             result.code_ok = False
             result.errors.append(f"code: missing {check.missing}")
             append_daily_log(f"code missing={check.missing}", self.root)
+            if self._tracer is not None:
+                self._tracer.emit(
+                    "agent_verification",
+                    stage="code",
+                    agent="code",
+                    verified=False,
+                    detail="pipeline missing",
+                )
+            return state
+        image_contract = workspace / "pipeline" / "image_contract.json"
+        image_manifest = workspace / "pipeline" / "artifact_manifest.json"
+        if image_contract.is_file() and image_manifest.is_file():
+            try:
+                contract = json.loads(image_contract.read_text(encoding="utf-8"))
+                manifest = json.loads(image_manifest.read_text(encoding="utf-8"))
+            except json.JSONDecodeError as exc:
+                result.code_ok = False
+                result.errors.append(f"code: image contract JSON invalid: {exc}")
+                return state
+            if (
+                contract.get("template") == "rsna-2d-dino-mil-v1"
+                and manifest.get("template_version") == "rsna-2d-dino-mil-v1"
+                and zen is None
+            ):
+                result.code_ok = True
+                result.wrote_recipe = True
+                result.wrote_methods = True
+                result.code_agent = "rsna-2d-dino-mil-template"
+                append_daily_log("code: using validated RSNA 2D DINO MIL template", self.root)
+                return state
+        agent, code_state = make_code_agent(
+            zen,
+            model,
+            self.root,
+            workspace,
+            self.settings.code_agent_config(),
+            plan_text=result.plan_text or "",
+            log=lambda msg: append_daily_log(msg, self.root),
+            tracer=self._tracer,
+        )
+        pack = build_context_pack(
+            self.root,
+            view="code",
+            workspace=workspace,
+            plan_text=result.plan_text or "",
+        )
+        out = agent.run(
+            f"Competition: {self.competition.slug}\n\n{pack.as_prompt_block()}"
+        )
+        result.code_agent = out.agent
+        if self._tracer is not None:
+            self._tracer.emit(
+                "agent_execution",
+                stage="code",
+                agent=out.agent,
+                stop_reason=out.stop_reason,
+                turns=out.turns,
+                tool_calls=out.tool_calls,
+                writes=out.writes,
+                rejected_writes=out.rejected_writes,
+                errors=out.errors,
+                verified=bool(out.writes),
+            )
+        result.wrote_custom_infer = bool(code_state.get("wrote_custom_infer"))
+        result.wrote_methods = bool(code_state.get("wrote_methods"))
+        result.wrote_recipe = bool(code_state.get("wrote_recipe"))
+        if self._tracer is not None:
+            self._tracer.emit(
+                "tool",
+                stage="code",
+                tool="code_hook",
+                source="written" if result.wrote_custom_infer else "identity",
+                recipe="written" if result.wrote_recipe else "static",
+            )
+        append_daily_log(
+            f"code agent stop={out.stop_reason} turns={out.turns} "
+            f"wrote_methods={result.wrote_methods} wrote_recipe={result.wrote_recipe} "
+            f"wrote_custom_infer={result.wrote_custom_infer}",
+            self.root,
+        )
+        if not (result.wrote_recipe or result.wrote_custom_infer):
+            from kaggle_agent.agents.code import _recipe_text
+
+            recipe = _recipe_text(workspace)
+            if result.dry_run and zen is None and "submission.csv" in recipe:
+                result.code_ok = True
+                append_daily_log("code dry-run: using existing static recipe", self.root)
+                return state
+            result.code_ok = False
+            result.errors.append("code: no recipe change was written")
+            append_daily_log("code rejected: no recipe change was written", self.root)
+            if self._tracer is not None:
+                self._tracer.emit(
+                    "agent_verification",
+                    stage="code",
+                    agent=out.agent,
+                    verified=False,
+                    detail="no implementation artifact",
+                )
+            return state
+        try:
+            import sys
+
+            sys.path.insert(0, str(workspace))
+            from pipeline.recipe import apply_from_cards, apply_recipe  # type: ignore
+
+            applied = apply_recipe(workspace, data_dir=self.root / "data")
+            cards = apply_from_cards(workspace)
+            result.code_ok = True
+            append_daily_log(
+                f"code recipe {applied.message} cards={cards.message} "
+                f"present={check.present}",
+                self.root,
+            )
+            if not applied.ok:
+                append_daily_log(
+                    f"code recipe skipped (kernel will train on Kaggle): {applied.message}",
+                    self.root,
+                )
+        except Exception as exc:  # noqa: BLE001
+            result.code_ok = False
+            result.errors.append(f"code: recipe failed: {exc}")
+            append_daily_log(f"code recipe failed: {exc}", self.root)
+        if self._tracer is not None:
+            self._tracer.emit(
+                "agent_verification",
+                stage="code",
+                agent=out.agent,
+                verified=bool(result.code_ok),
+                detail="recipe validation",
+            )
         return state
 
     def _local_smoke(self, state: AgentState, result: CycleResult) -> AgentState:
@@ -682,6 +1640,24 @@ class Orchestrator:
             sample_csv=sample_csv,
         )
         result.smoke_ok = outcome.ok
+        if result.wrote_recipe or result.wrote_custom_infer:
+            result.code_verified = verify_code_stage(
+                wrote_recipe=result.wrote_recipe,
+                wrote_custom_infer=result.wrote_custom_infer,
+                artifact_ok=bool(result.code_ok),
+                smoke_ok=bool(result.smoke_ok),
+            ).ok
+            if not result.code_verified:
+                result.code_ok = False
+                result.errors.append("code verification: artifact or smoke check failed")
+            if self._tracer is not None:
+                self._tracer.emit(
+                    "agent_verification",
+                    stage="code",
+                    agent=result.code_agent or "code",
+                    verified=result.code_verified,
+                    smoke_ok=result.smoke_ok,
+                )
         if outcome.smoke and outcome.smoke.submission_path:
             result.smoke_path = str(outcome.smoke.submission_path)
 
@@ -691,6 +1667,19 @@ class Orchestrator:
             result.errors.extend(f"smoke:{e}" for e in hard)
             append_daily_log(f"smoke failed: {outcome.errors}", self.root)
             return state
+
+        if result.experiment_id:
+            patch_experiment(
+                result.experiment_id,
+                cv_auc=(f"{outcome.cv_auc:.4f}" if outcome.cv_auc is not None else None),
+                local_smoke="ok",
+                root=self.root,
+            )
+        if outcome.cv_auc is not None:
+            append_daily_log(
+                f"cv_auc={outcome.cv_auc:.4f} exp={result.experiment_id or 'unknown'}",
+                self.root,
+            )
 
         n = outcome.smoke.n_studies if outcome.smoke else 0
         append_daily_log(
@@ -716,7 +1705,7 @@ class Orchestrator:
     ) -> AgentState:
         exp_id = result.experiment_id or "kernel"
         should_push = self.settings.kernel_push and not dry
-        existing = load_kernel_job(self.root)
+        existing = self._sa.load_kernel_job()
 
         try:
             package = None
@@ -743,33 +1732,126 @@ class Orchestrator:
                     exp_id=exp_id,
                 )
             else:
+                if should_push and self._kaggle is None:
+                    self._kaggle = KaggleClient().connect()
                 package = write_kernel_package(
                     self.competition,
                     root=self.root,
                     username=self._kernel_username(),
                     exp_id=exp_id,
                     enable_gpu=self.settings.kernel_enable_gpu,
+                    machine_shape=self.settings.kernel_machine_shape,
+                    enable_internet=self.settings.kernel_enable_internet,
+                    plan_text=result.plan_text or "",
                 )
                 result.kernel_path = str(package.folder)
                 result.kernel_ref = package.kernel_ref
-                if should_push and self._kaggle is None:
-                    self._kaggle = KaggleClient().connect()
                 out_dir = package.folder / "output"
-                run = run_kernel_phase(
-                    self._kaggle if should_push else None,
-                    package,
-                    push=should_push,
-                    pull_output_dir=out_dir if should_push else None,
-                    root=self.root,
-                    competition=self.competition.slug,
-                    exp_id=exp_id,
-                )
+                if should_push and package_matches_existing(package, existing):
+                    # Same notebook + metadata as a previous kernel: CODE/PLAN
+                    # produced no real change. Stop instead of silently
+                    # resubmitting the same kernel as if it were a new one.
+                    result.kernel_duplicate = True
+                    run = KernelRunResult(
+                        ok=False,
+                        package=package,
+                        resumed=False,
+                        kernel_ref=existing.kernel_ref,
+                        message=f"identical kernel: no change since {existing.kernel_ref}",
+                        status=existing.status,
+                        errors=[
+                            f"kernel is identical to previous experiment {existing.kernel_ref}"
+                        ],
+                    )
+                else:
+                    push_action: ExternalAction | None = None
+                    if should_push:
+                        push_action = self._outbox.enqueue(
+                            action="kernel_push",
+                            idempotency_key=kernel_package_fingerprint(package.folder),
+                            payload={"kernel_ref": package.kernel_ref},
+                        )
+                        if push_action.status in {"sent", "unknown"}:
+                            push_action = self._reconcile_outbox_action(push_action)
+                            if push_action.status != "accepted":
+                                result.kernel_pending = True
+                                result.kernel_ref = package.kernel_ref
+                                append_daily_log(
+                                    "kernel push intent awaits Kaggle reconciliation",
+                                    self.root,
+                                )
+                                return state
+                            # The remote kernel exists but a crash prevented the
+                            # normal runner from persisting its resume record.
+                            save_kernel_job(
+                                KernelJob(
+                                    kernel_ref=package.kernel_ref,
+                                    folder=str(package.folder),
+                                    status="pushed",
+                                    competition=self.competition.slug,
+                                    exp_id=exp_id,
+                                ),
+                                self.root,
+                            )
+                            run = run_kernel_phase(
+                                self._kaggle,
+                                None,
+                                push=True,
+                                pull_output_dir=out_dir,
+                                root=self.root,
+                                competition=self.competition.slug,
+                                exp_id=exp_id,
+                                poll_seconds=self.settings.kernel_poll_seconds,
+                                poll_attempts=self.settings.kernel_poll_attempts,
+                            )
+                        else:
+                            self._outbox.mark_sent(push_action.action_id)
+                            run = run_kernel_phase(
+                                self._kaggle,
+                                package,
+                                push=True,
+                                pull_output_dir=out_dir,
+                                root=self.root,
+                                competition=self.competition.slug,
+                                exp_id=exp_id,
+                                poll_seconds=self.settings.kernel_poll_seconds,
+                                poll_attempts=self.settings.kernel_poll_attempts,
+                            )
+                    else:
+                        run = run_kernel_phase(
+                            None,
+                            package,
+                            push=False,
+                            root=self.root,
+                            competition=self.competition.slug,
+                            exp_id=exp_id,
+                            poll_seconds=self.settings.kernel_poll_seconds,
+                            poll_attempts=self.settings.kernel_poll_attempts,
+                        )
+                    if push_action is not None:
+                        if run.pushed:
+                            self._outbox.reconcile(
+                                push_action.action_id,
+                                status="accepted",
+                                external_ref=package.kernel_ref,
+                            )
+                        elif not run.ok:
+                            # A transport failure may have reached Kaggle after
+                            # the request was sent, so recovery must reconcile.
+                            self._outbox.mark_unknown(push_action.action_id)
 
-            result.kernel_ok = run.ok
+            result.kernel_pending = run.pending
+            result.kernel_ok = None if run.pending else run.ok
             result.kernel_resumed = run.resumed
+            result.kernel_version = run.kernel_version
             if run.kernel_ref and run.kernel_ref != "none":
                 result.kernel_ref = run.kernel_ref
-            if not run.ok:
+            if not run.ok and not run.pending:
+                result.kernel_duplicate = any(
+                    "duplicate recipe" in error.lower()
+                    or "duplicate kernel package" in error.lower()
+                    for error in run.errors
+                )
                 result.errors.extend(f"kernel:{e}" for e in run.errors)
             append_daily_log(
                 f"kernel ok={run.ok} push={run.pushed} resume={run.resumed} "
@@ -783,22 +1865,28 @@ class Orchestrator:
         return state
 
     def _validate_sub(self, state: AgentState, result: CycleResult) -> AgentState:
-        """Validate best local candidate CSV (kernel output preferred, else smoke)."""
-        # This slice only — do not pick leftover smoke from other experiments.
+        """Validate a candidate CSV, but block live fallback to smoke output."""
+        if not result.dry_run and result.kernel_ok is not True:
+            result.validate_ok = False
+            result.errors.append("validate: live submission requires a successful kernel")
+            append_daily_log("validate: blocked because live kernel failed", self.root)
+            return state
+
         candidates: list[Path] = []
         if result.kernel_path:
             candidates.append(Path(result.kernel_path) / "output" / "submission.csv")
-        if result.smoke_path:
-            candidates.append(Path(result.smoke_path))
-        exp_id = result.experiment_id
-        if exp_id:
-            same = (
-                self.root
-                / self.competition.workspace_relative
-                / "submissions"
-                / f"{exp_id}_smoke.csv"
-            )
-            candidates.append(same)
+        if not result.wrote_custom_infer:
+            if result.smoke_path:
+                candidates.append(Path(result.smoke_path))
+            exp_id = result.experiment_id
+            if exp_id:
+                same = (
+                    self.root
+                    / self.competition.workspace_relative
+                    / "submissions"
+                    / f"{exp_id}_smoke.csv"
+                )
+                candidates.append(same)
 
         path = next((p for p in candidates if p.is_file()), None)
         if path is None:
@@ -807,38 +1895,253 @@ class Orchestrator:
             append_daily_log("validate: no candidate CSV", self.root)
             return state
 
+        kernel_output = (
+            result.kernel_path is not None
+            and path == Path(result.kernel_path) / "output" / "submission.csv"
+        )
         check = validate_submission_csv(
             path,
             id_column=self.competition.id_column,
             labels=self.competition.labels,
+            require_min_rows=(
+                self.competition.submission_min_rows
+                if self.competition.submit_mode == "file"
+                else None
+            ),
+            require_prediction_variation=kernel_output,
         )
         result.validate_ok = check.ok
         result.candidate_csv = str(path)
         if check.ok:
             append_daily_log(f"validate ok path={path} rows={check.n_rows}", self.root)
+            if kernel_output and not self._validate_image_semantic_evidence(path, result):
+                return state
+            if kernel_output:
+                out_hash = submission_output_hash(path, self.competition.id_column)
+                prior_exp = seen_output(
+                    self.root, out_hash, exp_id=result.experiment_id or ""
+                )
+                if prior_exp and not os.environ.get("KAGGLE_AGENT_ALLOW_DUPLICATE_OUTPUT"):
+                    result.output_duplicate = True
+                    result.validate_ok = False
+                    result.errors.append(
+                        f"validate: predictions identical to previous experiment {prior_exp}"
+                    )
+                    append_daily_log(
+                        f"validate rejected: output identical to {prior_exp}", self.root
+                    )
+                else:
+                    record_output(self.root, result.experiment_id or "unknown", out_hash)
         else:
             result.errors.extend(f"validate:{e}" for e in check.errors[:5])
             append_daily_log(f"validate failed: {check.errors[:3]}", self.root)
+
+        kernel_judge = new_judge_state()
+        kernel_csv = (
+            Path(result.kernel_path) / "output" / "submission.csv"
+            if result.kernel_path
+            else None
+        )
+        if kernel_csv is not None and kernel_csv.is_file():
+            job = self._sa.load_kernel_job()
+
+            def judge_log(msg: str) -> None:
+                append_daily_log(msg, self.root)
+
+            ready, _reason = judge_kernel(
+                job.status,
+                check,
+                state=kernel_judge,
+                log=judge_log,
+                labels=self.competition.labels,
+                csv_path=kernel_csv,
+            )
+            result.kernel_judge_ok = ready
+            if ready and self.settings.judge_train:
+                zen = self.router.client if self.router is not None else None
+                if zen is not None:
+                    ready, _reason = judge_train_llm(
+                        zen,
+                        self.competition.model_for("train", self.settings),
+                        job.status,
+                        path,
+                        self.competition.labels,
+                        str(self._sa.load_state().public_best or "unknown"),
+                        state=kernel_judge,
+                        log=judge_log,
+                    )
+                    result.kernel_judge_ok = ready
+            if kernel_judge.get("last_reason"):
+                patch_experiment(
+                    result.experiment_id or "unknown",
+                    judge=f"kernel {kernel_judge['ready']}: {kernel_judge['last_reason']}",
+                    root=self.root,
+                )
+        elif self.settings.judge_train:
+            append_daily_log("judge train skipped: no kernel output", self.root)
+        elif kernel_csv is None:
+            append_daily_log("judge kernel skipped: no kernel path", self.root)
+        else:
+            job = self._sa.load_kernel_job()
+            append_daily_log(
+                f"judge kernel skipped: no kernel output (status={job.status})",
+                self.root,
+            )
         return state
 
-    def _plan(self, state: AgentState, dry: bool, result: CycleResult) -> None:
-        hypothesis, approach, notes = DEFAULT_HYPOTHESIS, "baseline", "no LLM"
-        pack = build_context_pack(self.root)
+    def _validate_image_semantic_evidence(self, submission_path: Path, result: CycleResult) -> bool:
+        if not result.kernel_path:
+            return True
+        manifest_path = Path(result.kernel_path) / "artifact_manifest.json"
+        if not manifest_path.is_file():
+            return True
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            result.validate_ok = False
+            result.errors.append("validate: image artifact manifest is invalid JSON")
+            append_daily_log("validate rejected: image artifact manifest invalid JSON", self.root)
+            return False
+        if manifest.get("template_version") != "rsna-2d-dino-mil-v1":
+            return True
+        evidence_path = submission_path.parent / "semantic_evidence.json"
+        if not evidence_path.is_file():
+            result.validate_ok = False
+            result.errors.append("validate: image semantic evidence missing")
+            append_daily_log("validate rejected: image semantic evidence missing", self.root)
+            return False
+        try:
+            evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            result.validate_ok = False
+            result.errors.append("validate: image semantic evidence is invalid JSON")
+            append_daily_log("validate rejected: image semantic evidence invalid JSON", self.root)
+            return False
+        semantic = validate_image_runtime_evidence(evidence)
+        if not semantic.ok:
+            result.validate_ok = False
+            result.errors.extend(f"validate:{e}" for e in semantic.errors[:5])
+            append_daily_log(
+                f"validate rejected: image semantic evidence failed {semantic.errors[:3]}",
+                self.root,
+            )
+            return False
+        runtime_manifest_path = submission_path.parent / "artifact_manifest.runtime.json"
+        if not runtime_manifest_path.is_file():
+            result.validate_ok = False
+            result.errors.append("validate: image runtime artifact manifest missing")
+            append_daily_log("validate rejected: image runtime artifact manifest missing", self.root)
+            return False
+        try:
+            runtime_manifest = json.loads(runtime_manifest_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            result.validate_ok = False
+            result.errors.append("validate: image runtime artifact manifest is invalid JSON")
+            append_daily_log("validate rejected: image runtime artifact manifest invalid JSON", self.root)
+            return False
+        if (
+            runtime_manifest.get("template_version") != "rsna-2d-dino-mil-v1"
+            or runtime_manifest.get("fold_outputs") != evidence.get("fold_outputs")
+            or runtime_manifest.get("prediction_hashes") != evidence.get("prediction_hashes")
+        ):
+            result.validate_ok = False
+            result.errors.append("validate: image runtime artifact manifest disagrees with evidence")
+            append_daily_log("validate rejected: image runtime artifact manifest disagrees", self.root)
+            return False
+        append_daily_event(
+            "image_semantic_evidence_ok",
+            {
+                "experiment_id": result.experiment_id or "",
+                "submission": str(submission_path),
+                "fold_outputs": evidence.get("fold_outputs") or [],
+                "prediction_hashes": evidence.get("prediction_hashes") or [],
+            },
+            self.root,
+        )
+        return True
 
-        if self.router.available():
+    def _plan(self, state: AgentState, dry: bool, result: CycleResult) -> None:
+        hypothesis, approach, notes = DEFAULT_HYPOTHESIS, "baseline", "plan agent"
+        workspace = self.root / self.competition.workspace_relative
+        pack = build_context_pack(self.root, view="plan", workspace=workspace)
+        zen = self.router.client if self.router is not None else None
+        model = self.competition.model_for("plan", self.settings)
+
+        def on_plan(h: str, a: str, steps: str) -> None:
+            nonlocal hypothesis, approach
+            hypothesis, approach = h, a
+            result.plan_text = write_plan_text(h, a, steps)
+
+        judge_state = new_judge_state()
+
+        def plan_judge(h: str, a: str, steps: str) -> tuple[bool, str]:
             try:
-                text = self.router.plan(
-                    PLAN_SYSTEM,
-                    f"Competition: {self.competition.slug}\n\n{pack.as_prompt_block()}",
-                )
-                result.plan_text = text
-                hypothesis, approach = _parse_plan_lines(text)
-                notes = "zen plan"
-            except Exception as exc:  # noqa: BLE001
-                notes = f"zen plan failed: {exc}"
-                result.errors.append(f"plan: {exc}")
-        else:
-            notes = "OPENCODE_API_KEY missing; offline plan"
+                methods = load_methods(workspace)
+            except Exception:  # noqa: BLE001
+                methods = {}
+            return judge_plan(
+                zen,
+                model,
+                write_plan_text(h, a, steps),
+                methods,
+                str(state.public_best or "unknown"),
+                state=judge_state,
+                log=lambda msg: append_daily_log(msg, self.root),
+            )
+
+        agent, _state = make_plan_agent(
+            zen,
+            model,
+            self.root,
+            self.settings.plan_agent_config(),
+            workspace=workspace,
+            log=lambda msg: append_daily_log(msg, self.root),
+            on_plan=on_plan,
+            judge=plan_judge,
+            tracer=self._tracer,
+        )
+        out = agent.run(
+            f"Competition: {self.competition.slug}\n\n{pack.as_prompt_block()}"
+        )
+        append_daily_log(f"plan agent stop={out.stop_reason} turns={out.turns}", self.root)
+        result.plan_verified = verify_plan_stage(
+            wrote=bool(_state.get("wrote")),
+            judge_ready=bool(judge_state.get("ready")),
+        ).ok
+        if self._tracer is not None:
+            self._tracer.emit(
+                "agent_execution",
+                stage="plan",
+                agent=out.agent,
+                stop_reason=out.stop_reason,
+                turns=out.turns,
+                tool_calls=out.tool_calls,
+                writes=out.writes,
+                rejected_writes=out.rejected_writes,
+                errors=out.errors,
+                verified=result.plan_verified,
+            )
+            self._tracer.emit(
+                "agent_verification",
+                stage="plan",
+                agent=out.agent,
+                verified=result.plan_verified,
+            )
+        if result.plan_text is None:
+            methods = load_methods(workspace)
+            steps = [
+                s
+                for s in (methods.get("implement_steps") or [])
+                if s and "dry-run default" not in str(s).lower()
+            ]
+            if steps:
+                hypothesis, approach = str(steps[0])[:240], "recipe"
+                result.plan_text = write_plan_text(hypothesis, approach, "; ".join(steps[:3]))
+            else:
+                result.plan_text = write_plan_text(hypothesis, approach, "")
+        notes = f"plan agent {out.stop_reason}"
+        if zen is None or not hasattr(zen, "chat"):
+            notes = "DEEPSEEK_API_KEY missing; offline plan from cards"
 
         write_experiment(
             result.experiment_id or "unknown",
@@ -847,6 +2150,12 @@ class Orchestrator:
             notes=notes + ("; dry_run" if dry else ""),
             root=self.root,
         )
+        if judge_state.get("last_reason"):
+            patch_experiment(
+                result.experiment_id or "unknown",
+                judge=f"plan {judge_state['ready']}: {judge_state['last_reason']}",
+                root=self.root,
+            )
 
     def _tg(self) -> SupportsTelegram | None:
         if self._telegram is not None:
@@ -872,6 +2181,12 @@ class Orchestrator:
         if not result.validate_ok or not result.candidate_csv:
             result.approve_ok = False
             append_daily_log("approve skipped: no validated candidate", self.root)
+            return state
+
+        if not dry and self._auto_submit_allowed(state):
+            result.approve_ok = True
+            result.waiting_approve = False
+            append_daily_log(f"approve autonomous exp={exp_id}", self.root)
             return state
 
         if self._assume_approved:
@@ -950,8 +2265,13 @@ class Orchestrator:
             append_daily_log("submit skipped: no csv", self.root)
             return state
 
-        pending = load_pending(self.root)
-        if not dry and self.settings.require_telegram_approve and not self._assume_approved:
+        pending = self._sa.load_pending()
+        if (
+            not dry
+            and self.settings.require_telegram_approve
+            and not self._assume_approved
+            and not self._auto_submit_allowed(state)
+        ):
             if (
                 pending.status == "approved"
                 and pending.csv_path not in {csv_path, "none"}
@@ -990,15 +2310,66 @@ class Orchestrator:
         if kernel_ref and pending.kernel_ref in {"", "none"}:
             pending.kernel_ref = kernel_ref
         if pending.status == "approved":
-            save_pending(pending, self.root)
+            self._sa.save_pending(pending)
+
+        if (
+            not dry
+            and self.settings.block_submit
+        ):
+            try:
+                # Evaluate the artifacts produced by this cycle. Reading the
+                # prior cycle's report allowed a passing stale report to bless
+                # a failed PLAN/CODE/VALIDATE run.
+                ev = evaluate_cycle(self.root)
+                persist_report(self.root, ev)
+            except Exception as exc:  # noqa: BLE001
+                result.submit_ok = False
+                result.submit_message = "eval gate unavailable"
+                result.errors.append(f"submit eval gate unavailable: {exc}")
+                append_daily_log(f"submit skipped: eval gate unavailable: {exc}", self.root)
+                return state
+            if ev.get("passed") is False:
+                result.submit_ok = False
+                result.submit_message = "eval gate closed"
+                heal = load_heal(self.root)
+                heal.note = "eval gate closed"
+                save_heal(heal, self.root)
+                append_daily_log("submit skipped: eval gate closed", self.root)
+                return state
 
         msg = f"agent {result.experiment_id}" + (" dry" if dry else "")
         fails: list[str] = []
         result.submit_ok = False
         result.submit_message = ""
+        outbox_action: ExternalAction | None = None
+        if not dry:
+            output_hash = submission_output_hash(Path(csv_path), self.competition.id_column)
+            outbox_action = self._outbox.enqueue(
+                action="submit",
+                idempotency_key=f"{self.competition.slug}:{mode}:{output_hash}",
+                payload={
+                    "competition": self.competition.slug,
+                    "message": msg,
+                    "output_hash": output_hash,
+                },
+            )
+            if outbox_action.status in {"sent", "unknown"}:
+                outbox_action = self._reconcile_outbox_action(outbox_action)
+                if outbox_action.status == "accepted":
+                    result.submit_ok = True
+                    result.submit_message = (
+                        f"outbox: reconciled existing submission {outbox_action.external_ref}"
+                    )
+                else:
+                    result.submission_pending = True
+                    result.submit_message = "outbox: submission intent awaits reconciliation"
+                    append_daily_log(result.submit_message, self.root)
+                    return state
+            else:
+                outbox_action = self._outbox.mark_sent(outbox_action.action_id)
 
         # --- 1) Kaggle MCP ---
-        if self.settings.mcp_submit:
+        if not result.submit_ok and self.settings.mcp_submit:
             append_daily_log(f"submit mcp start mode={mode} kernel={kernel_ref}", self.root)
             if not dry:
                 self._notify(
@@ -1024,6 +2395,10 @@ class Orchestrator:
                 fails.append(f"mcp: {exc}")
                 result.submit_message = f"mcp: {exc}"
                 append_daily_log(f"submit mcp failed: {exc}", self.root)
+                if outbox_action is not None:
+                    self._outbox.mark_unknown(outbox_action.action_id)
+                    result.submission_pending = True
+                    return state
 
         # --- 2) Python API ---
         if not result.submit_ok and self.settings.api_submit:
@@ -1058,9 +2433,12 @@ class Orchestrator:
                             mode=mode,
                             kernel_folder=kernel_folder,
                             kernel_ref=kernel_ref,
+                            kernel_version=result.kernel_version,
                             output_file=self.competition.submit_output_file,
                             poll_seconds=30 if nb else 15,
-                            poll_attempts=40 if nb else 10,
+                            poll_attempts=(
+                                self.settings.kernel_poll_attempts if nb else 10
+                            ),
                         )
                         result.submit_ok = sr.success
                         result.submit_message = f"api: {sr.message}"
@@ -1070,45 +2448,20 @@ class Orchestrator:
                 fails.append(f"api: {exc}")
                 result.submit_message = f"api: {exc}"
                 append_daily_log(f"submit api failed: {exc}", self.root)
-
-        # --- 3) Browser-harness ---
-        if (
-            not dry
-            and not result.submit_ok
-            and self.settings.browser_submit_fallback
-        ):
-            append_daily_log(
-                f"submit browser after mcp/api: {fails[-1] if fails else ''}",
-                self.root,
-            )
-            self._notify(
-                "MCP and API failed — trying browser-harness…\n\n"
-                f"Last error: {(fails[-1] if fails else 'unknown')[:300]}\n"
-                "Chrome must already be signed in to Kaggle."
-            )
-            try:
-                br = submit_via_browser(
-                    BrowserSubmitRequest(
-                        competition=self.competition.slug,
-                        message=msg,
-                        mode=mode,
-                        csv_path=Path(csv_path),
-                        kernel_ref=kernel_ref,
-                        dry_run=False,
-                    ),
-                    run_fn=self._browser_submit,
-                )
-                result.submit_ok = br.success
-                result.submit_message = f"browser: {br.message}"
-                if not br.success:
-                    fails.append(f"browser: {br.message}")
-            except Exception as exc:  # noqa: BLE001
-                fails.append(f"browser: {exc}")
-                result.submit_message = f"browser: {exc}"
-                append_daily_log(f"submit browser failed: {exc}", self.root)
+                if outbox_action is not None:
+                    self._outbox.mark_unknown(outbox_action.action_id)
+                    result.submission_pending = True
+                    return state
 
         if not dry and result.submit_ok:
+            if outbox_action is not None:
+                self._outbox.reconcile(outbox_action.action_id, status="accepted")
             mark_submitted(self.root)
+            policy = self._submission_autonomy()
+            if policy is not None and (
+                self._assume_approved or pending.status in {"approved", "submitted"}
+            ):
+                policy.record_approved_submission()
             try:
                 used = int(state.proposals_used or "0") + 1
             except ValueError:
@@ -1140,24 +2493,160 @@ class Orchestrator:
             if self._kaggle is None:
                 self._kaggle = KaggleClient().connect()
             subs = self._kaggle.submissions(self.competition.slug, top=3)
-            if subs:
-                latest = subs[0]
-                result.feedback_score = latest.public_score or latest.status
-                append_daily_log(
-                    f"feedback status={latest.status} score={latest.public_score}",
-                    self.root,
-                )
-                if latest.public_score and latest.public_score not in {"", "none"}:
-                    state.public_best = latest.public_score
-            else:
+            if not subs:
                 append_daily_log("feedback: no submissions yet", self.root)
+                return state
+            latest = subs[0]
+            append_daily_log(
+                f"feedback status={latest.status} score={latest.public_score}",
+                self.root,
+            )
+            scored = (
+                latest
+                if parse_loop_score(latest.public_score) is not None
+                else self._wait_for_feedback_score()
+            )
+            if scored is None:
+                result.feedback_pending = True
+                append_daily_log("feedback: no scored submission yet", self.root)
+                return state
+            result.feedback_score = scored.public_score
+            pending = self._sa.load_pending()
+            exp_id = (
+                pending.exp_id
+                if pending.exp_id not in {"", "none"}
+                else result.experiment_id
+            )
+            if exp_id and exp_id != "none":
+                patch_experiment(
+                    exp_id,
+                    root=self.root,
+                    public_score=scored.public_score,
+                    submission=scored.status or "submitted",
+                    kernel=result.kernel_ref or pending.kernel_ref,
+                )
+            self._apply_best_score(state, scored.public_score)
         except Exception as exc:  # noqa: BLE001
             result.errors.append(f"feedback: {exc}")
             append_daily_log(f"feedback failed: {exc}", self.root)
         return state
 
+    def _wait_for_feedback_score(self) -> SubmissionRow | None:
+        """Poll the LB until the newest submission has a numeric score.
+
+        Bounded by settings.feedback_wait_minutes; 0 disables the wait.
+        """
+        wait_minutes = self.settings.feedback_wait_minutes
+        if wait_minutes <= 0:
+            return None
+        poll = self.settings.feedback_poll_seconds
+        deadline = time.monotonic() + wait_minutes * 60
+        while time.monotonic() < deadline:
+            time.sleep(poll)
+            subs = self._kaggle.submissions(self.competition.slug, top=3)
+            latest = subs[0]
+            scored = (
+                latest
+                if parse_loop_score(latest.public_score) is not None
+                else None
+            )
+            if scored is not None:
+                append_daily_log(
+                    f"feedback waited: score={scored.public_score}", self.root
+                )
+                return scored
+            append_daily_log("feedback: still pending score, polling…", self.root)
+        append_daily_log(f"feedback: no score within {wait_minutes}m", self.root)
+        return None
+
+    def _catch_up_scores(self, state: AgentState) -> None:
+        """Ingest scores that landed after a previous cycle exited.
+
+        Patches experiment files, then advances heal/loop state and the
+        public best, so a late score still drives the self-heal ladder.
+        """
+        if self._kaggle is None:
+            self._kaggle = KaggleClient().connect()
+        subs = self._kaggle.submissions(self.competition.slug, top=20)
+        ingested: list[SubmissionRow] = []
+        for row in subs:
+            if parse_loop_score(row.public_score) is None:
+                continue
+            exp_id = exp_id_from_description(row.description)
+            if not exp_id:
+                continue
+            exp_file = memory_dir(self.root) / "experiments" / f"{exp_id}.md"
+            if not exp_file.is_file():
+                write_experiment(
+                    exp_id,
+                    hypothesis="recovered scored Kaggle submission",
+                    approach="external_reconciliation",
+                    notes=f"recovered from submission {row.ref}",
+                    root=self.root,
+                )
+            if already_recorded(exp_file, row.public_score):
+                continue
+            patch_experiment(
+                exp_id,
+                root=self.root,
+                public_score=row.public_score,
+                submission=row.status or "submitted",
+            )
+            ingested.append(row)
+            append_daily_log(
+                f"score catch-up exp={exp_id} score={row.public_score}", self.root
+            )
+        if not ingested:
+            return
+        self._advance_heal_and_loop(ingested[0], state)
+
+    def _advance_heal_and_loop(self, row: SubmissionRow, state: AgentState) -> None:
+        score = row.public_score
+        heal = load_heal(self.root)
+        if parse_loop_score(heal.last_score) != parse_loop_score(score):
+            heal = decide_next(
+                heal,
+                public_score=score,
+                metric_direction=self.competition.metric_direction,
+                max_tune_attempts=self.settings.max_tune_attempts,
+                max_no_improve_days=self.settings.max_no_improve_days,
+                cycle_ok=True,
+            )
+            save_heal(heal, self.root)
+            append_daily_log(
+                f"heal catch-up score={score} decision_next={heal.decision_next}",
+                self.root,
+            )
+        try:
+            n_used = int(load_loop(self.root).last_n)
+        except (TypeError, ValueError):
+            n_used = 1
+        update_loop_from_score(
+            self.root,
+            score,
+            n_used=n_used,
+            n_min=self.settings.loop_n_min,
+            n_max=self.settings.loop_n_max,
+            typical_gain=self.settings.loop_typical_gain,
+            default_n=self.settings.loop_default_n,
+            direction=self.competition.metric_direction,
+        )
+        self._apply_best_score(state, score)
+
+    def _apply_best_score(self, state: AgentState, score: str) -> None:
+        """Raise the public best and persist it when a score improves it."""
+        if score_is_better(score, state.public_best, self.competition.metric_direction):
+            state.public_best = score
+            patch_memory_public_score(str(score), self.root)
+            from kaggle_agent.memory.write import supersede_worse_experiments
+            supersede_worse_experiments(self.root, score)
+
     def _heal(self, state: AgentState, result: CycleResult) -> AgentState:
         heal = load_heal(self.root)
+        if result.feedback_pending:
+            result.heal_decision = "pending_external"
+            append_daily_log("heal deferred: submission score pending", self.root)
+            return state
         score = result.feedback_score
         # Prefer public LB score; fall back to personal best already stored
         if not score or score in {"none", "n/a"}:
@@ -1167,8 +2656,32 @@ class Orchestrator:
             e.startswith(("code:", "smoke:", "kernel:", "validate:"))
             for e in result.errors
         )
-        if result.validate_ok and not result.submit_ok and not result.dry_run:
-            # Waiting on human approve is not a model failure
+        from kaggle_agent.heal.pins import apply_pin_heal, is_pin_error, should_wait_approve
+        from kaggle_agent.heal.submit_errors import classify_submit_error
+
+        if not result.submit_ok and not result.dry_run:
+            for e in result.errors:
+                err_cls = classify_submit_error(e)
+                if err_cls:
+                    heal.note = f"submit {err_cls} error: {e[:120]}"
+                    break
+
+        pin_errs = [e for e in result.errors if is_pin_error(e)]
+        if pin_errs and result.kernel_path:
+            workspace = self.root / self.competition.workspace_relative
+            healed = apply_pin_heal(workspace, Path(result.kernel_path))
+            append_daily_log(
+                f"heal pin strip changed={healed.get('changed')} "
+                f"models={healed.get('model_sources')} datasets={healed.get('dataset_sources')}",
+                self.root,
+            )
+        if should_wait_approve(
+            validate_ok=result.validate_ok,
+            submit_ok=result.submit_ok,
+            dry_run=result.dry_run,
+            assume_approved=self._assume_approved,
+            errors=result.errors,
+        ):
             heal.decision_next = "wait_approve"
             heal.note = "submit blocked — need /approve"
             save_heal(heal, self.root)
@@ -1224,6 +2737,8 @@ class Orchestrator:
                 _flag("CSV validate", result.validate_ok),
                 _flag("Approve step", result.approve_ok),
                 _flag("Submit", result.submit_ok),
+                _flag("CUSTOM_INFER hook", result.wrote_custom_infer),
+                _flag("Kernel recipe", result.wrote_recipe),
             ]
         )
         hard = result.hard_errors
@@ -1280,8 +2795,9 @@ def run_daily(
     kaggle: KaggleClient | None = None,
     browser_fetch: FetchFn | None = None,
     telegram: SupportsTelegram | None = None,
-    browser_submit: BrowserSubmitFn | None = None,
+    browser_submit: Any | None = None,
     mcp_submit_fn: Any | None = None,
+    skip_phases: frozenset[str] | None = None,
 ) -> CycleResult:
     settings = load_settings(root)
     cid = competition_id or settings.default_competition
@@ -1295,5 +2811,5 @@ def run_daily(
         telegram=telegram,
         browser_submit=browser_submit,
         mcp_submit_fn=mcp_submit_fn,
+        skip_phases=skip_phases,
     ).run_cycle(dry_run=dry_run, assume_approved=assume_approved)
-
