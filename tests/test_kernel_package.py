@@ -2,6 +2,7 @@ import json
 from pathlib import Path
 
 from fakes import FakeKaggleApi
+from helpers import write_kernel_fixture_data
 from kaggle_agent.config import load_competition
 from kaggle_agent.kaggle_api import KaggleClient
 from kaggle_agent.paths import repo_root
@@ -32,7 +33,7 @@ def _root_with_data(tmp_path: Path) -> Path:
 
     shutil.copytree(real / "config", root / "config")
     (root / "competitions" / "rsna_knee").mkdir(parents=True)
-    shutil.copytree(real / "data", root / "data")
+    write_kernel_fixture_data(root)
     return root
 
 

@@ -252,7 +252,7 @@ def _validate_competition(raw: dict[str, Any], path: Path) -> None:
     budget = _section(raw, "submit_budget", path)
     _int(budget, "max_proposals_per_day", path, 2, minimum=0)
     fleet = raw.get("research", {}).get("fleet") if isinstance(raw.get("research"), dict) else None
-    if fleet is not None and fleet is not True and not isinstance(fleet, list):
+    if fleet is not None and not isinstance(fleet, bool) and not isinstance(fleet, list):
         raise _config_error(path, "research.fleet", "must be true, false, or a roster list", fleet)
     if isinstance(fleet, list) and any(not isinstance(item, str) or not item.strip() for item in fleet):
         raise _config_error(path, "research.fleet", "must contain non-empty strings", fleet)

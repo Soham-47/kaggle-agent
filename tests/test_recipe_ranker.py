@@ -3,6 +3,7 @@
 from pathlib import Path
 
 from kaggle_agent.paths import repo_root
+from helpers import write_kernel_fixture_data
 
 
 def test_extract_labels_spanish_meniscus():
@@ -20,8 +21,10 @@ def test_extract_labels_spanish_meniscus():
 def test_fit_ranker_varies_on_real_test(tmp_path: Path):
     import sys
 
-    root = repo_root()
+    root = tmp_path / "fixture"
     ws = root / "competitions" / "rsna_knee"
+    (ws / "pipeline").mkdir(parents=True)
+    write_kernel_fixture_data(root)
     sys.path.insert(0, str(ws))
     from pipeline.recipe import apply_recipe
     from pipeline.ranker import load_ranker, load_series_by_study, predict_studies
@@ -30,11 +33,7 @@ def test_fit_ranker_varies_on_real_test(tmp_path: Path):
     assert r.ok
     assert r.n_train >= 58
     model = load_ranker(Path(r.weights_path))
-    ids = [
-        "1.2.826.0.1.3680043.8.498.10047035057544427318018579121635276191",
-        "1.2.826.0.1.3680043.8.498.10062861783145312629332250977456991776",
-        "1.2.826.0.1.3680043.8.498.10067514707072572280263481548497591402",
-    ]
+    ids = ["test-a", "test-b", "test-c"]
     series = load_series_by_study(root / "data" / "test_series.csv")
     rows = predict_studies(ids, series, model)
     assert len(rows) == 3
@@ -53,18 +52,17 @@ def test_kernel_package_embeds_recipe(tmp_path: Path):
     root = tmp_path / "ka"
     real = repo_root()
     shutil.copytree(real / "config", root / "config")
-    shutil.copytree(real / "data", root / "data")
+    write_kernel_fixture_data(root)
     shutil.copytree(real / "competitions" / "rsna_knee" / "pipeline", root / "competitions" / "rsna_knee" / "pipeline")
     comp = load_competition("rsna_knee", root)
     pkg = write_kernel_package(comp, root=root, username="tester", exp_id="recipe1")
     text = pkg.notebook_path.read_text(encoding="utf-8")
-    assert "def extract_labels" in text
-    assert "from reports import" not in text
-    assert "LGBMClassifier" in text or "LogisticRegression" in text
-    assert "0.5" in text  # prior fallback exists
+    assert "_find_report_labels" in text
+    assert "discover" in text.lower()
     assert "constant probabilities from sample header" not in text
     assert (pkg.folder / "train.csv").is_file()
     assert (pkg.folder / "reports.py").is_file()
+    assert (pkg.folder / "ranker.py").is_file()
     meta = json.loads(pkg.metadata_path.read_text(encoding="utf-8"))
     assert meta["enable_gpu"] is False
 

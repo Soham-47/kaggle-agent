@@ -1,6 +1,7 @@
 from pathlib import Path
 
 from fakes import FakeKaggleApi
+from helpers import write_kernel_fixture_data
 from kaggle_agent.heal.policy import decide_next, load_heal, save_heal, HealState
 from kaggle_agent.kaggle_api import KaggleClient
 from kaggle_agent.train.kernel_job import (
@@ -69,8 +70,7 @@ def test_kernel_job_resume_no_second_push(tmp_path: Path):
     shutil.copytree(real / "config", root / "config")
     (root / "competitions" / "rsna_knee").mkdir(parents=True)
     (root / "memory").mkdir()
-    if (real / "data").is_dir():
-        shutil.copytree(real / "data", root / "data")
+    write_kernel_fixture_data(root)
     comp = load_competition("rsna_knee", root)
     pkg = write_kernel_package(comp, root=root, username="tester", exp_id="e1")
 
@@ -120,8 +120,7 @@ def test_kernel_job_resume_preserves_version_during_polling(tmp_path: Path):
     shutil.copytree(real / "config", root / "config")
     (root / "competitions" / "rsna_knee").mkdir(parents=True)
     (root / "memory").mkdir()
-    if (real / "data").is_dir():
-        shutil.copytree(real / "data", root / "data")
+    write_kernel_fixture_data(root)
     comp = load_competition("rsna_knee", root)
     pkg = write_kernel_package(comp, root=root, username="tester", exp_id="e1")
 
@@ -179,8 +178,7 @@ def test_kernel_retries_cpu_after_p100_ban(tmp_path: Path):
     shutil.copytree(real / "config", root / "config")
     (root / "competitions" / "rsna_knee").mkdir(parents=True)
     (root / "memory").mkdir()
-    if (real / "data").is_dir():
-        shutil.copytree(real / "data", root / "data")
+    write_kernel_fixture_data(root)
     comp = load_competition("rsna_knee", root)
     pkg = write_kernel_package(
         comp,
@@ -238,8 +236,7 @@ def test_run_kernel_phase_clears_job_when_status_has_enum_prefix(tmp_path: Path)
     shutil.copytree(real / "config", root / "config")
     (root / "competitions" / "rsna_knee").mkdir(parents=True)
     (root / "memory").mkdir()
-    if (real / "data").is_dir():
-        shutil.copytree(real / "data", root / "data")
+    write_kernel_fixture_data(root)
     comp = load_competition("rsna_knee", root)
     pkg = write_kernel_package(comp, root=root, username="tester", exp_id="e1")
     api = FakeKaggleApi(status_queue=["KernelWorkerStatus.COMPLETE"])
@@ -284,8 +281,7 @@ def test_package_matches_existing_identical(tmp_path: Path):
     shutil.copytree(real / "config", root / "config")
     (root / "competitions" / "rsna_knee").mkdir(parents=True)
     (root / "memory").mkdir()
-    if (real / "data").is_dir():
-        shutil.copytree(real / "data", root / "data")
+    write_kernel_fixture_data(root)
     comp = load_competition("rsna_knee", root)
     pkg1 = write_kernel_package(comp, root=root, username="tester", exp_id="e1")
     pkg2 = write_kernel_package(comp, root=root, username="tester", exp_id="e2")
@@ -305,8 +301,7 @@ def test_package_matches_existing_true_when_only_methods_change(tmp_path: Path):
     shutil.copytree(real / "config", root / "config")
     (root / "competitions" / "rsna_knee").mkdir(parents=True)
     (root / "memory").mkdir()
-    if (real / "data").is_dir():
-        shutil.copytree(real / "data", root / "data")
+    write_kernel_fixture_data(root)
     comp = load_competition("rsna_knee", root)
     pkg1 = write_kernel_package(comp, root=root, username="tester", exp_id="e1")
     pkg2 = write_kernel_package(comp, root=root, username="tester", exp_id="e2")

@@ -23,8 +23,10 @@ class _KaggleWithoutSubmit:
 def test_unreconciled_submission_intent_is_never_sent_again(tmp_path: Path):
     root = tmp_path / "ka"
     copy_min_workspace(root, repo_root())
+    settings = load_settings(root)
+    settings.raw.setdefault("eval", {})["block_submit"] = False
     orch = Orchestrator(
-        load_settings(root), load_competition("rsna_knee", root), root=root,
+        settings, load_competition("rsna_knee", root), root=root,
         kaggle=_KaggleWithoutSubmit(),
     )
     candidate = root / "candidate.csv"
@@ -57,8 +59,10 @@ def test_unreconciled_submission_intent_is_never_sent_again(tmp_path: Path):
 def test_unreconciled_kernel_push_intent_is_never_pushed_again(tmp_path: Path, monkeypatch):
     root = tmp_path / "ka"
     copy_min_workspace(root, repo_root())
+    settings = load_settings(root)
+    settings.raw.setdefault("eval", {})["block_submit"] = False
     orch = Orchestrator(
-        load_settings(root), load_competition("rsna_knee", root), root=root,
+        settings, load_competition("rsna_knee", root), root=root,
         kaggle=_KaggleWithoutSubmit(),
     )
     folder = root / "kernel"

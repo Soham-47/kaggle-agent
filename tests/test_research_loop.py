@@ -79,6 +79,18 @@ def _setup(tmp_path: Path, *, drop_methods: bool = False) -> Path:
     root = tmp_path / "kaggle-agent"
     real = Path(__file__).resolve().parents[1]
     _copy_min(root, real)
+    # The shared cycle fixture disables the optional fleet for fast control
+    # flow tests. Research-loop tests explicitly exercise the competition's
+    # committed fleet roster, so restore that contract here.
+    competition_config = root / "config" / "competitions" / "rsna_knee.yaml"
+    text = competition_config.read_text(encoding="utf-8")
+    competition_config.write_text(
+        text.replace(
+            "fleet: false",
+            "fleet: [notebooks, papers, github, web, discussions, datasets]",
+        ),
+        encoding="utf-8",
+    )
     if drop_methods:
         path = _methods_path(root)
         if path.is_file():
@@ -160,7 +172,7 @@ def _stub_cards(monkeypatch) -> None:  # noqa: ANN001
             "- labels: see source\n"
             "- CV: prefer grouped splits\n"
             "- inference: discover hidden test IDs from study folders\n"
-            "- copyable next step: attach public weights Our score=unknown.\n"
+            "- copyable next step: reuse the validated image template and run grouped smoke checks.\n"
             "- do not copy: H-flip\n"
             f"- kind: {kwargs.get('kind') or 'kernel'}\n"
         )

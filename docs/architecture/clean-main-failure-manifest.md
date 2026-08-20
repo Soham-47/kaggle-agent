@@ -1,6 +1,6 @@
 # Clean-main failure manifest
 
-## Reproduction
+## Historical reproduction
 
 The canonical baseline is the clean `origin/main` worktree at:
 
@@ -12,11 +12,40 @@ Result: 478 passed, 38 failed, 1 deselected, 2 warnings in 23.04s
 Compile: uv run python -m compileall -q src (passed)
 ```
 
-The same test-name set was compared with the stabilization worktree. Before
-the validation-only tests were added, the stabilization worktree had
-`543 passed, 38 failed, 1 deselected, 2 warnings`; after those tests it had
-`565 passed, 38 failed, 1 deselected, 2 warnings`.
-there were no supervisor-only failures.
+The same 38 test names were later reproduced against the current main
+revision below. The historical classification table is retained so the
+original claim remains auditable.
+
+## Current canonical baseline
+
+The validation worktree was created directly from `origin/main` after
+`git fetch origin`:
+
+```text
+SHA: 77ddbfc33adbbaf3ff11677e88bec12feeacc754
+Worktree: /home/soham/kaggle-agent-live-certification
+Branch: supervisor-live-certification
+Command: uv run python -m compileall -q src
+        uv run pytest -q -m "not integration"
+Initial result: 565 passed, 38 failed, 1 deselected, 2 warnings in 44.13s
+Final result: uv run python -m compileall -q src (passed)
+              604 passed, 1 deselected in 23.41s
+```
+
+Every initial failure in the table below was reproduced or explained on the
+clean `77ddbfc` checkout. No failure was hidden with a marker or removed from
+the suite. The 38-entry discrepancy is resolved: it was the complete clean
+main failure set, not a partial 22-entry set, and all 38 now pass.
+
+## Rehabilitation outcome
+
+The 22 environment/dependency failures were made self-contained with a lazy
+competition-only DICOM import and synthetic public-shaped study/train
+fixtures. No pydicom, torch, transformer, Kaggle dataset, or private data was
+added to the repository dependency contract. The 16 behavioral failures were
+fixed or aligned with the current safety contract: no browser submission,
+durable outbox behavior, unique back-to-back run IDs, current image-template
+contracts, and evidence-based research fixtures.
 
 ## Classification
 
@@ -67,7 +96,7 @@ was changed to hide a failure.
 | 37 | `tests/test_telegram_submit.py::test_live_submit_blocked_without_approve` | baseline-existing | Cycle exits before approval gate; `submit_ok=None`. |
 | 38 | `tests/test_telegram_submit.py::test_approve_then_second_live_submits` | baseline-existing | First cycle exits before approval request; `waiting_approve=False`. |
 
-## Totals
+## Initial totals
 
 ```text
 baseline-existing:                 16
@@ -80,5 +109,6 @@ The missing-environment group consists of seven `pydicom` collection failures,
 fourteen kernel-package/healing cases that require ignored study metadata, and
 one ranker case that requires ignored train tables. The two remaining package
 and ranker entries are baseline behavior in the clean checkout as recorded in
-the table. The baseline is therefore not healthy, and AUTO_SAFE remains
-disabled.
+the table. The initial baseline was therefore unhealthy. It is now green
+after the ticketed rehabilitation above; AUTO_SAFE remains disabled pending
+the live certification phase.

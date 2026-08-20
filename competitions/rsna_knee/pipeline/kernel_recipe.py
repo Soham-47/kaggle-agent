@@ -10,7 +10,6 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
-import pydicom
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -144,6 +143,11 @@ def _sample_paths(study_dir):
 
 
 def _study_tensor(root, study_id):
+    # DICOM decoding is a Kaggle image-runtime concern. Keep it lazy so
+    # metadata-only helpers and local contract tests do not require the
+    # competition image dependency merely to import the rendered recipe.
+    import pydicom
+
     images = []
     for path in _sample_paths(root / study_id):
         pixels = pydicom.dcmread(path, force=True).pixel_array.astype("float32")

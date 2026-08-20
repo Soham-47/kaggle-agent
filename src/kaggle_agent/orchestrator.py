@@ -395,7 +395,10 @@ class Orchestrator:
     def _begin(
         self, state: AgentState, dry: bool, now: datetime, result: CycleResult
     ) -> AgentState:
-        exp_id = result.experiment_id or now.strftime("%Y%m%d-%H%M%S") + ("-dry" if dry else "")
+        # Runs can be triggered back-to-back (for example after Telegram
+        # approval). Include microseconds so a second run cannot reuse the
+        # first run's stage ledger keys or experiment artifacts.
+        exp_id = result.experiment_id or now.strftime("%Y%m%d-%H%M%S-%f") + ("-dry" if dry else "")
         result.experiment_id = exp_id
         self._tracer = Tracer(self.root, cycle_id=exp_id)
         self._tracer.emit("cycle_start", competition=self.competition.id, dry=dry)
@@ -765,6 +768,7 @@ class Orchestrator:
         elif not result.kernel_pending:
             result.validate_ok = False
             result.candidate_csv = None
+            result.submit_ok = False
         return state
 
     def _update_loop_after_feedback(self, result: CycleResult) -> None:
@@ -1901,6 +1905,8 @@ class Orchestrator:
                 result.kernel_duplicate = any(
                     "duplicate recipe" in error.lower()
                     or "duplicate kernel package" in error.lower()
+                    or "identical kernel" in error.lower()
+                    or "kernel is identical" in error.lower()
                     for error in run.errors
                 )
                 result.errors.extend(f"kernel:{e}" for e in run.errors)
@@ -2139,6 +2145,27 @@ class Orchestrator:
                 state=judge_state,
                 log=lambda msg: append_daily_log(msg, self.root),
             )
+
+        image_contract = workspace / "pipeline" / "image_contract.json"
+        image_manifest = workspace / "pipeline" / "artifact_manifest.json"
+        if zen is None and image_contract.is_file() and image_manifest.is_file():
+            try:
+                contract = json.loads(image_contract.read_text(encoding="utf-8"))
+                manifest = json.loads(image_manifest.read_text(encoding="utf-8"))
+            except json.JSONDecodeError:
+                contract = manifest = {}
+            if (
+                contract.get("template") == "rsna-2d-dino-mil-v1"
+                and manifest.get("template_version") == "rsna-2d-dino-mil-v1"
+            ):
+                result.plan_verified = True
+                result.plan_text = write_plan_text(
+                    "reuse the committed validated image template",
+                    "validated image template",
+                    "run the local smoke and preserve the image contract",
+                )
+                append_daily_log("plan: using validated RSNA 2D DINO MIL template", self.root)
+                return state
 
         agent, _state = make_plan_agent(
             zen,

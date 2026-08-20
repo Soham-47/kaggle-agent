@@ -104,6 +104,22 @@ def test_competition_fleet_requires_bool_or_roster_list():
     assert c.fleet_agents == []
 
 
+def test_competition_fleet_false_is_valid_in_yaml(tmp_path: Path):
+    config = tmp_path / "config" / "competitions"
+    config.mkdir(parents=True)
+    text = (repo_root() / "config" / "competitions" / "rsna_knee.yaml").read_text(
+        encoding="utf-8"
+    )
+    text = text.replace(
+        "fleet: [notebooks, papers, github, web, discussions, datasets]",
+        "fleet: false",
+    )
+    (config / "rsna_knee.yaml").write_text(text, encoding="utf-8")
+    competition = load_competition("rsna_knee", tmp_path)
+    assert competition.fleet_enabled is False
+    assert competition.fleet_agents == []
+
+
 def _write_settings(tmp_path: Path, **overrides: object) -> None:
     raw: dict[str, object] = {
         "default_competition": "rsna_knee",
