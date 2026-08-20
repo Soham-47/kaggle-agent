@@ -11,7 +11,8 @@ from kaggle_agent.supervisor.policy import SafetyViolation
 from kaggle_agent.supervisor.repair_flow import RepairFlowResult
 from kaggle_agent.supervisor.resume import ResumeRequest
 from kaggle_agent.supervisor.promote import RepairAcceptance
-from kaggle_agent.supervisor.review import Review, ReviewVerdict
+from kaggle_agent.supervisor.classifier import FailureClass, FailureClassification
+from kaggle_agent.supervisor.spec import SpecReview, SpecReviewVerdict
 from kaggle_agent.supervisor.state import RuntimeLayout, SupervisorStateStore
 
 
@@ -35,6 +36,50 @@ def test_auto_safe_refuses_dirty_checkout(tmp_path: Path, monkeypatch):
     monkeypatch.setattr("kaggle_agent.supervisor.policy.RepairPolicy.require_clean_auto_safe", refuse)
     result = Supervisor(settings, tmp_path).run_once(wait=False)
     assert result.status == "DIRTY_SOURCE_BASELINE"
+
+
+def test_auto_safe_requires_explicit_automatic_promotion(tmp_path: Path, monkeypatch):
+    settings = _settings(tmp_path, "auto_safe")
+    monkeypatch.setenv("KAGGLE_AGENT_SUPERVISOR_DIR", str(tmp_path / "state"))
+    state = SupervisorStateStore(RuntimeLayout.for_repo(tmp_path, tmp_path / "state"))
+    revision = RuntimeRevision("a", "b", "generation-0001")
+    incident = Incident(
+        "i1", "w1", "generation-0001", "cycle-1", None, "demo", "CODE", 1, revision,
+        "recoverable_failure", "NameError", "NameError", None, "sig", (), (), None, None,
+        None, (), "now",
+    )
+    state.write_json("incidents/i1.json", incident.to_dict())
+
+    class FakeSpec:
+        max_changed_source_files = 1
+        max_changed_test_files = 0
+        max_changed_lines = 20
+
+        def save(self, _state_root):
+            return None
+
+    class FakeSessions:
+        def author_spec(self, *_args, **_kwargs):
+            return FakeSpec()
+
+        def review_spec(self, *_args, **_kwargs):
+            return SpecReview(SpecReviewVerdict.APPROVE)
+
+    monkeypatch.setattr(
+        "kaggle_agent.supervisor.loop.classify_after_reconciliation",
+        lambda *_args: FailureClassification(FailureClass.CODE_DEFECT, 0.99, True),
+    )
+    monkeypatch.setattr("kaggle_agent.supervisor.loop.DeepSeekSupervisorAgents.from_env", lambda: FakeSessions())
+    monkeypatch.setattr(
+        "kaggle_agent.supervisor.loop.RepairCoordinator.execute",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("must not execute without automatic promotion")),
+    )
+
+    result = Supervisor(settings, tmp_path)._handle_worker_result(
+        {"status": "RECOVERABLE_FAILURE", "incident_id": "i1"}, "auto_safe", "demo"
+    )
+
+    assert result == ("NEEDS_AUTHORITY", "automatic promotion is disabled unless supervisor.promotion.automatic is true")
 
 
 def test_supervisor_does_not_start_replacement_for_live_unadoptable_worker(tmp_path: Path, monkeypatch):

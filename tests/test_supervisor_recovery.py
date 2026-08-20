@@ -1,20 +1,23 @@
 import os
-import signal
 import subprocess
 import sys
+import time
 from pathlib import Path
 
-from kaggle_agent.autonomy.outbox import ExternalAction, ExternalActionOutbox
+import yaml
+
+from kaggle_agent.autonomy.outbox import ExternalActionOutbox
+from kaggle_agent.config import load_settings
 from kaggle_agent.supervisor.audit import AuditLog
 from kaggle_agent.supervisor.classifier import FailureClass, classify_after_reconciliation
 from kaggle_agent.supervisor.incidents import Incident
-from kaggle_agent.supervisor.generation import RuntimeRevision
-from kaggle_agent.supervisor.generation import RuntimeGeneration
+from kaggle_agent.supervisor.generation import GenerationStore, RuntimeGeneration, RuntimeRevision
 from kaggle_agent.supervisor.heartbeat import Heartbeat, HeartbeatStore
+from kaggle_agent.supervisor.loop import Supervisor
 from kaggle_agent.supervisor.promote import GenerationPromotion
 from kaggle_agent.supervisor.recovery import SupervisorRecovery
+from kaggle_agent.supervisor.resume import ResumeRequest
 from kaggle_agent.supervisor.state import RuntimeLayout, SupervisorStateStore
-import time
 
 
 def test_uncertain_external_action_stays_pending_before_classification(tmp_path: Path):
@@ -92,3 +95,98 @@ def test_interrupted_promotion_recovers_to_old_or_new_pointer(tmp_path: Path):
     state.write_json("promotion.json", {"status": "PREPARED", "old_generation": "g1", "new_generation": "g2"})
     state.write_json("active-generation.json", new.to_dict())
     assert promotion.recover_interrupted(old, new) == "COMMITTED"
+
+
+def test_restart_resumes_promoted_worker_with_same_durable_request(tmp_path: Path, monkeypatch):
+    config = tmp_path / "config"
+    config.mkdir()
+    (config / "settings.yaml").write_text(
+        yaml.safe_dump({"default_competition": "demo", "supervisor": {"enabled": True, "mode": "auto_safe"}}),
+        encoding="utf-8",
+    )
+    state = SupervisorStateStore(RuntimeLayout.for_repo(tmp_path, tmp_path / "state"))
+    monkeypatch.setenv("KAGGLE_AGENT_SUPERVISOR_DIR", str(tmp_path / "state"))
+    settings = load_settings(tmp_path)
+    old = RuntimeGeneration("g1", RuntimeRevision("a", "b", "g1"), str(tmp_path), created_at="now")
+    new = RuntimeGeneration("g2", RuntimeRevision("c", "d", "g2"), str(tmp_path), parent_generation="g1", repair_id="r1", created_at="now")
+    GenerationStore(state).save(old)
+    GenerationStore(state).save(new)
+    state.write_json("active-generation.json", new.to_dict())
+    resume = ResumeRequest("c1", "i1", "g1", "g2", "CODE", "CODE", ("RESEARCH",), ("CODE",), (), (("CODE", 1),))
+    state.write_json("resume-requests/i1.json", resume.to_dict())
+    state.write_json(
+        "promotion.json",
+        {
+            "schema_version": 2,
+            "status": "PROMOTED",
+            "old_generation": "g1",
+            "new_generation": "g2",
+            "resume_request_path": "resume-requests/i1.json",
+            "replacement_worker_id": "worker-replacement",
+        },
+    )
+    supervisor = Supervisor(settings, tmp_path)
+    state.write_json(
+        "workers/worker-replacement/metadata.json",
+        {"pid": 99999999, "worker_id": "worker-replacement", "generation_id": "g2", "supervisor_token": supervisor.lock.owner_token},
+    )
+    requests = []
+
+    class FakeProcess:
+        pid = 123
+
+        def wait(self):
+            return 0
+
+    def start(_launcher, request, *, cwd=None):
+        requests.append(request)
+        return FakeProcess()
+
+    monkeypatch.setattr("kaggle_agent.supervisor.loop.WorkerLauncher.start", start)
+    result = supervisor._resume_promoted_if_needed("demo", "auto_safe", 30)
+
+    assert result is not None
+    assert result.status == "WORKER_STARTED"
+    assert len(requests) == 1
+    assert requests[0].worker_id == "worker-replacement"
+    assert requests[0].resume_request == resume
+
+
+def test_failed_resumed_worker_rolls_back_promoted_generation(tmp_path: Path, monkeypatch):
+    config = tmp_path / "config"
+    config.mkdir()
+    (config / "settings.yaml").write_text(
+        yaml.safe_dump({"default_competition": "demo", "supervisor": {"enabled": True, "mode": "auto_safe"}}),
+        encoding="utf-8",
+    )
+    state = SupervisorStateStore(RuntimeLayout.for_repo(tmp_path, tmp_path / "state"))
+    monkeypatch.setenv("KAGGLE_AGENT_SUPERVISOR_DIR", str(tmp_path / "state"))
+    settings = load_settings(tmp_path)
+    old = RuntimeGeneration("g1", RuntimeRevision("a", "b", "g1"), str(tmp_path), created_at="now")
+    new = RuntimeGeneration("g2", RuntimeRevision("c", "d", "g2"), str(tmp_path), parent_generation="g1", repair_id="r1", created_at="now")
+    GenerationStore(state).save(old)
+    GenerationStore(state).save(new)
+    state.write_json("active-generation.json", new.to_dict())
+    resume = ResumeRequest("c1", "i1", "g1", "g2", "CODE", "CODE", (), ("CODE",), (), (("CODE", 1),))
+    state.write_json("resume-requests/i1.json", resume.to_dict())
+    state.write_json(
+        "promotion.json",
+        {
+            "schema_version": 2,
+            "status": "PROMOTED",
+            "old_generation": "g1",
+            "new_generation": "g2",
+            "resume_request_path": "resume-requests/i1.json",
+            "replacement_worker_id": "worker-replacement",
+        },
+    )
+    state.write_json(
+        "workers/worker-replacement/result.json",
+        {"status": "FATAL", "exit_reason": "startup import failed"},
+    )
+    result = Supervisor(settings, tmp_path)._resume_promoted_if_needed("demo", "auto_safe", 30)
+
+    assert result is not None
+    assert result.status == "ROLLED_BACK"
+    assert state.read_json("active-generation.json")["generation_id"] == "g1"
+    assert state.read_json("promotion.json")["status"] == "ROLLED_BACK"
