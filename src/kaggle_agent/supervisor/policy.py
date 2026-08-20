@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
@@ -59,13 +60,20 @@ class RepairPolicy:
         return tuple(violations)
 
     def scan_text(self, text: str) -> tuple[str, ...]:
+        source_lines = "\n".join(
+            line[1:] if line.startswith(("+", "-")) else line
+            for line in text.splitlines()
+        )
+        normalized = re.sub(r"\s+", " ", source_lines).lower()
         checks = {
             "eval": "eval(", "exec": "exec(", "os.system": "os.system(",
-            "shell": "shell=True", "credential_read": ".env",
-            "network": "requests.", "broad_swallow": "except Exception: pass",
+            "shell": "shell=true", "credential_read": ".env",
+            "network": "requests.", "http_client": "httpx.", "subprocess": "subprocess",
+            "broad_swallow": "except exception: pass", "bare_swallow": "except: pass",
+            "unbounded_loop": "while true:",
             "prompt_injection": "ignore previous instructions",
         }
-        return tuple(name for name, marker in checks.items() if marker.lower() in text.lower())
+        return tuple(name for name, marker in checks.items() if marker in normalized)
 
     def scan_test_diff(self, diff: str) -> tuple[str, ...]:
         violations = []

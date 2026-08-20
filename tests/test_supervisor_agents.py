@@ -6,14 +6,18 @@ import pytest
 
 from kaggle_agent.autonomy.outcomes import StageOutcome
 from kaggle_agent.llm.zen_client import ZenError
-from kaggle_agent.supervisor.agents import AgentProtocolError, DeepSeekSupervisorAgents
+from kaggle_agent.supervisor.agents import (
+    AgentProtocolError,
+    DeepSeekSupervisorAgents,
+    ImplementerStatus,
+)
 from kaggle_agent.supervisor.repair_agent import RepairAgentBoundary
 from kaggle_agent.supervisor.classifier import FailureClass
 from kaggle_agent.supervisor.generation import RuntimeRevision
 from kaggle_agent.supervisor.incidents import Incident
 from kaggle_agent.supervisor.review import ReviewVerdict
 from kaggle_agent.supervisor.spec import SpecReviewVerdict
-from kaggle_agent.supervisor.verify import VerificationResult
+from kaggle_agent.supervisor.verify import VerificationFeedback, VerificationResult
 
 
 class _FakeRouter:
@@ -189,6 +193,22 @@ def test_provider_failure_retries_once_then_fails_closed():
     assert len(router.calls) == 2
 
 
+@pytest.mark.parametrize("provider_message", ["timeout", "429", "502", "503", "empty response"])
+def test_provider_failure_variants_are_bounded_and_fail_closed(provider_message):
+    class FailingRouter(_FakeRouter):
+        def chat_text(self, model, system, user, **kwargs):
+            self.calls.append((model, system, user, kwargs))
+            raise ZenError(provider_message)
+
+    router = FailingRouter([])
+    agents = DeepSeekSupervisorAgents(router)
+
+    with pytest.raises(AgentProtocolError):
+        agents.classify(_incident())
+
+    assert len(router.calls) == 2
+
+
 def test_implementer_prompt_requires_tool_action_envelope():
     router = _FakeRouter([
         _classification_response(),
@@ -237,7 +257,9 @@ def test_spec_author_rejects_unbounded_or_malformed_model_output():
         {"acceptance_criteria": "one string, not an array"},
         {"reproduction_mode": "command"},
         {"max_changed_test_files": -1},
+        {"max_changed_lines": 1},
         {"allowed_paths": ["src/**"]},
+        {"verification_commands": ["python -m pytest tests/test_x.py"]},
     ],
 )
 def test_spec_author_rejects_loosely_typed_or_broad_specs(overrides):
@@ -293,6 +315,7 @@ def test_repair_implementer_uses_only_restricted_tools(tmp_path: Path):
 
     assert result.stopped is True
     assert result.reason == "repair complete"
+    assert result.status is ImplementerStatus.PATCH_READY
     assert source.read_text(encoding="utf-8") == "x = 2\n"
     assert all("DEEPSEEK_API_KEY" not in call[2] for call in router.calls)
 
@@ -323,6 +346,7 @@ def test_repair_implementer_stops_on_unavailable_shell_tool(tmp_path: Path):
 
     assert result.stopped is True
     assert "policy" in result.reason
+    assert result.status is ImplementerStatus.TOOL_POLICY_BLOCK
 
 
 def test_repair_implementer_recovers_from_invalid_action_envelope(tmp_path: Path):
@@ -339,3 +363,118 @@ def test_repair_implementer_recovers_from_invalid_action_envelope(tmp_path: Path
     result = agents.implement(tmp_path, spec)
 
     assert result.reason == "complete"
+    assert result.status is ImplementerStatus.NO_CHANGE
+
+
+def test_repair_implementer_does_not_accept_done_without_a_candidate(tmp_path: Path):
+    router = _FakeRouter([
+        _classification_response(),
+        _spec_response(),
+        json.dumps({"action": "done", "tool": "done", "args": {}, "reason": "nothing to change"}),
+    ])
+    agents = DeepSeekSupervisorAgents(router, max_tool_turns=1)
+    incident = _incident()
+    spec = agents.author_spec(incident, agents.classify(incident), repair_id="repair-noop")
+
+    result = agents.implement(tmp_path, spec)
+
+    assert result.status is ImplementerStatus.NO_CHANGE
+    assert not result.diff
+
+
+def test_repair_implementer_requires_read_before_write(tmp_path: Path):
+    source = tmp_path / "src" / "x.py"
+    source.parent.mkdir()
+    source.write_text("x = 1\n", encoding="utf-8")
+    router = _FakeRouter([
+        _classification_response(),
+        _spec_response(),
+        json.dumps({
+            "action": "tool", "tool": "write_file",
+            "args": {"path": "src/x.py", "content": "x = 2\n", "expected_sha256": hashlib.sha256(source.read_bytes()).hexdigest()},
+            "reason": "edit without reading",
+        }),
+    ])
+    agents = DeepSeekSupervisorAgents(router, max_tool_turns=1)
+    incident = _incident()
+    spec = agents.author_spec(incident, agents.classify(incident), repair_id="repair-read-first")
+
+    result = agents.implement(tmp_path, spec)
+
+    assert result.status is ImplementerStatus.TURN_BUDGET_EXHAUSTED
+    assert source.read_text(encoding="utf-8") == "x = 1\n"
+
+
+def test_repair_implementer_cannot_write_outside_spec_scope(tmp_path: Path):
+    source = tmp_path / "src" / "x.py"
+    test_file = tmp_path / "tests" / "test_x.py"
+    source.parent.mkdir()
+    test_file.parent.mkdir()
+    source.write_text("x = 1\n", encoding="utf-8")
+    test_file.write_text("def test_x(): pass\n", encoding="utf-8")
+    digest = hashlib.sha256(test_file.read_bytes()).hexdigest()
+    router = _FakeRouter([
+        _classification_response(),
+        _spec_response(allowed_paths=["src/x.py"]),
+        json.dumps({"action": "tool", "tool": "read_file", "args": {"path": "tests/test_x.py"}, "reason": "inspect"}),
+        json.dumps({
+            "action": "tool", "tool": "write_file",
+            "args": {"path": "tests/test_x.py", "content": "def test_x(): assert True\n", "expected_sha256": digest},
+            "reason": "weaken test",
+        }),
+    ])
+    agents = DeepSeekSupervisorAgents(router, max_tool_turns=2)
+    incident = _incident()
+    spec = agents.author_spec(incident, agents.classify(incident), repair_id="repair-scope")
+
+    result = agents.implement(tmp_path, spec)
+
+    assert result.status is ImplementerStatus.TOOL_POLICY_BLOCK
+    assert test_file.read_text(encoding="utf-8") == "def test_x(): pass\n"
+
+
+def test_read_required_denial_is_bounded_feedback_not_a_write_bypass(tmp_path: Path):
+    source = tmp_path / "src" / "x.py"
+    source.parent.mkdir()
+    source.write_text("x = 1\n", encoding="utf-8")
+    digest = hashlib.sha256(source.read_bytes()).hexdigest()
+    router = _FakeRouter([
+        _classification_response(),
+        _spec_response(allowed_paths=["src/x.py"]),
+        json.dumps({"action": "tool", "tool": "write_file", "args": {"path": "src/x.py", "content": "x = 2\n", "expected_sha256": digest}, "reason": "premature write"}),
+        json.dumps({"action": "tool", "tool": "read_file", "args": {"path": "src/x.py"}, "reason": "read now"}),
+        json.dumps({"action": "tool", "tool": "write_file", "args": {"path": "src/x.py", "content": "x = 2\n", "expected_sha256": digest}, "reason": "apply after read"}),
+        json.dumps({"action": "done", "tool": "done", "args": {}, "reason": "ready"}),
+    ])
+    agents = DeepSeekSupervisorAgents(router, max_tool_turns=4)
+    incident = _incident()
+    spec = agents.author_spec(incident, agents.classify(incident), repair_id="repair-read-feedback")
+
+    result = agents.implement(tmp_path, spec)
+
+    assert result.status is ImplementerStatus.PATCH_READY
+    assert source.read_text(encoding="utf-8") == "x = 2\n"
+
+
+def test_implementer_feedback_is_typed_and_bounded():
+    result = VerificationResult(
+        False,
+        (("uv", "run", "pytest", "-q", "tests/test_x.py"),),
+        ("failed (1): uv run pytest -q tests/test_x.py\nFAILED tests/test_x.py::test_x - assert 1 == 2",),
+        exit_code=1,
+    )
+
+    feedback = VerificationFeedback.from_result(
+        attempt=1,
+        command="uv run pytest -q tests/test_x.py",
+        result=result,
+        changed_files=("src/x.py",),
+        diff_summary="one-line candidate diff",
+    )
+
+    assert feedback.attempt == 1
+    assert feedback.exit_code == 1
+    assert feedback.failure_kind == "TEST_FAILURE"
+    assert feedback.failing_tests == ("FAILED tests/test_x.py::test_x - assert 1 == 2",)
+    assert len(feedback.stderr_excerpt) <= 4000
+    assert feedback.to_dict()["changed_files"] == ["src/x.py"]

@@ -29,6 +29,19 @@ def test_policy_rejects_test_weakening_and_unsafe_constructs():
     assert "test_weakening" in policy.scan_test_diff("+ @pytest.mark.xfail(reason='hide incident')\n")
 
 
+def test_policy_scans_multiline_broad_swallow_and_new_runtime_surfaces():
+    policy = RepairPolicy()
+    findings = policy.scan_text(
+        "try:\n    dangerous()\nexcept Exception:\n    pass\n"
+        "while True:\n    continue\n"
+        "subprocess.run(['curl'])\n"
+    )
+
+    assert "broad_swallow" in findings
+    assert "unbounded_loop" in findings
+    assert "subprocess" in findings
+
+
 def test_worktree_manager_uses_exact_base_and_commits(tmp_path: Path):
     root = tmp_path / "repo"
     root.mkdir()

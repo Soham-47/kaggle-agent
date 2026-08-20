@@ -171,7 +171,7 @@ class Supervisor:
         try:
             outcome = coordinator.execute(
                 incident, classification, spec, spec_approved=True,
-                implementer=lambda worktree, approved: self._run_implementer(sessions, worktree, approved),
+                implementer=lambda worktree, approved, feedback=None: self._run_implementer(sessions, worktree, approved, feedback, self.store.layout.state_root),
                 reviewer=lambda inc, approved, diff, verification: sessions.review_code(inc, approved, diff, verification),
                 cycle_id=incident.cycle_id,
                 mode="repair_only",
@@ -181,7 +181,5 @@ class Supervisor:
         return (outcome.status, outcome.candidate_revision or "candidate stored")
 
     @staticmethod
-    def _run_implementer(sessions: DeepSeekSupervisorAgents, worktree: Path, spec) -> None:
-        result = sessions.implement(worktree, spec)
-        if not result.stopped or result.reason.startswith("policy:"):
-            raise RuntimeError(result.reason or "repair implementer stopped without completion")
+    def _run_implementer(sessions: DeepSeekSupervisorAgents, worktree: Path, spec, feedback=None, state_root: Path | None = None):
+        return sessions.implement(worktree, spec, feedback, state_root=state_root)
