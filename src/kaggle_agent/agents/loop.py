@@ -195,6 +195,7 @@ class StageAgent:
         | None = None,
         force_after_stall: str | None = None,
         source_tools: dict[str, str] | None = None,
+        write_tools: frozenset[str] | set[str] | None = None,
     ) -> None:
         self._zen = zen
         self._model = model
@@ -230,6 +231,7 @@ class StageAgent:
         self._rejected_writes: list[str] = []
         self._errors: list[str] = []
         self._source_tools = dict(source_tools or {})
+        self._write_tools = frozenset(write_tools) if write_tools is not None else WRITE_TOOLS
         self._source_evidence: list[SourceEvidence] = []
         self._loop_iterations = 0
         self._llm_calls = 0
@@ -288,7 +290,7 @@ class StageAgent:
                     forced=True,
                 )
                 self._logmsg(f"{self._name} agent forced tool={name} turns={turns}")
-                if name in WRITE_TOOLS:
+                if name in self._write_tools:
                     stall.mark_write(turns)
                     self._nudges = []
                 stall.stall_forced = False
@@ -340,7 +342,7 @@ class StageAgent:
             self._logmsg(f"{self._name} agent turn={turns} tool={tool}")
             if obs.startswith(("rejected:", "tool error:")):
                 self._logmsg(f"{self._name} agent turn={turns} result={obs[:300]}")
-            if tool in WRITE_TOOLS:
+            if tool in self._write_tools:
                 stall.mark_write(turns)
                 self._nudges = []
 
@@ -418,7 +420,7 @@ class StageAgent:
                 "function": {"name": forced_choice},
             }
         else:
-            choice = "auto" if used & WRITE_TOOLS else "required"
+            choice = "auto" if used & self._write_tools else "required"
         self._llm_calls += 1
         raw = self._zen.chat(
             self._model,
@@ -509,7 +511,7 @@ class StageAgent:
         self._tool_calls.append(tool)
         if result.startswith(("tool error:", "invalid tool arguments:")):
             self._errors.append(result)
-        if tool not in WRITE_TOOLS and result.strip() and not result.startswith(
+        if tool not in self._write_tools and result.strip() and not result.startswith(
             (
                 "tool error:",
                 "invalid tool arguments:",
@@ -549,7 +551,7 @@ class StageAgent:
             )
         if result.startswith("search budget exhausted") and self._source_reads:
             self._forced_tool_choice = "write_card"
-        if tool in WRITE_TOOLS and tool != "harvest_cards":
+        if tool in self._write_tools and tool != "harvest_cards":
             if result.startswith(("rejected:", "tool error:", "invalid tool arguments:")):
                 self._rejected_writes.append(result[:400])
             elif result.strip():

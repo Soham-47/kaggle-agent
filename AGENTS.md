@@ -1,5 +1,9 @@
 # Agent instructions: kaggle-agent
 
+## Codex team routing
+
+This repository follows the reusable local Codex orchestration policy in `~/.codex/AGENTS.md`. For implementation, fix, refactor, or test work, the Sol lead should delegate the complete plan to exactly one `coder`; the coder owns repository investigation, implementation, tests, debugging, and verification before returning a handoff to Sol. Use `researcher`, `browser_debugger`, or `reviewer` only when their specialist scope is genuinely needed. Every spawn call must set `fork_turns = "none"` explicitly.
+
 This repo runs one Kaggle competition at a time. Set `default_competition` in `config/settings.yaml` and keep that contest's facts in `memory/COMPETITION.md` plus `config/competitions/<id>.yaml`.
 
 ## Channels
