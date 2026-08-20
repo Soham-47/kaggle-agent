@@ -26,6 +26,71 @@ supervisor:
     automatic: false
   protected:
     strict: true
+  auto_safe:
+    # Risk-adaptive autonomy is opt-in and remains disabled by default.
+    enabled: false
+    policy: risk_adaptive
+    global_hard_ceiling:
+      max_source_files: 12
+      max_test_files: 6
+      max_changed_lines: 1000
+    profiles:
+      low:
+        automatic_promotion: true
+        allow_candidate_generation: true
+        max_source_files: 4
+        max_test_files: 2
+        max_changed_lines: 250
+        max_attempts: 2
+        required_reproduction_strength: STATIC_REPRO
+        require_focused_tests: true
+        require_adjacent_tests: true
+        require_full_tests: false
+        require_static_safety: true
+        require_spec_review: true
+        require_code_review: true
+      medium:
+        automatic_promotion: true
+        allow_candidate_generation: true
+        max_source_files: 8
+        max_test_files: 4
+        max_changed_lines: 600
+        max_attempts: 2
+        required_reproduction_strength: STATIC_REPRO
+        require_focused_tests: true
+        require_adjacent_tests: true
+        require_full_tests: true
+        require_static_safety: true
+        require_spec_review: true
+        require_code_review: true
+      high:
+        automatic_promotion: false
+        allow_candidate_generation: true
+        max_source_files: 12
+        max_test_files: 6
+        max_changed_lines: 1000
+        max_attempts: 2
+        required_reproduction_strength: EXISTING_DETERMINISTIC_TEST
+        require_focused_tests: true
+        require_adjacent_tests: true
+        require_full_tests: true
+        require_static_safety: true
+        require_spec_review: true
+        require_code_review: true
+      prohibited:
+        automatic_promotion: false
+        allow_candidate_generation: false
+        max_source_files: 0
+        max_test_files: 0
+        max_changed_lines: 0
+        max_attempts: 0
+        required_reproduction_strength: EXISTING_DETERMINISTIC_TEST
+        require_focused_tests: false
+        require_adjacent_tests: false
+        require_full_tests: false
+        require_static_safety: true
+        require_spec_review: true
+        require_code_review: true
 
 paths:
   memory_dir: memory

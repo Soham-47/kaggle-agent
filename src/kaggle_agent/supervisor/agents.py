@@ -211,7 +211,15 @@ class DeepSeekSupervisorAgents:
             parse,
         )
 
-    def author_spec(self, incident: Incident, classification: FailureClassification, *, repair_id: str) -> RepairSpec:
+    def author_spec(
+        self,
+        incident: Incident,
+        classification: FailureClassification,
+        *,
+        repair_id: str,
+        limits: tuple[int, int, int] = (8, 5, 500),
+    ) -> RepairSpec:
+        max_source_files, max_test_files, max_changed_lines = limits
         def parse(raw_text: str) -> RepairSpec:
             raw = _object(raw_text, "spec author", _SPEC_FIELDS)
             for field in (
@@ -243,7 +251,7 @@ class DeepSeekSupervisorAgents:
             limits = (raw["max_changed_source_files"], raw["max_changed_test_files"], raw["max_changed_lines"])
             if not all(isinstance(item, int) and not isinstance(item, bool) for item in limits):
                 raise AgentProtocolError("spec author change limits must be integers")
-            if limits[0] < 1 or limits[0] > 8 or limits[1] < 0 or limits[1] > 5 or limits[2] < 2 or limits[2] > 500:
+            if limits[0] < 1 or limits[0] > max_source_files or limits[1] < 0 or limits[1] > max_test_files or limits[2] < 2 or limits[2] > max_changed_lines:
                 raise AgentProtocolError("spec author change limits exceed supervisor policy")
             value = dict(raw)
             value.update({
@@ -266,7 +274,7 @@ class DeepSeekSupervisorAgents:
             "forbidden_changes, required_tests, verification_commands, likely_files, or allowed_paths "
             "must be a JSON array where applicable; acceptance_criteria must be an array of strings. "
             "reproduction_mode must be NEW_REGRESSION_TEST, EXISTING_TEST_REPRO, STATIC_REPRO, or NO_CODE_REPAIR. "
-            "Use integer limits of 1..8 source files, 0..5 test files, and 2..500 changed lines; "
+            f"Use integer limits of 1..{max_source_files} source files, 0..{max_test_files} test files, and 2..{max_changed_lines} changed lines; "
             "a one-line replacement counts as two changed lines because both deletion and addition are measured. "
             "Keep allowed_paths narrow with no wildcards or repository-wide paths. "
             "Every reproduction_commands and verification_commands entry must begin with one of: "

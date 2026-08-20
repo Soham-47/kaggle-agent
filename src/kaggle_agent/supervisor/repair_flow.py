@@ -16,6 +16,12 @@ from kaggle_agent.supervisor.incidents import Incident
 from kaggle_agent.supervisor.impact import StageImpactAnalyzer
 from kaggle_agent.supervisor.policy import DiffLimits, RepairPolicy
 from kaggle_agent.supervisor.promote import GenerationPromotion, RepairAcceptance
+from kaggle_agent.supervisor.risk import (
+    ExternalStateCertainty,
+    RepairRiskDecision,
+    evaluate_repair_risk,
+    record_risk_decision,
+)
 from kaggle_agent.supervisor.resume import ResumeRequest, invalidated_stages, preserved_stages
 from kaggle_agent.supervisor.review import Review, ReviewVerdict
 from kaggle_agent.supervisor.spec import RepairSpec
@@ -36,6 +42,7 @@ class RepairFlowResult:
     candidate_revision: str | None = None
     implementer_attempts: int = 0
     verification_feedback: tuple[dict[str, object], ...] = ()
+    risk_decision: RepairRiskDecision | None = None
 
 
 class RepairCoordinator:
@@ -47,12 +54,14 @@ class RepairCoordinator:
         max_attempts_per_incident: int = 3,
         max_repairs_per_cycle: int = 5,
         max_repairs_per_day: int = 20,
+        risk_settings=None,
     ) -> None:
         self.source_root = source_root.resolve()
         self.state = state
         self.worktrees = WorktreeManager(self.source_root, state.layout.state_root)
         self.generations = GenerationStore(state)
         self.policy = RepairPolicy()
+        self.risk_settings = risk_settings
         self.verifier = VerificationHarness()
         self.budgets = RepairBudgetStore(
             state.layout.state_root,
@@ -61,13 +70,23 @@ class RepairCoordinator:
             max_repairs_per_day=max_repairs_per_day,
         )
 
-    def execute(self, incident: Incident, classification: FailureClassification, spec: RepairSpec, *, spec_approved: bool, implementer: Callable[..., object], reviewer: Callable[[Incident, RepairSpec, str, object], Review], cycle_id: str | None = None, mode: str = "auto_safe", max_implementation_attempts: int = 2) -> RepairFlowResult:
+    def execute(self, incident: Incident, classification: FailureClassification, spec: RepairSpec, *, spec_approved: bool, implementer: Callable[..., object], reviewer: Callable[[Incident, RepairSpec, str, object], Review], cycle_id: str | None = None, mode: str = "auto_safe", max_implementation_attempts: int = 2, risk_decision: RepairRiskDecision | None = None) -> RepairFlowResult:
         if mode not in {"repair_only", "auto_safe"}:
             raise ValueError(f"unsupported repair mode: {mode}")
         if classification.failure_class not in {FailureClass.CODE_DEFECT, FailureClass.TEST_FAILURE} or not classification.repairable:
             return RepairFlowResult("NOT_REPAIRABLE", RepairAcceptance())
         if not spec_approved or not self.budgets.available(incident.incident_id, incident.failure_signature, cycle_id):
             return RepairFlowResult("REJECTED", RepairAcceptance(spec_approved=spec_approved))
+        initial_risk = risk_decision or evaluate_repair_risk(
+            incident, classification, spec,
+            external_state=ExternalStateCertainty.NO_EXTERNAL_ACTION,
+            settings=self.risk_settings,
+        )
+        if not initial_risk.candidate_generation_allowed:
+            return RepairFlowResult(
+                "REJECTED", RepairAcceptance(spec_approved=spec_approved),
+                findings=("risk_policy_block",), risk_decision=initial_risk,
+            )
         attempt = len(list((self.state.layout.state_root / "worktrees" / incident.incident_id).glob("a*"))) + 1
         worktree = self.worktrees.create(incident.incident_id, attempt, spec.base_revision.git_sha)
         try:
@@ -80,6 +99,7 @@ class RepairCoordinator:
             policy_findings: tuple[str, ...] = ()
             test_findings: tuple[str, ...] = ()
             static_findings: tuple[str, ...] = ()
+            candidate_risk = initial_risk
             attempts = 0
             max_attempts = max(1, max_implementation_attempts)
             while attempts < max_attempts:
@@ -89,10 +109,16 @@ class RepairCoordinator:
                 diff = self.worktrees.diff(worktree)
                 paths = self._changed_paths(worktree)
                 changed_lines = self._changed_lines(worktree)
+                candidate_risk = evaluate_repair_risk(
+                    incident, classification, spec,
+                    changed_paths=paths, changed_lines=changed_lines, diff=diff,
+                    external_state=initial_risk.external_state,
+                    failed_attempts=max(0, attempts - 1), settings=self.risk_settings,
+                )
                 candidate_policy = RepairPolicy(DiffLimits(
-                    max_changed_source_files=spec.max_changed_source_files,
-                    max_changed_test_files=spec.max_changed_test_files,
-                    max_changed_lines=spec.max_changed_lines,
+                    max_changed_source_files=min(spec.max_changed_source_files, candidate_risk.max_source_files),
+                    max_changed_test_files=min(spec.max_changed_test_files, candidate_risk.max_test_files),
+                    max_changed_lines=min(spec.max_changed_lines, candidate_risk.max_changed_lines),
                 ))
                 policy_findings = (
                     candidate_policy.check_diff(paths, changed_lines)
@@ -104,27 +130,30 @@ class RepairCoordinator:
                 if status not in {None, "PATCH_READY", "NEEDS_VERIFICATION"}:
                     return RepairFlowResult(
                         "REJECTED", RepairAcceptance(), findings=(f"implementer:{status or 'unknown'}",),
-                        implementer_attempts=attempts, verification_feedback=tuple(feedback_rows),
+                        implementer_attempts=attempts, verification_feedback=tuple(feedback_rows), risk_decision=candidate_risk,
                     )
                 if not diff.strip():
                     return RepairFlowResult(
                         "REJECTED", RepairAcceptance(), findings=("no_candidate_diff",),
-                        implementer_attempts=attempts, verification_feedback=tuple(feedback_rows),
+                        implementer_attempts=attempts, verification_feedback=tuple(feedback_rows), risk_decision=candidate_risk,
                     )
                 if policy_findings or test_findings or static_findings:
                     return RepairFlowResult(
                         "REJECTED", RepairAcceptance(),
                         findings=tuple(policy_findings) + tuple(test_findings) + tuple(static_findings),
-                        implementer_attempts=attempts, verification_feedback=tuple(feedback_rows),
+                        implementer_attempts=attempts, verification_feedback=tuple(feedback_rows), risk_decision=candidate_risk,
                     )
                 fingerprint = hashlib.sha256(diff.encode("utf-8")).hexdigest()
                 if previous_fingerprint == fingerprint:
                     return RepairFlowResult(
                         "REJECTED", RepairAcceptance(), findings=("REPEATED_BAD_PATCH",),
-                        implementer_attempts=attempts, verification_feedback=tuple(feedback_rows),
+                        implementer_attempts=attempts, verification_feedback=tuple(feedback_rows), risk_decision=candidate_risk,
                     )
                 previous_fingerprint = fingerprint
-                verification = self.verifier.verify(worktree, spec.verification_commands)
+                verification_commands = list(spec.verification_commands)
+                if candidate_risk.require_full_tests and "-m 'not integration'" not in " ".join(verification_commands):
+                    verification_commands.append("uv run pytest -q -m 'not integration'")
+                verification = self.verifier.verify(worktree, tuple(verification_commands))
                 if verification.passed:
                     break
                 command = " && ".join(spec.verification_commands) or "uv run python -m compileall src"
@@ -139,10 +168,26 @@ class RepairCoordinator:
             else:
                 return RepairFlowResult(
                     "REJECTED", RepairAcceptance(), findings=("implementation_attempt_budget_exhausted",),
-                    implementer_attempts=attempts, verification_feedback=tuple(feedback_rows),
+                    implementer_attempts=attempts, verification_feedback=tuple(feedback_rows), risk_decision=candidate_risk,
                 )
             assert verification is not None
+            self.state.write_json(f"repairs/{spec.repair_id}/risk-post-diff.json", candidate_risk.to_dict())
+            record_risk_decision(
+                self.state, candidate_risk, phase="post-diff",
+                failure_class=classification.failure_class.value, incident_id=incident.incident_id,
+            )
             review = reviewer(incident, spec, diff, verification)
+            review_findings = tuple(
+                f"{finding.severity}:{finding.issue}"
+                for finding in (*review.blocking_findings, *review.non_blocking_findings)
+            )
+            candidate_risk = evaluate_repair_risk(
+                incident, classification, spec,
+                changed_paths=paths, changed_lines=self._changed_lines(worktree), diff=diff,
+                external_state=initial_risk.external_state,
+                failed_attempts=max(0, attempts - 1), reviewer_findings=review_findings,
+                settings=self.risk_settings,
+            )
             acceptance = RepairAcceptance(
                 classification_allows_repair=True, spec_approved=True,
                 base_revision_matches=read_git_revision(worktree) == spec.base_revision.git_sha,
@@ -155,10 +200,16 @@ class RepairCoordinator:
                 review_approved=review.verdict is ReviewVerdict.APPROVE and not review.blocking_findings,
                 external_state_safe=True, repair_budget_available=True,
                 resume_plan_valid=bool(spec.proposed_resume_stage),
+                risk_policy_pass=candidate_risk.candidate_generation_allowed,
+            )
+            self.state.write_json(f"repairs/{spec.repair_id}/risk-post-review.json", candidate_risk.to_dict())
+            record_risk_decision(
+                self.state, candidate_risk, phase="post-review",
+                failure_class=classification.failure_class.value, incident_id=incident.incident_id,
             )
             self.budgets.record(incident.incident_id, incident.failure_signature, cycle_id, accepted=acceptance.accepted)
             if not acceptance.accepted:
-                return RepairFlowResult("REJECTED", acceptance, review=review, findings=tuple(policy_findings) + tuple(test_findings), implementer_attempts=attempts, verification_feedback=tuple(feedback_rows))
+                return RepairFlowResult("REJECTED", acceptance, review=review, findings=tuple(policy_findings) + tuple(test_findings), implementer_attempts=attempts, verification_feedback=tuple(feedback_rows), risk_decision=candidate_risk)
             repair_sha = self.worktrees.commit(worktree, f"repair({incident.incident_id}): {spec.title}")
             if mode == "repair_only":
                 self.state.write_json(
@@ -171,13 +222,14 @@ class RepairCoordinator:
                         "candidate_path": str(worktree),
                         "diff": diff,
                         "review": asdict(review),
+                        "risk_decision": candidate_risk.to_dict(),
                         "status": "CANDIDATE_ACCEPTED",
                     },
                 )
                 return RepairFlowResult(
                     "CANDIDATE_ACCEPTED", acceptance, review=review,
                     candidate_path=str(worktree), candidate_revision=repair_sha,
-                    implementer_attempts=attempts, verification_feedback=tuple(feedback_rows),
+                    implementer_attempts=attempts, verification_feedback=tuple(feedback_rows), risk_decision=candidate_risk,
                 )
             generation = self.generations.create_from_revision(self.source_root, repair_sha, parent_generation=incident.generation_id, repair_id=spec.repair_id)
             invalidated = invalidated_stages(spec.proposed_resume_stage)
@@ -188,8 +240,8 @@ class RepairCoordinator:
                 invalidated, tuple(x for x in (incident.external_job, incident.kernel_ref) if x),
                 tuple((stage, 1) for stage in invalidated),
             )
-            self.state.write_json(f"repairs/{spec.repair_id}/acceptance.json", {"acceptance": acceptance.__dict__, "generation": generation.to_dict(), "resume": resume.to_dict()})
-            return RepairFlowResult("ACCEPTED", acceptance, generation.generation_id, resume, review, implementer_attempts=attempts, verification_feedback=tuple(feedback_rows))
+            self.state.write_json(f"repairs/{spec.repair_id}/acceptance.json", {"acceptance": acceptance.__dict__, "risk_decision": candidate_risk.to_dict(), "generation": generation.to_dict(), "resume": resume.to_dict()})
+            return RepairFlowResult("ACCEPTED", acceptance, generation.generation_id, resume, review, implementer_attempts=attempts, verification_feedback=tuple(feedback_rows), risk_decision=candidate_risk)
         finally:
             if worktree.exists() and mode != "repair_only":
                 self.worktrees.destroy(worktree)
