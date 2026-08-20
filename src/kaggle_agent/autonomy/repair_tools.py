@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from kaggle_agent.autonomy.outcomes import StageOutcome
+from kaggle_agent.paths import agent_dir
 
 
 class ToolPolicyError(RuntimeError):
@@ -18,16 +19,17 @@ class ToolPolicyError(RuntimeError):
 
 class RepairToolbox:
     READ_PREFIXES = ("src", "tests", "competitions", "config", "memory", ".agent")
-    WRITE_PREFIXES = ("src", "tests", "competitions", ".agent")
+    WRITE_PREFIXES = ("src", "tests", "competitions")
     VERIFY_PREFIXES = (
         ("uv", "run", "pytest"),
         ("uv", "run", "python", "-m", "py_compile"),
+        ("uv", "run", "python", "-m", "compileall"),
     )
 
-    def __init__(self, root: Path, *, timeout_seconds: int = 300) -> None:
+    def __init__(self, root: Path, *, timeout_seconds: int = 300, state_root: Path | None = None) -> None:
         self.root = root.resolve()
         self.timeout_seconds = timeout_seconds
-        self.audit_path = self.root / ".agent" / "debug-tools.jsonl"
+        self.audit_path = ((state_root / ".agent") if state_root is not None else agent_dir(self.root)) / "debug-tools.jsonl"
 
     def _resolve(self, relative: str, prefixes: tuple[str, ...]) -> Path:
         candidate = (self.root / relative).resolve()
@@ -87,6 +89,45 @@ class RepairToolbox:
         new_hash = hashlib.sha256(path.read_bytes()).hexdigest()
         self._audit("write_file", path=relative, before=actual, after=new_hash)
         return new_hash
+
+    def run_compile_check(self, targets: list[str] | tuple[str, ...] = ("src",)) -> subprocess.CompletedProcess[str]:
+        return self.run_verification(["uv", "run", "python", "-m", "compileall", *targets])
+
+    def run_focused_test(self, target: str) -> subprocess.CompletedProcess[str]:
+        if not target.startswith("tests/"):
+            raise ToolPolicyError("focused test must be under tests/")
+        return self.run_verification(["uv", "run", "pytest", "-q", target])
+
+    def apply_patch(self, patch: str) -> str:
+        if not isinstance(patch, str) or not patch.strip():
+            raise ToolPolicyError("patch must be non-empty text")
+        paths = []
+        for line in patch.splitlines():
+            if line.startswith("+++ b/"):
+                relative = line[6:].strip()
+                if relative == "/dev/null":
+                    continue
+                self._resolve(relative, self.WRITE_PREFIXES)
+                paths.append(relative)
+        if not paths:
+            raise ToolPolicyError("patch has no scoped writable files")
+        check = subprocess.run(
+            ("git", "-C", str(self.root), "apply", "--check", "--whitespace=error", "-"),
+            input=patch, text=True, capture_output=True, check=False,
+        )
+        if check.returncode:
+            raise ToolPolicyError(check.stderr.strip() or "patch rejected")
+        result = subprocess.run(
+            ("git", "-C", str(self.root), "apply", "--whitespace=error", "-"),
+            input=patch, text=True, capture_output=True, check=False,
+        )
+        if result.returncode:
+            raise ToolPolicyError(result.stderr.strip() or "patch failed")
+        self._audit("apply_patch", paths=sorted(set(paths)), patch_sha256=hashlib.sha256(patch.encode()).hexdigest())
+        return "\n".join(sorted(set(paths)))
+
+    def run_reproduction(self, target: str) -> subprocess.CompletedProcess[str]:
+        return self.run_focused_test(target)
 
     def run_verification(self, command: list[str]) -> subprocess.CompletedProcess[str]:
         cmd = tuple(command)

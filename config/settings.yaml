@@ -3,6 +3,30 @@
 repo_name: kaggle-agent
 default_competition: rsna_knee
 
+supervisor:
+  enabled: false
+  mode: observe
+  heartbeat_seconds: 30
+  heartbeat_timeout_seconds: 180
+  worker_terminate_grace_seconds: 20
+  repair:
+    enabled: true
+    classification_min_confidence: 0.80
+    max_attempts_per_incident: 3
+    max_repairs_per_cycle: 5
+    max_repairs_per_day: 20
+    max_changed_source_files: 8
+    max_changed_test_files: 5
+    max_changed_lines: 500
+    allow_dependency_changes: false
+    require_spec_review: true
+    require_code_review: true
+    require_full_tests: true
+  promotion:
+    automatic: false
+  protected:
+    strict: true
+
 paths:
   memory_dir: memory
   competitions_dir: competitions

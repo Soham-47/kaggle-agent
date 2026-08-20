@@ -6,8 +6,12 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from kaggle_agent.loop import load_loop
+from kaggle_agent.config import load_settings
+from kaggle_agent.paths import repo_root
 from kaggle_agent.state_md import load_state, save_state
 from kaggle_agent.submit.pending import load_pending, set_decision
+from kaggle_agent.supervisor.commands import SupervisorCommandQueue
+from kaggle_agent.supervisor.state import RuntimeLayout
 
 HELP = """Kaggle agent — what you can do
 
@@ -120,6 +124,9 @@ def _run_cmd(args: list[str], root: Path | None) -> CommandResult:
                 ),
             )
     state = load_state(root)
+    supervisor = _supervisor_queue(root)
+    if supervisor is not None and supervisor.paused():
+        return CommandResult(ok=False, reply="Supervisor is paused. Send /resume, then /run again.")
     if state.paused:
         return CommandResult(
             ok=False,
@@ -139,6 +146,17 @@ def _run_cmd(args: list[str], root: Path | None) -> CommandResult:
             "/run counts as your approval. I will not wait for /yes.\n\n"
             "I'll message you when it finishes."
         )
+    if supervisor is not None:
+        supervisor.enqueue("run", {"dry_run": dry})
+        return CommandResult(
+            ok=True,
+            reply=(
+                f"Supervisor queued a {'practice' if dry else 'live'} run.\n\n"
+                "The supervisor is the only process that can launch the worker.\n"
+                "Use /status for ownership and progress."
+            ),
+            cycle_dry_run=dry,
+        )
     return CommandResult(
         ok=True,
         reply=reply,
@@ -148,6 +166,10 @@ def _run_cmd(args: list[str], root: Path | None) -> CommandResult:
 
 
 def _set_paused(paused: bool, root: Path | None, reply: str) -> CommandResult:
+    supervisor = _supervisor_queue(root)
+    if supervisor is not None:
+        supervisor.enqueue("pause" if paused else "resume")
+        return CommandResult(ok=True, reply=f"Supervisor queued control change. {reply}")
     state = load_state(root)
     state.paused = paused
     save_state(state, root)
@@ -207,6 +229,7 @@ def _status_text(root: Path | None) -> str:
     state = load_state(root)
     pending = load_pending(root)
     loop = load_loop(root)
+    supervisor = _supervisor_queue(root)
     pause = "yes — send /resume" if state.paused else "no"
     return "\n".join(
         [
@@ -233,9 +256,24 @@ def _status_text(root: Path | None) -> str:
             "",
             f"Note: {state.note}",
             "",
+            "Supervisor",
+            f"  Enabled: {'yes' if supervisor is not None else 'no'}",
+            f"  Queued commands: {len(supervisor.pending()) if supervisor is not None else 0}",
+            f"  Control paused: {'yes' if supervisor is not None and supervisor.paused() else 'no'}",
+            "",
             "Tips: /run · /run dry · /yes · /no · /help",
         ]
     )
+
+
+def _supervisor_queue(root: Path | None) -> SupervisorCommandQueue | None:
+    selected = (root or repo_root()).resolve()
+    try:
+        if not load_settings(selected).supervisor_config().enabled:
+            return None
+    except Exception:  # noqa: BLE001
+        return None
+    return SupervisorCommandQueue(RuntimeLayout.for_repo(selected))
 
 
 def process_updates(

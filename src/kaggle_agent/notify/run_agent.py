@@ -9,7 +9,7 @@ import threading
 from dataclasses import dataclass
 from pathlib import Path
 
-from kaggle_agent.config import load_dotenv
+from kaggle_agent.config import load_dotenv, load_settings
 from kaggle_agent.paths import memory_dir, repo_root
 from kaggle_agent.state_md import RunLock, load_state
 
@@ -44,6 +44,9 @@ def start_agent_cycle(
             message="Agent is paused. Send /resume, then /run again.",
             dry_run=dry_run,
         )
+
+    if load_settings(root).supervisor_config().enabled:
+        return _start_supervisor(root, dry_run=dry_run, competition=competition, background=background)
 
     # Quick lock probe (orchestrator also locks)
     probe = RunLock(root)
@@ -121,6 +124,26 @@ def start_agent_cycle(
         ),
         dry_run=dry_run,
     )
+
+
+def _start_supervisor(root: Path, *, dry_run: bool, competition: str | None, background: bool) -> RunStartResult:
+    """Route manual/Telegram execution through the supervisor owner."""
+    py = root / ".venv" / "bin" / "python"
+    if not py.is_file():
+        py = Path(sys.executable)
+    cmd = [str(py), "-m", "kaggle_agent.cli", "supervisor", "--competition", competition or "rsna_knee"]
+    log_dir = memory_dir(root) / "daily"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_path = log_dir / "supervisor.log"
+    env = os.environ.copy()
+    env["PYTHONPATH"] = str(root / "src") + (os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else "")
+    if background:
+        log_f = log_path.open("a", encoding="utf-8")
+        subprocess.Popen(cmd, cwd=str(root), env=env, stdout=log_f, stderr=subprocess.STDOUT, start_new_session=True)
+        return RunStartResult(True, f"Supervisor started ({'dry' if dry_run else 'live'}).\n\nLog: {log_path}", dry_run)
+    with log_path.open("a", encoding="utf-8") as log:
+        proc = subprocess.run(cmd, cwd=str(root), env=env, stdout=log, stderr=subprocess.STDOUT)
+    return RunStartResult(proc.returncode == 0, f"Supervisor finished; log: {log_path}", dry_run)
 
 
 def start_agent_cycle_async(

@@ -146,6 +146,22 @@ def _judge_orch(root: Path, zen=None):  # noqa: ANN001
     return Orchestrator(settings, comp, root=root, router=_Router(zen))
 
 
+def test_supervisor_mode_returns_failures_to_parent_without_inline_debug(tmp_path: Path):
+    from helpers import copy_min_workspace
+    from kaggle_agent.config import load_competition, load_settings
+    from kaggle_agent.orchestrator import Orchestrator
+
+    root = tmp_path / "kaggle-agent"
+    copy_min_workspace(root, Path(__file__).resolve().parents[1])
+    config_path = root / "config" / "settings.yaml"
+    config_path.write_text(config_path.read_text(encoding="utf-8") + "\nsupervisor:\n  enabled: true\n  mode: observe\n", encoding="utf-8")
+    settings = load_settings(root)
+    comp = load_competition("rsna_knee", root)
+    sentinel = lambda *_args: "should not run"
+    orchestrator = Orchestrator(settings, comp, root=root, debug_runner=sentinel)
+    assert orchestrator._debug_runner is None
+
+
 def _write_kernel_output(root: Path, comp, exp_id: str) -> Path:  # noqa: ANN001
     kernel_dir = root / "competitions" / "rsna_knee" / "notebooks" / exp_id
     (kernel_dir / "output").mkdir(parents=True)

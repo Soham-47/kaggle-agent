@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any, Callable, Mapping
 
 from kaggle_agent.autonomy.outcomes import OutcomeState, StageOutcome
+from kaggle_agent.paths import agent_dir
 
 _LEDGER_SCHEMA_VERSION = 1
 _SECRET_KEY = re.compile(
@@ -66,6 +67,7 @@ class StageInput:
     competition: str
     idempotency_key: str
     inputs: Mapping[str, Any]
+    replay_epoch: int = 0
 
     @property
     def stage_execution_key(self) -> str:
@@ -74,10 +76,10 @@ class StageInput:
 
     @classmethod
     def create(
-        cls, *, stage: str, cycle_id: str, competition: str, inputs: Mapping[str, Any]
+        cls, *, stage: str, cycle_id: str, competition: str, inputs: Mapping[str, Any], replay_epoch: int = 0
     ) -> "StageInput":
         canonical = json.dumps(
-            {"stage": stage, "cycle_id": cycle_id, "competition": competition, "inputs": inputs},
+            {"stage": stage, "cycle_id": cycle_id, "competition": competition, "inputs": inputs, "replay_epoch": replay_epoch},
             sort_keys=True,
             separators=(",", ":"),
             default=str,
@@ -87,15 +89,15 @@ class StageInput:
             cycle_id=cycle_id,
             competition=competition,
             idempotency_key=hashlib.sha256(canonical.encode("utf-8")).hexdigest(),
-            inputs=dict(inputs),
+            inputs=dict(inputs), replay_epoch=replay_epoch,
         )
 
 
 class StageLedger:
     """Append-only execution records with a compact query interface."""
 
-    def __init__(self, root: Path) -> None:
-        self.path = root / ".agent" / "stage-ledger.jsonl"
+    def __init__(self, root: Path, *, state_root: Path | None = None) -> None:
+        self.path = ((state_root / ".agent") if state_root is not None else agent_dir(root)) / "stage-ledger.jsonl"
 
     def append(
         self,
@@ -112,6 +114,7 @@ class StageLedger:
             "ts": _now(), "event": event, "stage": request.stage,
             "cycle_id": request.cycle_id, "competition": request.competition,
             "idempotency_key": request.idempotency_key, "attempt": attempt,
+            "replay_epoch": request.replay_epoch,
         }
         if outcome is not None:
             record.update({

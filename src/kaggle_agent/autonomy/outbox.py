@@ -10,6 +10,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping
 
+from kaggle_agent.paths import agent_dir
+
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="milliseconds")
@@ -66,13 +68,14 @@ class ExternalActionOutbox:
 
     _PENDING = frozenset({"prepared", "sent", "unknown"})
 
-    def __init__(self, root: Path) -> None:
-        self.path = root / ".agent" / "external-outbox.jsonl"
+    def __init__(self, root: Path, *, state_root: Path | None = None) -> None:
+        self.path = ((state_root / ".agent") if state_root is not None else agent_dir(root)) / "external-outbox.jsonl"
 
     def enqueue(self, *, action: str, idempotency_key: str, payload: Mapping[str, Any]) -> ExternalAction:
         existing = next(
             (item for item in self._items().values()
-             if item.action == action and item.idempotency_key == idempotency_key and item.status in self._PENDING),
+             if item.action == action and item.idempotency_key == idempotency_key
+             and item.status != "rejected"),
             None,
         )
         if existing is not None:

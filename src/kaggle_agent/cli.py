@@ -7,7 +7,7 @@ import json
 import os
 import sys
 
-from kaggle_agent.config import load_dotenv
+from kaggle_agent.config import load_dotenv, load_settings
 from kaggle_agent.orchestrator import run_daily
 from kaggle_agent.paths import repo_root
 
@@ -21,8 +21,12 @@ def main(argv: list[str] | None = None) -> int:
         return _evals(argv[1:])
     if argv and argv[0] == "onboard":
         return _onboard(argv[1:])
+    if argv and argv[0] == "supervisor":
+        return _supervisor(argv[1:])
     if argv and argv[0] in {"run", "/run"}:
         return _run(argv[1:])
+    if (not argv or argv[0].startswith("--")) and load_settings(repo_root()).supervisor_config().enabled:
+        return _supervisor(argv)
 
     p = argparse.ArgumentParser(description="kaggle-agent daily cycle")
     p.add_argument("--competition", default=None)
@@ -127,6 +131,17 @@ def _onboard_slug(root, slug):
     from kaggle_agent.kaggle_api import KaggleClient
 
     return CompetitionBootstrapper(root, KaggleClient().connect()).onboard(slug)
+
+
+def _supervisor(argv: list[str]) -> int:
+    p = argparse.ArgumentParser(prog="kaggle-agent supervisor")
+    p.add_argument("--competition", default=None)
+    p.add_argument("--mode", choices=["off", "observe", "repair_only", "auto_safe"], default=None)
+    p.add_argument("--once", action="store_true", default=False)
+    args = p.parse_args(argv)
+    from kaggle_agent.supervisor.main import run_supervisor
+
+    return run_supervisor(repo_root(), competition=args.competition, wait=True, mode=args.mode)
 
 
 def _onboard(argv: list[str]) -> int:

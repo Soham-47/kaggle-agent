@@ -154,3 +154,38 @@ def test_ambiguous_marker_remains_pending(tmp_path):
         outbox, item, kernel_status=lambda _: "", submissions=lambda _: rows
     )
     assert unresolved.status == "sent"
+
+
+def test_kernel_push_crash_after_external_send_reconciles_without_second_push(tmp_path):
+    outbox = ExternalActionOutbox(tmp_path)
+    item = outbox.enqueue(action="kernel_push", idempotency_key="kernel-key", payload={"kernel_ref": "owner/kernel"})
+    outbox.mark_sent(item.action_id)  # crash window: request may already be remote
+    accepted = reconcile_with_kaggle(
+        outbox, item, kernel_status=lambda ref: "RUNNING", submissions=lambda _: []
+    )
+    again = outbox.enqueue(action="kernel_push", idempotency_key="kernel-key", payload={"kernel_ref": "owner/kernel"})
+    assert accepted.status == "accepted"
+    assert again.action_id == item.action_id
+    assert again.status == "accepted"
+
+
+def test_submission_crash_before_or_after_send_never_reissues_same_key(tmp_path):
+    outbox = ExternalActionOutbox(tmp_path)
+    item = outbox.enqueue(
+        action="submit", idempotency_key="submission-key",
+        payload={"competition": "demo", "reconciliation_marker": "ka:demo:abc"},
+    )
+    outbox.mark_sent(item.action_id)  # crash before local result is persisted
+    pending = reconcile_with_kaggle(
+        outbox, item, kernel_status=lambda _: "", submissions=lambda _: []
+    )
+    same = outbox.enqueue(action="submit", idempotency_key="submission-key", payload={})
+    assert pending.status == "sent"
+    assert same.action_id == item.action_id
+    assert same.status == "sent"
+    accepted = reconcile_with_kaggle(
+        outbox, item, kernel_status=lambda _: "",
+        submissions=lambda _: [SubmissionRow("s1", "x", "complete", description="ka:demo:abc")],
+    )
+    assert accepted.status == "accepted"
+    assert outbox.enqueue(action="submit", idempotency_key="submission-key", payload={}).status == "accepted"

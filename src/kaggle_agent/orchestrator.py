@@ -121,6 +121,7 @@ from kaggle_agent.autonomy.repair_tools import IncidentStore
 from kaggle_agent.autonomy.runtime import StageExecutor, StageInput, StageLedger, StageResult
 from kaggle_agent.autonomy.stage_outputs import capture as capture_stage_outputs
 from kaggle_agent.autonomy.stage_outputs import restore as restore_stage_outputs
+from kaggle_agent.supervisor.resume import ResumeRequest
 from kaggle_agent.autonomy.outbox import (
     ExternalAction,
     ExternalActionOutbox,
@@ -245,11 +246,13 @@ class Orchestrator:
         self._loop_n_used = 0
         self._tracer: Tracer | None = None
         self._skip_phases = skip_phases or frozenset()
+        self._resume_request: ResumeRequest | None = None
         self._stages: dict[str, Stage] = build_stage_registry(self)
         self._stage_executor = StageExecutor(StageLedger(self.root))
         self._outbox = ExternalActionOutbox(self.root)
-        self._debug_runner = debug_runner
-        if self._debug_runner is None and self._llm_available():
+        supervisor_enabled = self.settings.supervisor_config().enabled
+        self._debug_runner = None if supervisor_enabled else debug_runner
+        if self._debug_runner is None and not supervisor_enabled and self._llm_available():
             from kaggle_agent.autonomy.debug_agent import CodingDebugAgent
 
             self._debug_runner = CodingDebugAgent(
@@ -291,12 +294,16 @@ class Orchestrator:
             return self._outbox.get(item.action_id) or item
 
     def run_cycle(
-        self, *, dry_run: bool | None = None, assume_approved: bool = False
+        self, *, dry_run: bool | None = None, assume_approved: bool = False,
+        cycle_id: str | None = None, resume_request: ResumeRequest | None = None,
     ) -> CycleResult:
         dry = self.settings.dry_run if dry_run is None else dry_run
         self._assume_approved = assume_approved
         self._loop_n_used = 0
+        self._resume_request = resume_request
         result = CycleResult(competition=self.competition.id, dry_run=dry)
+        if cycle_id:
+            result.experiment_id = cycle_id
         now = datetime.now(timezone.utc)
         state = self._sa.load_state()
 
@@ -388,7 +395,7 @@ class Orchestrator:
     def _begin(
         self, state: AgentState, dry: bool, now: datetime, result: CycleResult
     ) -> AgentState:
-        exp_id = now.strftime("%Y%m%d-%H%M%S") + ("-dry" if dry else "")
+        exp_id = result.experiment_id or now.strftime("%Y%m%d-%H%M%S") + ("-dry" if dry else "")
         result.experiment_id = exp_id
         self._tracer = Tracer(self.root, cycle_id=exp_id)
         self._tracer.emit("cycle_start", competition=self.competition.id, dry=dry)
@@ -561,6 +568,7 @@ class Orchestrator:
                 "kernel_ref": result.kernel_ref or "",
                 "package_fingerprint": self._package_fingerprint(result),
             },
+            replay_epoch=self._resume_request.epoch_for(phase) if self._resume_request else 0,
         )
 
     @staticmethod
@@ -1814,16 +1822,10 @@ class Orchestrator:
                         )
                         if push_action.status in {"sent", "unknown"}:
                             push_action = self._reconcile_outbox_action(push_action)
-                            if push_action.status != "accepted":
-                                result.kernel_pending = True
-                                result.kernel_ref = package.kernel_ref
-                                append_daily_log(
-                                    "kernel push intent awaits Kaggle reconciliation",
-                                    self.root,
-                                )
-                                return state
-                            # The remote kernel exists but a crash prevented the
-                            # normal runner from persisting its resume record.
+                        if push_action.status == "accepted":
+                            # The logical push already happened before a prior
+                            # process stopped. Never issue it again.
+                            result.kernel_ref = package.kernel_ref
                             save_kernel_job(
                                 KernelJob(
                                     kernel_ref=package.kernel_ref,
@@ -1845,6 +1847,14 @@ class Orchestrator:
                                 poll_seconds=self.settings.kernel_poll_seconds,
                                 poll_attempts=self.settings.kernel_poll_attempts,
                             )
+                        elif push_action.status in {"sent", "unknown"}:
+                            result.kernel_pending = True
+                            result.kernel_ref = package.kernel_ref
+                            append_daily_log(
+                                "kernel push intent awaits Kaggle reconciliation",
+                                self.root,
+                            )
+                            return state
                         else:
                             self._outbox.mark_sent(push_action.action_id)
                             run = run_kernel_phase(
@@ -2401,16 +2411,16 @@ class Orchestrator:
             )
             if outbox_action.status in {"sent", "unknown"}:
                 outbox_action = self._reconcile_outbox_action(outbox_action)
-                if outbox_action.status == "accepted":
-                    result.submit_ok = True
-                    result.submit_message = (
-                        f"outbox: reconciled existing submission {outbox_action.external_ref}"
-                    )
-                else:
-                    result.submission_pending = True
-                    result.submit_message = "outbox: submission intent awaits reconciliation"
-                    append_daily_log(result.submit_message, self.root)
-                    return state
+            if outbox_action.status == "accepted":
+                result.submit_ok = True
+                result.submit_message = (
+                    f"outbox: reconciled existing submission {outbox_action.external_ref or 'accepted'}"
+                )
+            elif outbox_action.status in {"sent", "unknown"}:
+                result.submission_pending = True
+                result.submit_message = "outbox: submission intent awaits reconciliation"
+                append_daily_log(result.submit_message, self.root)
+                return state
             else:
                 outbox_action = self._outbox.mark_sent(outbox_action.action_id)
 
@@ -2844,6 +2854,8 @@ def run_daily(
     browser_submit: Any | None = None,
     mcp_submit_fn: Any | None = None,
     skip_phases: frozenset[str] | None = None,
+    cycle_id: str | None = None,
+    resume_request: ResumeRequest | None = None,
 ) -> CycleResult:
     settings = load_settings(root)
     cid = competition_id or settings.default_competition
@@ -2858,4 +2870,9 @@ def run_daily(
         browser_submit=browser_submit,
         mcp_submit_fn=mcp_submit_fn,
         skip_phases=skip_phases,
-    ).run_cycle(dry_run=dry_run, assume_approved=assume_approved)
+    ).run_cycle(
+        dry_run=dry_run,
+        assume_approved=assume_approved,
+        cycle_id=cycle_id,
+        resume_request=resume_request,
+    )
