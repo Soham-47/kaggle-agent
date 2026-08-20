@@ -45,7 +45,7 @@ class AgentState:
     phase: str = "IDLE"
     paused: bool = False
     dry_run: bool = True
-    competition: str = "rsna_knee"
+    competition: str = "none"
     pending_approve: str = "none"
     active_experiment: str = "none"
     lock_held: bool = False

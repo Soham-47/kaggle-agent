@@ -1,6 +1,6 @@
 {
   "competition_id": "rsna_knee",
-  "template": "rsna-2d-dino-mil-v1",
+  "template": "image-2d-dino-mil-v1",
   "source_card_refs": [
     "source-model-metaresearch-dinov2-small",
     "source-dataset-https-www-kaggle-com-datasets-barun2104-rsna-knee-stratified",

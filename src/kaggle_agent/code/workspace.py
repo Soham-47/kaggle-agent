@@ -22,9 +22,6 @@ REQUIRED_PIPELINE = (
     "pipeline/ranker.py",
     "pipeline/recipe.py",
 )
-REQUIRED_RSNA = REQUIRED_PIPELINE
-
-
 def ensure_pipeline_ready(
     workspace: Path, *, required: tuple[str, ...] = REQUIRED_PIPELINE
 ) -> WorkspaceCheck:

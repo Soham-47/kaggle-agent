@@ -279,7 +279,7 @@ def test_code_write_image_contract_renders_supported_template(tmp_path: Path):
     assert state["wrote_recipe"] == "1"
     assert state["wrote_methods"] == "1"
     contract = json.loads((pipe / "image_contract.json").read_text(encoding="utf-8"))
-    assert contract["template"] == "rsna-2d-dino-mil-v1"
+    assert contract["template"] == "image-2d-dino-mil-v1"
     assert contract["parameters"] == {"image_size": 512, "epochs": 1}
     manifest = json.loads((pipe / "artifact_manifest.json").read_text(encoding="utf-8"))
     assert manifest["model_sources"] == ["owner/dinov2/PyTorch/base/1"]

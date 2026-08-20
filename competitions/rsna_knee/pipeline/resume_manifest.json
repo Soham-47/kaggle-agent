@@ -5,7 +5,7 @@
   "source_experiment": "20260819-123221",
   "fold": 0,
   "sha256": "86d6022d34d6ed5e1c2537fa0dd0156889e92b8692f2f8147be709571969b1a7",
-  "template_version": "rsna-2d-dino-mil-v1",
+  "template_version": "image-2d-dino-mil-v1",
   "model_pin": "metaresearch/dinov2/pytorch/small/1",
   "labels": [
     "ACL",

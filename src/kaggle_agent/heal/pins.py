@@ -43,14 +43,6 @@ def sanitize_models(refs: list[str] | None) -> list[str]:
 
 _NOT_DATASET_SLUG = frozenset({"dinov2", "pytorch", "transformers", "model", "keras"})
 
-# Public dataset slugs that 403 for this account; map to our own copy.
-# CODE pulls slugs from research cards, so rewrite at attach time.
-_DATASET_REPLACE = {
-    "wguesdon/rsna-knee-dinov2-at-meniscus-resolution": "sohamgawd47foden/rsna-knee-dinov2-vits14",
-    "wguesdon/rsna-knee-llm-report-labels-opus": "sohamgawd47foden/rsna-knee-dinov2-vits14",
-}
-
-
 def sanitize_datasets(refs: list[str] | None) -> list[str]:
     out: list[str] = []
     for raw in refs or []:
@@ -62,7 +54,6 @@ def sanitize_datasets(refs: list[str] | None) -> list[str]:
             continue
         if parts[1].lower() in _NOT_DATASET_SLUG:
             continue
-        ref = _DATASET_REPLACE.get(ref, ref)
         if _valid_attach_ref(ref) and ref not in out:
             out.append(ref)
     return out

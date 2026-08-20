@@ -21,9 +21,17 @@ def _copy_min(root: Path, real: Path) -> None:
 
     shutil.copytree(real / "config", root / "config")
     shutil.copytree(real / "competitions", root / "competitions")
+    settings = root / "config" / "competitions" / "rsna_knee.yaml"
+    settings.write_text(
+        settings.read_text(encoding="utf-8").replace(
+            "fleet: [notebooks, papers, github, web, discussions, datasets]",
+            "fleet: false",
+        ),
+        encoding="utf-8",
+    )
     (root / "memory").mkdir()
     for name in ("MEMORY.md", "COMPETITION.md", "state.md", "research.md"):
-        shutil.copy(real / "memory" / name, root / "memory" / name)
+        shutil.copy(real / "memory" / "templates" / name, root / "memory" / name)
     (root / "memory" / "experiments").mkdir()
     (root / "memory" / "daily").mkdir()
     save_state(AgentState(paused=False, competition="rsna_knee"), root)

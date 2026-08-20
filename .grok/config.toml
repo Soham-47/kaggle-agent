@@ -1,8 +1,0 @@
-# Project MCP: Kaggle official server for competition submit tools.
-# Auth: export KAGGLE_API_TOKEN=$(tr -d '\n' < ~/.kaggle/access_token)
-# Prefer access_token (KGAT_*) over kaggle.json key for write tools.
-
-[mcp_servers.kaggle]
-url = "https://www.kaggle.com/mcp"
-headers = { Authorization = "Bearer ${KAGGLE_API_TOKEN}" }
-enabled = true

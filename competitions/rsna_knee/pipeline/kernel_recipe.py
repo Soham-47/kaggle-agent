@@ -1,4 +1,4 @@
-"""Rendered RSNA 2D DINO MIL image template."""
+"""Rendered 2D DINO MIL image template."""
 
 KERNEL_RECIPE_SOURCE = r'''
 import csv
@@ -10,7 +10,6 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
-import pydicom
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -144,6 +143,11 @@ def _sample_paths(study_dir):
 
 
 def _study_tensor(root, study_id):
+    # DICOM decoding is a Kaggle image-runtime concern. Keep it lazy so
+    # metadata-only helpers and local contract tests do not require the
+    # competition image dependency merely to import the rendered recipe.
+    import pydicom
+
     images = []
     for path in _sample_paths(root / study_id):
         pixels = pydicom.dcmread(path, force=True).pixel_array.astype("float32")
@@ -459,6 +463,6 @@ evidence = {
     "prediction_hashes": prediction_hashes,
 }
 Path("semantic_evidence.json").write_text(json.dumps(evidence, indent=2), encoding="utf-8")
-Path("artifact_manifest.runtime.json").write_text(json.dumps({"template_version": "rsna-2d-dino-mil-v1", "fold_outputs": fold_outputs, "prediction_hashes": prediction_hashes, "semantic_evidence": evidence}, indent=2), encoding="utf-8")
+Path("artifact_manifest.runtime.json").write_text(json.dumps({"template_version": IMAGE_CONTRACT["template"], "fold_outputs": fold_outputs, "prediction_hashes": prediction_hashes, "semantic_evidence": evidence}, indent=2), encoding="utf-8")
 print("wrote verified DINO MIL submission", len(sub))
 '''

@@ -41,8 +41,8 @@ def test_telegram_duplicate_run_is_durable_and_status_reports_supervisor_owner(t
     status = commands.handle_command("/status", root=tmp_path)
 
     assert first.ok and duplicate.ok
-    assert [item.command for item in queue.pending()] == ["run", "run"]
-    assert "Queued commands: 2" in status.reply
+    assert [item.command for item in queue.pending()] == ["run"]
+    assert "Queued commands: 1" in status.reply
     assert "supervisor" in status.reply.lower()
 
 

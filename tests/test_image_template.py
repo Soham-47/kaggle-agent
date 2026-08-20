@@ -4,11 +4,11 @@ from pathlib import Path
 import pytest
 
 from kaggle_agent.pipeline.image_template import (
-    Rsna2dDinoMilTemplate,
+    Image2dDinoMilTemplate,
     index_study_volumes,
     grouped_splits_have_no_overlap,
     hidden_ids_from_folders,
-    rsna_2d_dino_mil_contract,
+    image_2d_dino_mil_contract,
     submission_ids_match_folders,
     validate_contract,
     validate_image_runtime_evidence,
@@ -21,9 +21,10 @@ LABELS = [f"label_{i}" for i in range(12)]
 
 
 def _contract():
-    return rsna_2d_dino_mil_contract(
+    return image_2d_dino_mil_contract(
+        competition_id="example",
         labels=LABELS,
-        dataset_sources=["owner/rsna-report-labels"],
+        dataset_sources=["owner/example-labels"],
         model_sources=["owner/dinov2/PyTorch/base/1"],
         source_card_refs=["source-dino", "source-report-labels"],
     )
@@ -38,7 +39,8 @@ def test_rsna_contract_requires_pins_and_12_labels():
 
 
 def test_rsna_contract_rejects_missing_model_pin():
-    contract = rsna_2d_dino_mil_contract(
+    contract = image_2d_dino_mil_contract(
+        competition_id="example",
         labels=LABELS,
         dataset_sources=["owner/labels"],
         model_sources=[],
@@ -49,7 +51,7 @@ def test_rsna_contract_rejects_missing_model_pin():
 
 
 def test_template_renders_kaggle_recipe_and_manifest():
-    rendered = Rsna2dDinoMilTemplate().render(_contract())
+    rendered = Image2dDinoMilTemplate().render(_contract())
 
     assert "submission.csv" in rendered.recipe_source
     assert "CUSTOM_INFER(sub, ctx)" in rendered.recipe_source
@@ -66,21 +68,21 @@ def test_template_renders_kaggle_recipe_and_manifest():
     assert 'archive["data"]' in rendered.recipe_source
     assert "train_folds.csv" in rendered.recipe_source
     assert "train_series.csv" in rendered.recipe_source
-    assert "SeriesInstanceUID" in rendered.recipe_source
+    assert "SERIES_ID_COL" in rendered.recipe_source
     assert "series_mapping_loaded" in rendered.recipe_source
     assert "label_join_count" in rendered.recipe_source
     assert "supplied folds are incomplete" in rendered.recipe_source
     assert "fold_source" in rendered.recipe_source
     assert "hash(tuple(row))" not in rendered.recipe_source
     assert "np.linspace(0.05, 0.95" not in rendered.recipe_source
-    assert rendered.manifest["template_version"] == "rsna-2d-dino-mil-v1"
-    assert rendered.manifest["dataset_sources"] == ["owner/rsna-report-labels"]
+    assert rendered.manifest["template_version"] == "image-2d-dino-mil-v1"
+    assert rendered.manifest["dataset_sources"] == ["owner/example-labels"]
     assert rendered.manifest["model_sources"] == ["owner/dinov2/PyTorch/base/1"]
     assert len(rendered.manifest["contract_sha256"]) == 64
 
 
 def test_rendered_recipe_uses_only_configured_per_series_sampler_limit():
-    rendered = Rsna2dDinoMilTemplate().render(_contract())
+    rendered = Image2dDinoMilTemplate().render(_contract())
 
     assert "SLICES_PER_STUDY" not in rendered.recipe_source
     assert validate_rendered_recipe(rendered.recipe_source) == []
@@ -100,10 +102,10 @@ def test_rendered_recipe_rejects_stale_or_undefined_sampler_constants():
 
 def test_template_rejects_invalid_contract():
     contract = _contract()
-    bad = contract.__class__(**{**contract.to_dict(), "head_labels": ["only-one"]})
+    bad = contract.__class__(**{**contract.to_dict(), "head_labels": []})
 
-    with pytest.raises(ValueError, match="12 labels"):
-        Rsna2dDinoMilTemplate().render(bad)
+    with pytest.raises(ValueError, match="at least one label"):
+        Image2dDinoMilTemplate().render(bad)
 
 
 def test_series_volumes_are_indexed_by_study_uid(tmp_path: Path):
@@ -111,9 +113,9 @@ def test_series_volumes_are_indexed_by_study_uid(tmp_path: Path):
     second = tmp_path / "series-b.npz"
     orphan = tmp_path / "series-orphan.npz"
     rows = [
-        {"StudyInstanceUID": "study-1", "SeriesInstanceUID": "series-a"},
-        {"StudyInstanceUID": "study-1", "SeriesInstanceUID": "series-b"},
-        {"StudyInstanceUID": "study-2", "SeriesInstanceUID": "missing-series"},
+        {"id": "study-1", "series_id": "series-a"},
+        {"id": "study-1", "series_id": "series-b"},
+        {"id": "study-2", "series_id": "missing-series"},
     ]
 
     indexed, mapped_series = index_study_volumes([first, second, orphan], rows)
@@ -127,12 +129,12 @@ def test_hidden_ids_and_submission_matching(tmp_path: Path):
     (test_root / "study-b").mkdir(parents=True)
     (test_root / "study-a").mkdir()
     submission = tmp_path / "submission.csv"
-    submission.write_text("StudyInstanceUID,label\nstudy-a,0.1\nstudy-b,0.2\n", encoding="utf-8")
+    submission.write_text("id,label\nstudy-a,0.1\nstudy-b,0.2\n", encoding="utf-8")
 
     assert hidden_ids_from_folders(test_root) == ["study-a", "study-b"]
     assert submission_ids_match_folders(
         submission,
-        id_column="StudyInstanceUID",
+        id_column="id",
         test_root=test_root,
     )
 
@@ -188,7 +190,7 @@ def _resume_manifest(contract, checkpoint_sha: str) -> dict:
         "source_experiment": "20260819-123221",
         "fold": 0,
         "sha256": checkpoint_sha,
-        "template_version": "rsna-2d-dino-mil-v1",
+        "template_version": "image-2d-dino-mil-v1",
         "model_pin": contract.model_sources[0],
         "labels": contract.head_labels,
         "training_parameters": contract.parameters,
@@ -218,8 +220,8 @@ def test_resume_manifest_is_embedded_outside_contract_hash(tmp_path: Path):
         contract, hashlib.sha256(checkpoint.read_bytes()).hexdigest()
     )
 
-    without_resume = Rsna2dDinoMilTemplate().render(contract)
-    with_resume = Rsna2dDinoMilTemplate().render(contract, resume_manifest=expected)
+    without_resume = Image2dDinoMilTemplate().render(contract)
+    with_resume = Image2dDinoMilTemplate().render(contract, resume_manifest=expected)
 
     assert with_resume.manifest["contract_sha256"] == without_resume.manifest["contract_sha256"]
     assert "20260819-123221" in with_resume.recipe_source

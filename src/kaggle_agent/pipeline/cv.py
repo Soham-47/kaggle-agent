@@ -89,12 +89,14 @@ def evaluate_ranker_cv(
             series_feature_row,
             LABELS,
         )
+        import pipeline.ranker as ranker  # type: ignore[import-not-found]
 
         series_by_study = load_series_by_study(train_series_csv)
+        id_column = str(getattr(ranker, "ID_COLUMN", "id"))
         labels_by_study: dict[str, dict[str, int]] = {}
         with train_csv.open(newline="", encoding="utf-8") as handle:
             for row in csv.DictReader(handle):
-                study_id = (row.get("StudyInstanceUID") or "").strip()
+                study_id = (row.get(id_column) or "").strip()
                 if study_id and all((row.get(label) or "").strip() for label in LABELS):
                     labels_by_study[study_id] = {
                         label: int(float(row[label])) for label in LABELS

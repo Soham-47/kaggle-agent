@@ -1,33 +1,31 @@
 # MEMORY
 
-Durable facts only. Keep short. No secrets.
+Durable facts only. Keep this file short and free of secrets.
 
 ## User
 
-- Train on Kaggle Kernels. Local = smoke only.
-- Submit through the Kaggle API. Never browser-submit.
-- Real submit needs `memory/pending_submit.md` status=approved.
-- Research: Kaggle API first, then headed research Chrome, then method cards, then DeepResearcher.
+- Train on Kaggle Kernels; local execution is smoke testing.
+- Submit through the Kaggle API. Never submit through a browser.
+- Require the configured approval flow before a real submission.
+- Keep research evidence and experiment results in generated runtime state.
 
 ## Goals
 
-1. Daily loop with a small surface area.
-2. Valid schema baseline, then beat personal best without burning quota.
-3. Self-heal: tune → recipe → new → pause.
+1. Produce a valid schema baseline before optimizing a competition metric.
+2. Preserve external-action idempotency and durable checkpoints.
+3. Keep self-healing conservative and disabled unless explicitly enabled.
 
 ## Active contest
 
-Swap this block when you change `default_competition`.
+Replace this section when a competition is initialized.
 
 - id:
 - slug:
 - metric:
 - public_score: none
-- host accelerator notes:
 
-## Lessons (any contest)
+## Lessons
 
-- Honor the host GPU policy (`kernel.enable_gpu`).
-- Sibling `.py` files are not importable inside Kaggle notebooks. Inline the recipe.
-- Do not import pandas in local agent paths unless you add it to local deps.
-- Stale `memory/run.lock` after a killed run blocks the next cycle.
+- Honor the host accelerator and internet policy.
+- Generate competition code from the verified competition contract.
+- Keep credentials and private data outside the repository.

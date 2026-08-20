@@ -12,7 +12,7 @@ fi
 
 MARKER="kaggle-agent supervisor"
 # source .env then run; append to cron.log
-LINE="0 ${HOUR} * * * cd ${ROOT} && set -a && [ -f ${ROOT}/.env ] && . ${ROOT}/.env; set +a && ${PYTHON} -m kaggle_agent.cli supervisor --competition rsna_knee >> ${ROOT}/memory/daily/cron.log 2>&1  # ${MARKER}"
+LINE="0 ${HOUR} * * * cd ${ROOT} && set -a && [ -f ${ROOT}/.env ] && . ${ROOT}/.env; set +a && ${PYTHON} -m kaggle_agent.cli supervisor >> ${ROOT}/memory/daily/cron.log 2>&1  # ${MARKER}"
 
 mkdir -p "${ROOT}/memory/daily"
 

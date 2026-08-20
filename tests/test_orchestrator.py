@@ -253,7 +253,7 @@ def test_validate_sub_image_template_requires_semantic_evidence(tmp_path: Path):
     exp_id = "20260815-image-missing"
     kernel_dir = _write_kernel_output(root, comp, exp_id)
     (kernel_dir / "artifact_manifest.json").write_text(
-        '{"template_version": "rsna-2d-dino-mil-v1"}',
+        '{"template_version": "image-2d-dino-mil-v1"}',
         encoding="utf-8",
     )
     result = CycleResult(
@@ -278,7 +278,7 @@ def test_validate_sub_image_template_accepts_semantic_evidence(tmp_path: Path):
     exp_id = "20260815-image-ok"
     kernel_dir = _write_kernel_output(root, comp, exp_id)
     (kernel_dir / "artifact_manifest.json").write_text(
-        '{"template_version": "rsna-2d-dino-mil-v1"}',
+        '{"template_version": "image-2d-dino-mil-v1"}',
         encoding="utf-8",
     )
     (kernel_dir / "output" / "semantic_evidence.json").write_text(
@@ -310,7 +310,7 @@ def test_validate_sub_image_template_accepts_semantic_evidence(tmp_path: Path):
     (kernel_dir / "output" / "artifact_manifest.runtime.json").write_text(
         '''
 {
-  "template_version": "rsna-2d-dino-mil-v1",
+  "template_version": "image-2d-dino-mil-v1",
   "fold_outputs": ["fold_0_predictions.csv", "fold_1_predictions.csv", "fold_2_predictions.csv", "fold_3_predictions.csv", "fold_4_predictions.csv"],
   "prediction_hashes": ["h0", "h1", "h2", "h3", "h4"]
 }

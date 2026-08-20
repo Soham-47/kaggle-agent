@@ -2,18 +2,19 @@ import json
 from pathlib import Path
 
 from fakes import FakeKaggleApi
+from helpers import write_kernel_fixture_data
 from kaggle_agent.config import load_competition
 from kaggle_agent.kaggle_api import KaggleClient
 from kaggle_agent.paths import repo_root
 from kaggle_agent.train.kernel_runner import run_kernel_phase
 from kaggle_agent.train.notebook_builder import (
-    build_rsna_baseline_notebook,
+    build_baseline_notebook,
     write_kernel_package,
 )
 
 
 def test_build_notebook_has_baker_and_submission():
-    nb = build_rsna_baseline_notebook(
+    nb = build_baseline_notebook(
         competition_slug="rsna-knee-abnormality-detection",
         labels=["ACL", "Baker's", "Fracture"],
         study_ids=["s1", "s2"],
@@ -32,7 +33,7 @@ def _root_with_data(tmp_path: Path) -> Path:
 
     shutil.copytree(real / "config", root / "config")
     (root / "competitions" / "rsna_knee").mkdir(parents=True)
-    shutil.copytree(real / "data", root / "data")
+    write_kernel_fixture_data(root)
     return root
 
 
@@ -115,7 +116,7 @@ def test_write_kernel_package_carries_image_artifact_manifest(tmp_path: Path):
     (pipe / "artifact_manifest.json").write_text(
         json.dumps(
             {
-                "template_version": "rsna-2d-dino-mil-v1",
+                "template_version": "image-2d-dino-mil-v1",
                 "source_card_refs": ["source-dino"],
                 "model_sources": ["owner/dinov2/PyTorch/base/1"],
                 "prediction_hashes": ["abc"],
@@ -123,14 +124,14 @@ def test_write_kernel_package_carries_image_artifact_manifest(tmp_path: Path):
         ),
         encoding="utf-8",
     )
-    (pipe / "image_contract.json").write_text('{"template": "rsna-2d-dino-mil-v1"}', encoding="utf-8")
+    (pipe / "image_contract.json").write_text('{"template": "image-2d-dino-mil-v1"}', encoding="utf-8")
 
     comp = load_competition("rsna_knee", root)
     pkg = write_kernel_package(comp, root=root, username="tester", exp_id="image-manifest")
 
     meta = json.loads(pkg.metadata_path.read_text(encoding="utf-8"))
     artifact = meta["experiment_manifest"]["artifact_manifest"]
-    assert artifact["template_version"] == "rsna-2d-dino-mil-v1"
+    assert artifact["template_version"] == "image-2d-dino-mil-v1"
     assert (pkg.folder / "artifact_manifest.json").is_file()
     assert (pkg.folder / "image_contract.json").is_file()
 
@@ -139,7 +140,7 @@ def test_write_kernel_package_attaches_resume_dataset_outside_image_contract(tmp
     root = _root_with_data(tmp_path)
     pipe = root / "competitions" / "rsna_knee" / "pipeline"
     pipe.mkdir(parents=True)
-    contract = '{"template": "rsna-2d-dino-mil-v1", "dataset_sources": ["owner/base"]}'
+    contract = '{"template": "image-2d-dino-mil-v1", "dataset_sources": ["owner/base"]}'
     (pipe / "image_contract.json").write_text(contract, encoding="utf-8")
     (pipe / "methods.json").write_text(
         '{"dataset_sources": ["owner/base"], "model_sources": []}', encoding="utf-8"

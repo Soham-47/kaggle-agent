@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from kaggle_agent.code.workspace import ensure_pipeline_ready
-from kaggle_agent.config import CompetitionConfig, Settings, load_competition, load_settings
+from kaggle_agent.config import ConfigError, CompetitionConfig, Settings, load_competition, load_settings
 from kaggle_agent.kaggle_api import KaggleClient
 from kaggle_agent.kaggle_api.models import SubmissionRow
 from kaggle_agent.judge import (
@@ -395,7 +395,10 @@ class Orchestrator:
     def _begin(
         self, state: AgentState, dry: bool, now: datetime, result: CycleResult
     ) -> AgentState:
-        exp_id = result.experiment_id or now.strftime("%Y%m%d-%H%M%S") + ("-dry" if dry else "")
+        # Runs can be triggered back-to-back (for example after Telegram
+        # approval). Include microseconds so a second run cannot reuse the
+        # first run's stage ledger keys or experiment artifacts.
+        exp_id = result.experiment_id or now.strftime("%Y%m%d-%H%M%S-%f") + ("-dry" if dry else "")
         result.experiment_id = exp_id
         self._tracer = Tracer(self.root, cycle_id=exp_id)
         self._tracer.emit("cycle_start", competition=self.competition.id, dry=dry)
@@ -765,6 +768,7 @@ class Orchestrator:
         elif not result.kernel_pending:
             result.validate_ok = False
             result.candidate_csv = None
+            result.submit_ok = False
         return state
 
     def _update_loop_after_feedback(self, result: CycleResult) -> None:
@@ -1552,15 +1556,15 @@ class Orchestrator:
                 result.errors.append(f"code: image contract JSON invalid: {exc}")
                 return state
             if (
-                contract.get("template") == "rsna-2d-dino-mil-v1"
-                and manifest.get("template_version") == "rsna-2d-dino-mil-v1"
+                contract.get("template") == "image-2d-dino-mil-v1"
+                and manifest.get("template_version") == "image-2d-dino-mil-v1"
                 and zen is None
             ):
                 result.code_ok = True
                 result.wrote_recipe = True
                 result.wrote_methods = True
-                result.code_agent = "rsna-2d-dino-mil-template"
-                append_daily_log("code: using validated RSNA 2D DINO MIL template", self.root)
+                result.code_agent = "image-2d-dino-mil-template"
+                append_daily_log("code: using validated 2D DINO MIL template", self.root)
                 return state
         agent, code_state = make_code_agent(
             zen,
@@ -1901,6 +1905,8 @@ class Orchestrator:
                 result.kernel_duplicate = any(
                     "duplicate recipe" in error.lower()
                     or "duplicate kernel package" in error.lower()
+                    or "identical kernel" in error.lower()
+                    or "kernel is identical" in error.lower()
                     for error in run.errors
                 )
                 result.errors.extend(f"kernel:{e}" for e in run.errors)
@@ -2053,7 +2059,7 @@ class Orchestrator:
             result.errors.append("validate: image artifact manifest is invalid JSON")
             append_daily_log("validate rejected: image artifact manifest invalid JSON", self.root)
             return False
-        if manifest.get("template_version") != "rsna-2d-dino-mil-v1":
+        if manifest.get("template_version") != "image-2d-dino-mil-v1":
             return True
         evidence_path = submission_path.parent / "semantic_evidence.json"
         if not evidence_path.is_file():
@@ -2091,7 +2097,7 @@ class Orchestrator:
             append_daily_log("validate rejected: image runtime artifact manifest invalid JSON", self.root)
             return False
         if (
-            runtime_manifest.get("template_version") != "rsna-2d-dino-mil-v1"
+            runtime_manifest.get("template_version") != "image-2d-dino-mil-v1"
             or runtime_manifest.get("fold_outputs") != evidence.get("fold_outputs")
             or runtime_manifest.get("prediction_hashes") != evidence.get("prediction_hashes")
         ):
@@ -2139,6 +2145,27 @@ class Orchestrator:
                 state=judge_state,
                 log=lambda msg: append_daily_log(msg, self.root),
             )
+
+        image_contract = workspace / "pipeline" / "image_contract.json"
+        image_manifest = workspace / "pipeline" / "artifact_manifest.json"
+        if zen is None and image_contract.is_file() and image_manifest.is_file():
+            try:
+                contract = json.loads(image_contract.read_text(encoding="utf-8"))
+                manifest = json.loads(image_manifest.read_text(encoding="utf-8"))
+            except json.JSONDecodeError:
+                contract = manifest = {}
+            if (
+                contract.get("template") == "image-2d-dino-mil-v1"
+                and manifest.get("template_version") == "image-2d-dino-mil-v1"
+            ):
+                result.plan_verified = True
+                result.plan_text = write_plan_text(
+                    "reuse the committed validated image template",
+                    "validated image template",
+                    "run the local smoke and preserve the image contract",
+                )
+                append_daily_log("plan: using validated 2D DINO MIL template", self.root)
+                return state
 
         agent, _state = make_plan_agent(
             zen,
@@ -2859,6 +2886,8 @@ def run_daily(
 ) -> CycleResult:
     settings = load_settings(root)
     cid = competition_id or settings.default_competition
+    if not cid:
+        raise ConfigError("no competition configured; pass --competition or run 'kaggle-agent init'")
     competition = load_competition(cid, root or settings.root)
     return Orchestrator(
         settings,

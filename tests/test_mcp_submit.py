@@ -20,6 +20,17 @@ def _enable_mcp_in_settings(root: Path) -> None:
     path.write_text(text.replace("mcp: false", "mcp: true"), encoding="utf-8")
 
 
+def _disable_research_fleet(root: Path) -> None:
+    path = root / "config" / "competitions" / "rsna_knee.yaml"
+    path.write_text(
+        path.read_text(encoding="utf-8").replace(
+            "fleet: [notebooks, papers, github, web, discussions, datasets]",
+            "fleet: false",
+        ),
+        encoding="utf-8",
+    )
+
+
 def _write_live_submission(path: Path, header: list[str]) -> None:
     rows = "\n".join(
         f"study-{i}," + ",".join([str(0.5 + (i % 2) * 0.1)] * (len(header) - 1))
@@ -84,21 +95,27 @@ def test_mcp_code_submit_injected():
     assert "mcp code submit ok" in r.message
 
 
-def test_mcp_fail_then_api_then_browser(tmp_path: Path, monkeypatch):
+def test_mcp_and_api_failure_never_falls_back_to_browser(tmp_path: Path, monkeypatch):
     import shutil
 
     root = tmp_path / "kaggle-agent"
     real = Path(__file__).resolve().parents[1]
     shutil.copytree(real / "config", root / "config")
     shutil.copytree(real / "competitions", root / "competitions")
+    _disable_research_fleet(root)
     (root / "memory").mkdir()
     for name in ("MEMORY.md", "COMPETITION.md", "state.md", "research.md"):
-        shutil.copy(real / "memory" / name, root / "memory" / name)
+        shutil.copy(real / "memory" / "templates" / name, root / "memory" / name)
     (root / "memory" / "experiments").mkdir()
     (root / "memory" / "daily").mkdir()
     from kaggle_agent.state_md import AgentState, save_state
 
     save_state(AgentState(paused=False, competition="rsna_knee"), root)
+    settings_path = root / "config" / "settings.yaml"
+    settings_path.write_text(
+        settings_path.read_text(encoding="utf-8").replace("block_submit: true", "block_submit: false"),
+        encoding="utf-8",
+    )
 
     from kaggle_agent.config import load_competition
 
@@ -143,9 +160,9 @@ def test_mcp_fail_then_api_then_browser(tmp_path: Path, monkeypatch):
         browser_submit=browser_ok,
         mcp_submit_fn=mcp_fail,
     )
-    assert r.submit_ok is True
-    assert "browser" in (r.submit_message or "")
-    assert load_pending(root).status == "submitted"
+    assert r.submit_ok is False
+    assert r.submission_pending is False
+    assert load_pending(root).status != "submitted"
 
 
 def test_mcp_success_skips_api(tmp_path: Path, monkeypatch):
@@ -155,9 +172,10 @@ def test_mcp_success_skips_api(tmp_path: Path, monkeypatch):
     real = Path(__file__).resolve().parents[1]
     shutil.copytree(real / "config", root / "config")
     shutil.copytree(real / "competitions", root / "competitions")
+    _disable_research_fleet(root)
     (root / "memory").mkdir()
     for name in ("MEMORY.md", "COMPETITION.md", "state.md", "research.md"):
-        shutil.copy(real / "memory" / name, root / "memory" / name)
+        shutil.copy(real / "memory" / "templates" / name, root / "memory" / name)
     (root / "memory" / "experiments").mkdir()
     (root / "memory" / "daily").mkdir()
     from kaggle_agent.state_md import AgentState, save_state
@@ -215,9 +233,10 @@ def test_live_submit_uses_api_not_mcp(tmp_path: Path, monkeypatch):
     real = Path(__file__).resolve().parents[1]
     shutil.copytree(real / "config", root / "config")
     shutil.copytree(real / "competitions", root / "competitions")
+    _disable_research_fleet(root)
     (root / "memory").mkdir()
     for name in ("MEMORY.md", "COMPETITION.md", "state.md", "research.md"):
-        shutil.copy(real / "memory" / name, root / "memory" / name)
+        shutil.copy(real / "memory" / "templates" / name, root / "memory" / name)
     (root / "memory" / "experiments").mkdir()
     (root / "memory" / "daily").mkdir()
     from kaggle_agent.state_md import AgentState, save_state

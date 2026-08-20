@@ -1,4 +1,7 @@
 import os
+import signal
+import subprocess
+import sys
 from pathlib import Path
 
 from kaggle_agent.autonomy.outbox import ExternalAction, ExternalActionOutbox
@@ -51,6 +54,31 @@ def test_restart_marks_dead_worker_interrupted_without_result(tmp_path: Path):
     recovered = SupervisorRecovery(state).recover_workers(timeout_seconds=30, owner_token="owner")
     assert recovered[0].action == "START_OR_RESUME"
     assert state.read_json("workers/w1/result.json")["status"] == "INTERRUPTED"
+
+
+def test_sigkill_worker_is_not_adopted_while_zombie(tmp_path: Path):
+    state = SupervisorStateStore(RuntimeLayout.for_repo(tmp_path / "repo", tmp_path / "state"))
+    process = subprocess.Popen((sys.executable, "-c", "import time; time.sleep(30)"))
+    state.write_json(
+        "workers/w1/metadata.json",
+        {
+            "pid": process.pid,
+            "worker_id": "w1",
+            "supervisor_token": "owner",
+            "generation_id": "g1",
+        },
+    )
+    HeartbeatStore(state.layout.state_root).write(
+        Heartbeat("w1", process.pid, "g1", "c1", "CODE", "progress", time.time())
+    )
+    process.kill()
+    time.sleep(0.1)
+    recovery = SupervisorRecovery(state)
+    try:
+        item = recovery.inspect_worker("w1", timeout_seconds=30, owner_token="owner")
+        assert item.action == "START_OR_RESUME"
+    finally:
+        process.wait(timeout=5)
 
 
 def test_interrupted_promotion_recovers_to_old_or_new_pointer(tmp_path: Path):

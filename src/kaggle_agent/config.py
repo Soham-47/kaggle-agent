@@ -112,9 +112,9 @@ def _validate_agent(section: dict[str, Any], path: Path, *, minutes: float, turn
 
 
 def _validate_settings(raw: dict[str, Any], path: Path) -> None:
-    default_competition = raw.get("default_competition", "rsna_knee")
-    if not isinstance(default_competition, str) or not default_competition.strip():
-        raise _config_error(path, "default_competition", "must be a non-empty string", default_competition)
+    default_competition = raw.get("default_competition")
+    if default_competition is not None and (not isinstance(default_competition, str) or not default_competition.strip()):
+        raise _config_error(path, "default_competition", "must be null or a non-empty string", default_competition)
 
     orchestrator = _section(raw, "orchestrator", path)
     _bool(orchestrator, "dry_run", path, True)
@@ -229,7 +229,7 @@ def _validate_competition(raw: dict[str, Any], path: Path) -> None:
     if not isinstance(labels, list) or any(not isinstance(item, str) or not item.strip() for item in labels):
         raise _config_error(path, "labels", "must be a list of non-empty strings", labels)
     submission = _section(raw, "submission", path)
-    _str(submission, "id_column", path, "StudyInstanceUID", nonempty=True)
+    _str(submission, "id_column", path, "id", nonempty=True)
     if "min_rows" in submission and submission["min_rows"] is not None:
         _int(submission, "min_rows", path, 0, minimum=0)
     probability_columns = _list(submission, "probability_columns", path, [])
@@ -252,7 +252,7 @@ def _validate_competition(raw: dict[str, Any], path: Path) -> None:
     budget = _section(raw, "submit_budget", path)
     _int(budget, "max_proposals_per_day", path, 2, minimum=0)
     fleet = raw.get("research", {}).get("fleet") if isinstance(raw.get("research"), dict) else None
-    if fleet is not None and fleet is not True and not isinstance(fleet, list):
+    if fleet is not None and not isinstance(fleet, bool) and not isinstance(fleet, list):
         raise _config_error(path, "research.fleet", "must be true, false, or a roster list", fleet)
     if isinstance(fleet, list) and any(not isinstance(item, str) or not item.strip() for item in fleet):
         raise _config_error(path, "research.fleet", "must contain non-empty strings", fleet)
@@ -301,8 +301,9 @@ class Settings:
     root: Path
 
     @property
-    def default_competition(self) -> str:
-        return str(self.raw.get("default_competition", "rsna_knee"))
+    def default_competition(self) -> str | None:
+        value = self.raw.get("default_competition")
+        return value.strip() if isinstance(value, str) and value.strip() else None
 
     @property
     def dry_run(self) -> bool:
@@ -529,7 +530,7 @@ class CompetitionConfig:
 
     @property
     def id_column(self) -> str:
-        return str(self.raw.get("submission", {}).get("id_column", "StudyInstanceUID"))
+        return str(self.raw.get("submission", {}).get("id_column", "id"))
 
     @property
     def submission_min_rows(self) -> int | None:

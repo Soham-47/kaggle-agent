@@ -38,6 +38,20 @@ def start_agent_cycle(
     _load_dotenv(root)
 
     state = load_state(root)
+    try:
+        configured_default = load_settings(root).default_competition
+    except FileNotFoundError:
+        configured_default = None
+    configured = competition or configured_default or (
+        state.competition if state.competition not in {"", "none"} else None
+    )
+    if not configured:
+        return RunStartResult(
+            ok=False,
+            message="No competition configured. Run `kaggle-agent init --competition <id>` or pass a competition.",
+            dry_run=dry_run,
+        )
+    competition = configured
     if state.paused:
         return RunStartResult(
             ok=False,
@@ -65,7 +79,7 @@ def start_agent_cycle(
         str(py),
         str(root / "scripts" / "run_daily.py"),
         "--competition",
-        competition or "rsna_knee",
+        competition,
     ]
     if dry_run:
         cmd.append("--dry-run")
@@ -131,7 +145,9 @@ def _start_supervisor(root: Path, *, dry_run: bool, competition: str | None, bac
     py = root / ".venv" / "bin" / "python"
     if not py.is_file():
         py = Path(sys.executable)
-    cmd = [str(py), "-m", "kaggle_agent.cli", "supervisor", "--competition", competition or "rsna_knee"]
+    if not competition:
+        return RunStartResult(False, "No competition configured for the supervisor.", dry_run)
+    cmd = [str(py), "-m", "kaggle_agent.cli", "supervisor", "--competition", competition]
     log_dir = memory_dir(root) / "daily"
     log_dir.mkdir(parents=True, exist_ok=True)
     log_path = log_dir / "supervisor.log"

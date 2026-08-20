@@ -11,7 +11,7 @@ bash scripts/install_cron.sh
 bash scripts/install_cron.sh 6
 ```
 
-Cron sources `.env` so Zen/Telegram keys work. Log: `memory/daily/cron.log`.
+Cron sources `.env` so DeepSeek/Telegram keys work. Log: `memory/daily/cron.log`.
 
 Manual / Telegram:
 

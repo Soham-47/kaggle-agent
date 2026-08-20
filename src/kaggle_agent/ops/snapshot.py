@@ -186,7 +186,7 @@ def _submit_view(root: Path) -> dict[str, Any]:
 def build_snapshot(root: Path) -> dict[str, Any]:
     state = _read_kv(memory_dir(root) / "state.md")
     heal = _read_kv(memory_dir(root) / "heal.md")
-    competition = state.get("competition") or "rsna_knee"
+    competition = state.get("competition") or "none"
     workspace = _workspace(root, competition)
     events = collect_events(root)
     evals = evaluate_cycle(root, events, workspace=workspace if workspace.is_dir() else None)

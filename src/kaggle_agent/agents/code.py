@@ -17,8 +17,8 @@ from kaggle_agent.experiment_fingerprint import (
 from kaggle_agent.heal.pins import sanitize_methods_payload
 from kaggle_agent.memory.ingest import build_context_pack, retrieve
 from kaggle_agent.pipeline.image_template import (
-    Rsna2dDinoMilTemplate,
-    rsna_2d_dino_mil_contract,
+    Image2dDinoMilTemplate,
+    image_2d_dino_mil_contract,
 )
 from kaggle_agent.research.source_cards import (
     extract_infer_hints,
@@ -93,14 +93,13 @@ CODE_TOOL_SCHEMAS: dict[str, dict[str, Any]] = {
         "description": "Write pipeline/methods.json for the next kernel build. "
         "Every proposed method must cite one or more existing source-card IDs or refs. "
         "model_sources accepts ONLY 4-part Kaggle model pins owner/slug/framework/instance "
-        "(e.g. byi8552/rsna-keras3-effnet-b0-pretrain-trainin/densenet121/pretrain). "
+        "(for example owner/model/framework/instance). "
         "Kernel references like romanrozen/... are NOT valid model pins; drop them.",
         "properties": {
             "dataset_sources": {
                 "type": "array",
                 "items": {"type": "string"},
-                "description": "Kaggle dataset pins owner/dataset-name, e.g. "
-                "wguesdon/rsna-knee-dinov2-at-meniscus-resolution",
+                "description": "Kaggle dataset pins in owner/dataset-name form",
             },
             "model_sources": {
                 "type": "array",
@@ -153,7 +152,7 @@ CODE_TOOL_SCHEMAS: dict[str, dict[str, Any]] = {
         },
     },
     "write_image_contract": {
-        "description": "Write the supported RSNA 2D DINO MIL image contract and render "
+        "description": "Write the supported 2D DINO MIL image contract and render "
         "the owned image template. CODE may tune only dataset/model pins, cited cards, "
         "and bounded parameters such as image_size, folds, and epochs.",
         "properties": {
@@ -217,8 +216,7 @@ def methods_payload_ok(
         if pin and not valid_model_pin(str(pin)):
             return False, (
                 f"invalid model pin: {pin} — model_sources need 4-part pins "
-                "owner/slug/framework/instance (e.g. byi8552/rsna-keras3-effnet-b0"
-                "-pretrain-trainin/densenet121/pretrain)"
+                "owner/slug/framework/instance (e.g. owner/model/framework/instance)"
             )
     for ds in dataset_sources or []:
         if not ds or "/" not in str(ds) or str(ds).lower() in {"dataset/model"}:
@@ -654,7 +652,7 @@ def build_code_tools(
         ok, err = methods_payload_ok(
             dataset_sources=ds,
             model_sources=ms,
-            implement_steps=["render RSNA 2D DINO MIL image template"],
+            implement_steps=["render the 2D DINO MIL image template"],
         )
         if not ok:
             return f"rejected: {err}"
@@ -676,20 +674,22 @@ def build_code_tools(
             return "rejected: image contract is not grounded in cited source cards"
         labels = _labels_from_workspace(workspace)
         try:
-            contract = rsna_2d_dino_mil_contract(
+            image_parameters = _bounded_image_parameters(parameters or {})
+            contract = image_2d_dino_mil_contract(
+                competition_id=workspace.name,
                 labels=labels,
                 dataset_sources=ds,
                 model_sources=ms,
                 source_card_refs=card_refs,
-                parameters=_bounded_image_parameters(parameters or {}),
+                parameters=image_parameters,
             )
-            rendered = Rsna2dDinoMilTemplate().render(contract)
+            rendered = Image2dDinoMilTemplate().render(contract)
         except (TypeError, ValueError) as exc:
             return f"rejected: {exc}"
         pipe = workspace / "pipeline"
         pipe.mkdir(parents=True, exist_ok=True)
         wrapper = (
-            '"""Rendered RSNA 2D DINO MIL image template."""\n\n'
+            '"""Rendered 2D DINO MIL image template."""\n\n'
             "KERNEL_RECIPE_SOURCE = r'''\n"
             + rendered.recipe_source.strip()
             + "\n'''\n"
@@ -719,7 +719,7 @@ def build_code_tools(
                 "dataset_sources": ds,
                 "model_sources": ms,
                 "implement_steps": [
-                    "Train the RSNA 2D DINO MIL template on mounted report labels with grouped folds."
+                    "Train the 2D DINO MIL template on mounted labels with grouped folds."
                 ],
                 "infer_hints": [
                     "discover_test_ids_from_folders",
@@ -773,20 +773,7 @@ def _labels_from_workspace(workspace: Path) -> list[str]:
         labels = ns.get("LABELS")
         if isinstance(labels, list) and all(isinstance(label, str) for label in labels):
             return labels
-    return [
-        "ACL",
-        "MCL",
-        "Medial Meniscus",
-        "Lateral Meniscus",
-        "Medial OA",
-        "Lateral OA",
-        "PF OA",
-        "Effusion",
-        "Synovitis",
-        "Baker's",
-        "Contusion",
-        "Fracture",
-    ]
+    return ["target"]
 
 
 def _bounded_image_parameters(parameters: dict[str, Any]) -> dict[str, Any]:

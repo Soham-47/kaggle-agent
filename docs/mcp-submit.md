@@ -29,14 +29,7 @@ source scripts/export_kaggle_mcp_token.sh
 
 The agent also reads `~/.kaggle/access_token` if the env var is unset.
 
-## Grok MCP
+## MCP client configuration
 
-User config: `~/.grok/config.toml`  
-Project: `kaggle-agent/.grok/config.toml`
-
-```toml
-[mcp_servers.kaggle]
-url = "https://www.kaggle.com/mcp"
-headers = { Authorization = "Bearer ${KAGGLE_API_TOKEN}" }
-enabled = true
-```
+Configure the Kaggle MCP server in the client that launches the agent. The
+repository does not carry client-specific configuration or credentials.

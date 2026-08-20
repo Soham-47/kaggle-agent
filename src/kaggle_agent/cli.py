@@ -21,6 +21,8 @@ def main(argv: list[str] | None = None) -> int:
         return _evals(argv[1:])
     if argv and argv[0] == "onboard":
         return _onboard(argv[1:])
+    if argv and argv[0] == "init":
+        return _init(argv[1:])
     if argv and argv[0] == "supervisor":
         return _supervisor(argv[1:])
     if argv and argv[0] in {"run", "/run"}:
@@ -43,6 +45,8 @@ def main(argv: list[str] | None = None) -> int:
         "Also read from KAGGLE_AGENT_SKIP_PHASES.",
     )
     args = p.parse_args(argv)
+    if not args.competition and not load_settings(repo_root()).default_competition:
+        p.error("--competition is required until a competition is configured")
     skip = args.skip or os.environ.get("KAGGLE_AGENT_SKIP_PHASES", "")
     skip_phases = frozenset(
         s.strip().upper() for s in skip.split(",") if s.strip()
@@ -159,6 +163,23 @@ def _onboard(argv: list[str]) -> int:
         f"onboard=success competition={result.contract.raw['id']} "
         f"contract_hash={result.contract.compatibility_hash}"
     )
+    return 0
+
+
+def _init(argv: list[str]) -> int:
+    p = argparse.ArgumentParser(prog="kaggle-agent init")
+    p.add_argument("--competition", required=True)
+    p.add_argument("--slug", default=None)
+    args = p.parse_args(argv)
+    from kaggle_agent.autonomy.bootstrap import InitializationError, initialize_competition
+
+    try:
+        path = initialize_competition(repo_root(), args.competition, args.slug)
+    except InitializationError as exc:
+        print(f"init failed: {exc}", file=sys.stderr)
+        return 2
+    print(f"created competition scaffold: {path}")
+    print("pass --competition to run it; no public competition is selected by default")
     return 0
 
 

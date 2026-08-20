@@ -29,11 +29,7 @@ class SupervisorRecovery:
         owner = str(metadata.get("supervisor_token") or "")
         alive = False
         if isinstance(pid, int):
-            try:
-                os.kill(pid, 0)
-                alive = True
-            except (ProcessLookupError, PermissionError):
-                alive = False
+            alive = self._pid_is_live(pid)
         fresh = HeartbeatStore(self.store.layout.state_root).is_fresh(worker_id, timeout_seconds=timeout_seconds)
         owned = bool(owner) and (owner_token is None or owner == owner_token)
         if alive and owned and fresh:
@@ -43,6 +39,24 @@ class SupervisorRecovery:
         else:
             action = "START_OR_RESUME"
         return WorkerRecovery(worker_id, pid if isinstance(pid, int) else None, owned, fresh, action)
+
+    @staticmethod
+    def _pid_is_live(pid: int) -> bool:
+        """Treat an unreaped zombie as exited, not as an adoptable worker."""
+        proc_stat = Path(f"/proc/{pid}/stat")
+        if proc_stat.is_file():
+            try:
+                contents = proc_stat.read_text(encoding="utf-8")
+                state_start = contents.rfind(")") + 2
+                if state_start > 1 and contents[state_start:state_start + 1] == "Z":
+                    return False
+            except OSError:
+                pass
+        try:
+            os.kill(pid, 0)
+        except (ProcessLookupError, PermissionError):
+            return False
+        return True
 
     def recover_workers(self, *, timeout_seconds: float, owner_token: str) -> tuple[WorkerRecovery, ...]:
         workers = self.store.layout.state_root / "workers"

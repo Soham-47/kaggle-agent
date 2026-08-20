@@ -14,7 +14,7 @@ from collections.abc import Iterable, Mapping
 from typing import Any
 
 
-TEMPLATE_VERSION = "rsna-2d-dino-mil-v1"
+TEMPLATE_VERSION = "image-2d-dino-mil-v1"
 
 
 @dataclass(frozen=True)
@@ -90,8 +90,9 @@ class ImageExperimentContract:
         }
 
 
-def rsna_2d_dino_mil_contract(
+def image_2d_dino_mil_contract(
     *,
+    competition_id: str,
     labels: list[str],
     dataset_sources: list[str],
     model_sources: list[str],
@@ -99,7 +100,7 @@ def rsna_2d_dino_mil_contract(
     parameters: dict[str, Any] | None = None,
 ) -> ImageExperimentContract:
     return ImageExperimentContract(
-        competition_id="rsna_knee",
+        competition_id=competition_id,
         template=TEMPLATE_VERSION,
         source_card_refs=source_card_refs,
         dataset_sources=dataset_sources,
@@ -120,10 +121,10 @@ def validate_contract(contract: ImageExperimentContract) -> list[str]:
     errors: list[str] = []
     if contract.template != TEMPLATE_VERSION:
         errors.append(f"unsupported template: {contract.template}")
-    if contract.competition_id != "rsna_knee":
-        errors.append("rsna image template only supports rsna_knee")
-    if len(contract.head_labels) != 12:
-        errors.append("rsna contract requires 12 labels")
+    if not contract.competition_id.strip():
+        errors.append("competition_id required")
+    if not contract.head_labels:
+        errors.append("at least one label is required")
     if not contract.source_card_refs:
         errors.append("source_card_refs required")
     if not contract.dataset_sources:
@@ -161,8 +162,8 @@ class ImageExperimentTemplate:
         raise NotImplementedError
 
 
-class Rsna2dDinoMilTemplate(ImageExperimentTemplate):
-    """Render a Kaggle-ready recipe constrained by the typed RSNA contract."""
+class Image2dDinoMilTemplate(ImageExperimentTemplate):
+    """Render a Kaggle-ready recipe constrained by an image contract."""
 
     def render(
         self,
@@ -174,7 +175,10 @@ class Rsna2dDinoMilTemplate(ImageExperimentTemplate):
         if errors:
             raise ValueError("; ".join(errors))
         recipe = (
-            _RSNA_RECIPE.replace("__LABELS__", repr(contract.head_labels))
+            _IMAGE_RECIPE.replace("__LABELS__", repr(contract.head_labels))
+            .replace("__ID_COLUMN__", repr(contract.parameters.get("id_column", "id")))
+            .replace("__SERIES_ID_COLUMN__", repr(contract.parameters.get("series_id_column", "series_id")))
+            .replace("__COMPETITION_SLUG__", repr(contract.parameters.get("competition_slug", contract.competition_id)))
             .replace("__CONTRACT_JSON__", repr(json.dumps(contract.to_dict(), sort_keys=True)))
             .replace(
                 "__RESUME_MANIFEST_JSON__",
@@ -365,14 +369,17 @@ def grouped_splits_have_no_overlap(folds: list[dict[str, list[str]]]) -> bool:
 def index_study_volumes(
     volume_paths: Iterable[Path],
     mapping_rows: Iterable[Mapping[str, Any]],
+    *,
+    id_column: str = "id",
+    series_id_column: str = "series_id",
 ) -> tuple[dict[str, list[Path]], int]:
-    """Map series-keyed volume files to study IDs using RSNA metadata."""
+    """Map series-keyed volume files to IDs using configured metadata columns."""
     volumes_by_series = {path.stem: path for path in volume_paths}
     volumes_by_study: dict[str, list[Path]] = {}
     mapped_series = 0
     for row in mapping_rows:
-        study_id = str(row.get("StudyInstanceUID", "")).strip()
-        series_id = str(row.get("SeriesInstanceUID", "")).strip()
+        study_id = str(row.get(id_column, "")).strip()
+        series_id = str(row.get(series_id_column, "")).strip()
         path = volumes_by_series.get(series_id)
         if not study_id or path is None:
             continue
@@ -396,7 +403,7 @@ def _sha256(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
-_RSNA_RECIPE = r'''
+_IMAGE_RECIPE = r'''
 import csv
 import hashlib
 import json
@@ -416,7 +423,9 @@ from transformers import AutoModel
 LABELS = __LABELS__
 IMAGE_CONTRACT = json.loads(__CONTRACT_JSON__)
 RESUME_MANIFEST = json.loads(__RESUME_MANIFEST_JSON__)
-ID_COL = "StudyInstanceUID"
+ID_COL = __ID_COLUMN__
+SERIES_ID_COL = __SERIES_ID_COLUMN__
+COMPETITION_SLUG = __COMPETITION_SLUG__
 WORK = Path(".")
 # This template deliberately has no metadata-ranker fallback.
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -428,7 +437,7 @@ SLICES_PER_SERIES = int(IMAGE_CONTRACT["parameters"].get("slices_per_series", 8)
 
 def _competition_root():
     base = Path("/kaggle/input")
-    expected = base / "rsna-knee-abnormality-detection"
+    expected = base / COMPETITION_SLUG
     candidates = [expected]
     if base.is_dir():
         candidates.extend(sorted(path for path in base.iterdir() if path.is_dir()))
@@ -436,7 +445,7 @@ def _competition_root():
     for candidate in candidates:
         if (candidate / "test.csv").is_file() and (candidate / "sample_submission.csv").is_file():
             return candidate
-    raise RuntimeError("RSNA competition files are not mounted")
+    raise RuntimeError("image competition files are not mounted")
 
 
 def _study_root(kind):
@@ -476,7 +485,7 @@ def _find_report_labels(train_volumes):
     competition = _competition_root().resolve()
     volume_ids = set(train_volumes)
     candidates = []
-    aliases = (ID_COL, "study_id", "StudyID", "study_uid", "StudyUID")
+    aliases = (ID_COL, "id", "study_id", "StudyID", "study_uid", "StudyUID")
     paths = sorted(
         Path("/kaggle/input").rglob("*.csv"),
         key=lambda path: (path.name not in {"train_folds.csv", "train_folds_with_pseudo.csv"}, str(path)),
@@ -568,13 +577,13 @@ def _volume_index():
         try:
             with mapping_path.open(newline="", encoding="utf-8") as handle:
                 rows = csv.DictReader(handle)
-                if not {"StudyInstanceUID", "SeriesInstanceUID"}.issubset(rows.fieldnames or []):
+                if not {ID_COL, SERIES_ID_COL}.issubset(rows.fieldnames or []):
                     continue
                 volumes_by_study = {}
                 mapped_series = 0
                 for row in rows:
-                    study_id = str(row.get("StudyInstanceUID", "")).strip()
-                    series_id = str(row.get("SeriesInstanceUID", "")).strip()
+                    study_id = str(row.get(ID_COL, "")).strip()
+                    series_id = str(row.get(SERIES_ID_COL, "")).strip()
                     path = volumes_by_series.get(series_id)
                     if not study_id or path is None:
                         continue
@@ -586,7 +595,7 @@ def _volume_index():
             candidates.append((mapped_series, mapping_path.name == "train_series.csv", mapping_path, volumes_by_study))
     if not candidates:
         raise RuntimeError(
-            "semantic check failed: no StudyInstanceUID/SeriesInstanceUID table maps mounted train volumes"
+            "semantic check failed: no configured ID/series table maps mounted train volumes"
         )
     candidates.sort(key=lambda item: (item[0], item[1]), reverse=True)
     mapped_series, _preferred, mapping_path, volumes_by_study = candidates[0]
@@ -855,6 +864,6 @@ evidence = {
     "prediction_hashes": prediction_hashes,
 }
 Path("semantic_evidence.json").write_text(json.dumps(evidence, indent=2), encoding="utf-8")
-Path("artifact_manifest.runtime.json").write_text(json.dumps({"template_version": "rsna-2d-dino-mil-v1", "fold_outputs": fold_outputs, "prediction_hashes": prediction_hashes, "semantic_evidence": evidence}, indent=2), encoding="utf-8")
+Path("artifact_manifest.runtime.json").write_text(json.dumps({"template_version": IMAGE_CONTRACT["template"], "fold_outputs": fold_outputs, "prediction_hashes": prediction_hashes, "semantic_evidence": evidence}, indent=2), encoding="utf-8")
 print("wrote verified DINO MIL submission", len(sub))
 '''
