@@ -1,0 +1,25 @@
+# Explicit operator opt-in for a bounded, higher-autonomy AUTO_SAFE rollout.
+# This fragment is never loaded by default. Use:
+#   kaggle-agent supervisor --profile controlled-auto-safe --competition <id>
+# Only after reviewing the disposable state root and operational safeguards.
+
+supervisor:
+  enabled: true
+  mode: auto_safe
+  repair:
+    enabled: true
+    classification_min_confidence: 0.80
+    max_attempts_per_incident: 3
+    max_repairs_per_cycle: 5
+    max_repairs_per_day: 20
+    max_changed_source_files: 8
+    max_changed_test_files: 1
+    max_changed_lines: 500
+    allow_dependency_changes: false
+    require_spec_review: true
+    require_code_review: true
+    require_full_tests: true
+  promotion:
+    automatic: true
+  protected:
+    strict: true

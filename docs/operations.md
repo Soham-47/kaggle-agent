@@ -15,3 +15,8 @@ duplicate `/run` cannot launch a second worker. `/status`, `/pause`, and
 Read-only Kaggle reconciliation is safe to exercise. Do not create a real
 competition submission for framework validation. Inspect logs and state under
 the configured mutable state root rather than committing them.
+
+For a controlled rollout, use the explicit `controlled-auto-safe` profile only
+after the provider credential, process-recovery, and rollback checks have
+passed. The profile is inert unless selected on the supervisor command line;
+the repository defaults keep automatic promotion disabled.

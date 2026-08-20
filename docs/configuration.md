@@ -15,3 +15,20 @@ Supported environment overrides include:
 - `KAGGLE_AGENT_SUPERVISOR_DIR` for supervisor state and managed generations.
 - `DEEPSEEK_API_KEY` for official DeepSeek calls.
 - `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` for optional controls.
+
+## Restricted AUTO_SAFE profile
+
+`config/profiles/controlled-auto-safe.yaml` is an explicit operator override.
+It is not loaded by default and does not change the checked-in safe defaults.
+Use it only with a reviewed disposable state root:
+
+```bash
+kaggle-agent supervisor --profile controlled-auto-safe --competition <id>
+```
+
+The profile permits up to five repairs per cycle and twenty per day, allows at
+most three implementation attempts per incident, and permits up to eight
+ordinary source files and 500 changed lines while keeping test changes capped
+at one file. Dependency changes remain disabled, and strict protected-path,
+specification-review, code-review, and full-test gates remain mandatory.
+Unresolved external actions still block promotion.

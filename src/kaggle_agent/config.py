@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import os
+import re
+from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -602,10 +604,25 @@ def load_dotenv(root: Path | None = None) -> None:
             os.environ[key] = val
 
 
-def load_settings(root: Path | None = None) -> Settings:
+def _merge_config(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
+    merged = deepcopy(base)
+    for key, value in override.items():
+        if isinstance(value, dict) and isinstance(merged.get(key), dict):
+            merged[key] = _merge_config(merged[key], value)
+        else:
+            merged[key] = deepcopy(value)
+    return merged
+
+
+def load_settings(root: Path | None = None, *, profile: str | None = None) -> Settings:
     root = root or repo_root()
     path = config_dir(root) / "settings.yaml"
     raw = _read_yaml(path)
+    if profile is not None:
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", profile):
+            raise ConfigError(f"invalid settings profile name: {profile!r}")
+        profile_path = config_dir(root) / "profiles" / f"{profile}.yaml"
+        raw = _merge_config(raw, _read_yaml(profile_path))
     _validate_settings(raw, path)
     return Settings(raw=raw, root=root)
 

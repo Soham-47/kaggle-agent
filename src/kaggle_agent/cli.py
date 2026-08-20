@@ -140,12 +140,13 @@ def _onboard_slug(root, slug):
 def _supervisor(argv: list[str]) -> int:
     p = argparse.ArgumentParser(prog="kaggle-agent supervisor")
     p.add_argument("--competition", default=None)
+    p.add_argument("--profile", choices=["controlled-auto-safe"], default=None)
     p.add_argument("--mode", choices=["off", "observe", "repair_only", "auto_safe"], default=None)
     p.add_argument("--once", action="store_true", default=False)
     args = p.parse_args(argv)
     from kaggle_agent.supervisor.main import run_supervisor
 
-    return run_supervisor(repo_root(), competition=args.competition, wait=True, mode=args.mode)
+    return run_supervisor(repo_root(), competition=args.competition, wait=True, mode=args.mode, profile=args.profile)
 
 
 def _onboard(argv: list[str]) -> int:

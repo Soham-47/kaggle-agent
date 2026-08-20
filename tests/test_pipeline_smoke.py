@@ -2,7 +2,7 @@ from pathlib import Path
 
 from kaggle_agent.pipeline.smoke import run_local_smoke, write_constant_submission
 from kaggle_agent.pipeline.validate import validate_submission_csv
-from kaggle_agent.train.local_smoke import run_competition_smoke
+from kaggle_agent.train.local_smoke import ensure_sample_csv, run_competition_smoke
 from kaggle_agent.config import load_competition
 from kaggle_agent.paths import repo_root
 from kaggle_agent.code.workspace import ensure_pipeline_ready
@@ -109,6 +109,24 @@ def test_run_local_smoke(tmp_path: Path):
     # Baker's must be in header
     header = out.submission_path.read_text(encoding="utf-8").splitlines()[0]
     assert "Baker's" in header
+
+
+def test_sample_csv_download_falls_back_when_kaggle_auth_exits(tmp_path: Path, monkeypatch):
+    import sys
+    import types
+
+    class UnauthenticatedKaggleApi:
+        def authenticate(self):
+            raise SystemExit(1)
+
+    extension = types.ModuleType("kaggle.api.kaggle_api_extended")
+    extension.KaggleApi = UnauthenticatedKaggleApi
+    monkeypatch.setitem(sys.modules, "kaggle", types.ModuleType("kaggle"))
+    monkeypatch.setitem(sys.modules, "kaggle.api", types.ModuleType("kaggle.api"))
+    monkeypatch.setitem(sys.modules, "kaggle.api.kaggle_api_extended", extension)
+    competition = load_competition("rsna_knee", repo_root())
+
+    assert ensure_sample_csv(competition, tmp_path) is None
 
 
 def test_competition_smoke_and_workspace():
