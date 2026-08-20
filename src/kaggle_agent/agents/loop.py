@@ -34,6 +34,9 @@ WRITE_TOOLS = frozenset(
 class StageAgentResult:
     stop_reason: str
     turns: int
+    loop_iterations: int = 0
+    llm_calls: int = 0
+    control_actions: int = 0
     observations: list[str] = field(default_factory=list)
     agent: str = ""
     tool_calls: list[str] = field(default_factory=list)
@@ -47,6 +50,9 @@ class StageAgentResult:
             agent=self.agent,
             stop_reason=self.stop_reason,
             turns=self.turns,
+            loop_iterations=self.loop_iterations,
+            llm_calls=self.llm_calls,
+            control_actions=self.control_actions,
             tool_calls=list(self.tool_calls),
             source_reads=list(self.source_reads),
             writes=list(self.writes),
@@ -219,6 +225,9 @@ class StageAgent:
         self._writes: list[str] = []
         self._rejected_writes: list[str] = []
         self._errors: list[str] = []
+        self._loop_iterations = 0
+        self._llm_calls = 0
+        self._control_actions = 0
 
     def _logmsg(self, msg: str) -> None:
         if self._log is not None:
@@ -232,6 +241,7 @@ class StageAgent:
         turns = 0
         stall = self._stall
         while True:
+            self._loop_iterations += 1
             if time.monotonic() >= deadline:
                 self._logmsg(f"{self._name} agent stop: time")
                 self._trace("agent_stop", reason="time", turns=turns)
@@ -246,6 +256,7 @@ class StageAgent:
                 self._trace("agent_stop", reason="stalled", turns=turns)
                 return self._result("stalled", turns, observations)
             if decision.action in ("force_tool", "force_done"):
+                self._control_actions += 1
                 name, args = decision.tool_name, dict(decision.tool_args)
                 if decision.action == "force_done":
                     if self._accept_done is None or self._accept_done():
@@ -277,6 +288,7 @@ class StageAgent:
                 stall.stall_forced = False
                 continue
             if decision.action == "nudge":
+                self._control_actions += 1
                 nudge_text = decision.nudge_text
                 self._forced_tool_choice = self._force_after_stall
                 if nudge_text not in self._nudges:
@@ -401,6 +413,7 @@ class StageAgent:
             }
         else:
             choice = "auto" if used & WRITE_TOOLS else "required"
+        self._llm_calls += 1
         raw = self._zen.chat(
             self._model,
             [
@@ -432,6 +445,7 @@ class StageAgent:
         if tool != "invalid_json":
             self._reset_invalid_streak()
             return tool, args
+        self._llm_calls += 1
         raw2 = self._zen.chat(
             self._model,
             [
@@ -505,7 +519,7 @@ class StageAgent:
         if result.startswith("search budget exhausted") and self._source_reads:
             self._forced_tool_choice = "write_card"
         if tool in WRITE_TOOLS and tool != "harvest_cards":
-            if result.startswith(("rejected:", "tool error:")):
+            if result.startswith(("rejected:", "tool error:", "invalid tool arguments:")):
                 self._rejected_writes.append(result[:400])
             elif result.strip():
                 self._writes.append(result.strip()[:4000])
@@ -516,6 +530,9 @@ class StageAgent:
         return StageAgentResult(
             stop_reason,
             turns,
+            self._loop_iterations,
+            self._llm_calls,
+            self._control_actions,
             observations,
             agent=self._agent_id,
             tool_calls=list(self._tool_calls),

@@ -13,6 +13,9 @@ class AgentExecution:
     agent: str
     stop_reason: str = ""
     turns: int = 0
+    loop_iterations: int = 0
+    llm_calls: int = 0
+    control_actions: int = 0
     tool_calls: list[str] = field(default_factory=list)
     source_reads: list[str] = field(default_factory=list)
     writes: list[str] = field(default_factory=list)

@@ -83,6 +83,8 @@ def test_no_arg_tool_executes_once():
 
     assert calls == 1
     assert out.tool_calls == ["inspect_state"]
+    assert out.llm_calls == 2  # tool decision plus the explicit done decision
+    assert out.loop_iterations >= 2
 
 
 def test_optional_argument_and_kwargs_tools_keep_working():
@@ -134,3 +136,26 @@ def test_forced_tool_uses_same_single_invocation_guard():
 
     assert calls == 0
     assert any(error.startswith("invalid tool arguments:") for error in out.errors)
+
+
+def test_nudge_is_counted_as_control_action_not_llm_call():
+    class RepeatingZen:
+        last_tool_calls: list = []
+
+        def chat(self, model, messages, **kwargs):  # noqa: ANN001
+            return json.dumps({"tool": "inspect_state", "args": {}})
+
+    agent = StageAgent(
+        RepeatingZen(),
+        "model",
+        {"inspect_state": lambda: "ok"},
+        ResearchAgentSettings(max_minutes=5, max_tool_turns=4),
+        system="test",
+        stall_after=1,
+        stall_nudge="please finish",
+    )
+    out = agent.run("context")
+
+    assert out.control_actions >= 1
+    assert out.llm_calls >= 1
+    assert out.turns <= 4
