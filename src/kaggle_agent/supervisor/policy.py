@@ -47,6 +47,17 @@ class RepairPolicy:
                 violations.append(normalized)
         return tuple(violations)
 
+    def allowed_path_violations(
+        self, paths: list[str] | tuple[str, ...], allowed_paths: tuple[str, ...]
+    ) -> tuple[str, ...]:
+        allowed = tuple(path.replace("\\", "/").lstrip("./").rstrip("/") for path in allowed_paths)
+        violations = []
+        for path in paths:
+            normalized = path.replace("\\", "/").lstrip("./")
+            if not any(normalized == prefix or normalized.startswith(prefix + "/") for prefix in allowed):
+                violations.append(normalized)
+        return tuple(violations)
+
     def scan_text(self, text: str) -> tuple[str, ...]:
         checks = {
             "eval": "eval(", "exec": "exec(", "os.system": "os.system(",
@@ -59,6 +70,8 @@ class RepairPolicy:
     def scan_test_diff(self, diff: str) -> tuple[str, ...]:
         violations = []
         if "+ assert True" in diff or "+pytest.skip" in diff or "+    pytest.skip" in diff:
+            violations.append("test_weakening")
+        if any(marker in diff for marker in ("+@pytest.mark.xfail", "+ @pytest.mark.xfail", "+@pytest.mark.skip", "+ @pytest.mark.skip")):
             violations.append("test_weakening")
         if any(line.startswith("-") and "assert" in line for line in diff.splitlines()):
             violations.append("test_weakening")

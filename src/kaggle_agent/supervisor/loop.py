@@ -57,6 +57,13 @@ class Supervisor:
             adopted = next((item for item in recovery if item.action == "ADOPT"), None)
             if adopted is not None:
                 return SupervisorRun("ADOPTED", worker_id=adopted.worker_id, reason="owned worker heartbeat is fresh")
+            blocked = next((item for item in recovery if item.action == "TERMINATE_OR_RECONCILE"), None)
+            if blocked is not None:
+                return SupervisorRun(
+                    "RECOVERY_BLOCKED",
+                    worker_id=blocked.worker_id,
+                    reason="live worker ownership or heartbeat is unsafe; reconcile before launching another worker",
+                )
             if config.mode == "auto_safe":
                 try:
                     RepairPolicy().require_clean_auto_safe(self.root)

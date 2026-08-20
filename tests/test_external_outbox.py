@@ -7,6 +7,7 @@ from kaggle_agent.autonomy.outbox import (
     submission_key,
 )
 from kaggle_agent.kaggle_api.models import SubmissionRow
+import pytest
 
 
 def test_outbox_deduplicates_unresolved_external_action_and_records_reconciliation(tmp_path):
@@ -69,6 +70,33 @@ def test_reconciliation_accepts_only_exact_kernel_and_submission_evidence(tmp_pa
     )
     assert accepted.status == "accepted"
     assert accepted.external_ref == "s2"
+
+
+def test_prepared_intent_is_reconciled_before_a_second_send(tmp_path):
+    outbox = ExternalActionOutbox(tmp_path)
+    kernel = outbox.enqueue(
+        action="kernel_push", idempotency_key="prepared-kernel",
+        payload={"kernel_ref": "owner/prepared"},
+    )
+    accepted_kernel = reconcile_with_kaggle(
+        outbox, kernel, kernel_status=lambda _: "RUNNING", submissions=lambda _: []
+    )
+    assert accepted_kernel.status == "accepted"
+    assert outbox.enqueue(
+        action="kernel_push", idempotency_key="prepared-kernel", payload={}
+    ).status == "accepted"
+
+    marker = submission_marker("demo", "prepared-output")
+    submit = outbox.enqueue(
+        action="submit", idempotency_key="prepared-submit",
+        payload={"competition": "demo", "reconciliation_marker": marker},
+    )
+    accepted_submit = reconcile_with_kaggle(
+        outbox, submit, kernel_status=lambda _: "",
+        submissions=lambda _: [SubmissionRow("s1", "x.csv", "complete", description=marker)],
+    )
+    assert accepted_submit.status == "accepted"
+    assert outbox.enqueue(action="submit", idempotency_key="prepared-submit", payload={}).status == "accepted"
 
 
 def test_external_keys_are_stable_across_stage_cycles():
@@ -189,3 +217,87 @@ def test_submission_crash_before_or_after_send_never_reissues_same_key(tmp_path)
     )
     assert accepted.status == "accepted"
     assert outbox.enqueue(action="submit", idempotency_key="submission-key", payload={}).status == "accepted"
+
+
+@pytest.mark.parametrize(
+    "boundary, remote_present, expected_sends",
+    [
+        ("before_outbox", False, 1),
+        ("after_outbox_before_send", False, 1),
+        ("after_send_before_persist", True, 0),
+        ("after_persist_before_result", True, 0),
+    ],
+)
+def test_kernel_push_crash_matrix_has_one_logical_mutation(
+    tmp_path, boundary, remote_present, expected_sends
+):
+    outbox = ExternalActionOutbox(tmp_path)
+    sends = []
+    item = None
+    if boundary != "before_outbox":
+        item = outbox.enqueue(
+            action="kernel_push", idempotency_key="matrix-kernel",
+            payload={"kernel_ref": "owner/matrix"},
+        )
+    if boundary == "after_persist_before_result":
+        outbox.mark_sent(item.action_id)
+
+    item = outbox.enqueue(
+        action="kernel_push", idempotency_key="matrix-kernel",
+        payload={"kernel_ref": "owner/matrix"},
+    )
+    if item.status in {"prepared", "sent", "unknown"}:
+        item = reconcile_with_kaggle(
+            outbox, item,
+            kernel_status=lambda _: "RUNNING" if remote_present else "",
+            submissions=lambda _: [],
+        )
+    if item.status != "accepted":
+        sends.append("kernel_push")
+        outbox.mark_sent(item.action_id)
+        outbox.reconcile(item.action_id, status="accepted", external_ref="owner/matrix")
+
+    assert len(sends) == expected_sends
+    assert outbox.get(item.action_id).status == "accepted"
+
+
+@pytest.mark.parametrize(
+    "boundary, remote_present, expected_sends",
+    [
+        ("before_outbox", False, 1),
+        ("after_outbox_before_send", False, 1),
+        ("after_send_before_persist", True, 0),
+        ("after_persist_before_result", True, 0),
+    ],
+)
+def test_submission_crash_matrix_has_one_logical_mutation(
+    tmp_path, boundary, remote_present, expected_sends
+):
+    outbox = ExternalActionOutbox(tmp_path)
+    marker = submission_marker("demo", "matrix-output")
+    sends = []
+    item = None
+    if boundary != "before_outbox":
+        item = outbox.enqueue(
+            action="submit", idempotency_key="matrix-submit",
+            payload={"competition": "demo", "reconciliation_marker": marker},
+        )
+    if boundary == "after_persist_before_result":
+        outbox.mark_sent(item.action_id)
+
+    item = outbox.enqueue(
+        action="submit", idempotency_key="matrix-submit",
+        payload={"competition": "demo", "reconciliation_marker": marker},
+    )
+    if item.status in {"prepared", "sent", "unknown"}:
+        item = reconcile_with_kaggle(
+            outbox, item, kernel_status=lambda _: "",
+            submissions=lambda _: [SubmissionRow("s1", "x.csv", "complete", description=marker)] if remote_present else [],
+        )
+    if item.status != "accepted":
+        sends.append("submit")
+        outbox.mark_sent(item.action_id)
+        outbox.reconcile(item.action_id, status="accepted", external_ref="s1")
+
+    assert len(sends) == expected_sends
+    assert outbox.get(item.action_id).status == "accepted"

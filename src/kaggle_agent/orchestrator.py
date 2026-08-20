@@ -1820,7 +1820,7 @@ class Orchestrator:
                                 "package_fingerprint": kernel_package_fingerprint(package.folder),
                             },
                         )
-                        if push_action.status in {"sent", "unknown"}:
+                        if push_action.status in {"prepared", "sent", "unknown"}:
                             push_action = self._reconcile_outbox_action(push_action)
                         if push_action.status == "accepted":
                             # The logical push already happened before a prior
@@ -2409,7 +2409,7 @@ class Orchestrator:
                     "reconciliation_marker": marker,
                 },
             )
-            if outbox_action.status in {"sent", "unknown"}:
+            if outbox_action.status in {"prepared", "sent", "unknown"}:
                 outbox_action = self._reconcile_outbox_action(outbox_action)
             if outbox_action.status == "accepted":
                 result.submit_ok = True

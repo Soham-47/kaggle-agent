@@ -26,6 +26,7 @@ def test_policy_rejects_test_weakening_and_unsafe_constructs():
     assert "test_weakening" in policy.scan_test_diff("- assert value == 1\n+ assert True\n")
     violations = policy.scan_text("eval(user_text)\nos.system('x')\nexcept Exception: pass")
     assert {"eval", "os.system", "broad_swallow"}.issubset(violations)
+    assert "test_weakening" in policy.scan_test_diff("+ @pytest.mark.xfail(reason='hide incident')\n")
 
 
 def test_worktree_manager_uses_exact_base_and_commits(tmp_path: Path):
@@ -40,7 +41,9 @@ def test_worktree_manager_uses_exact_base_and_commits(tmp_path: Path):
     manager = WorktreeManager(root, tmp_path / "state")
     worktree = manager.create("incident-1", 1, base)
     (worktree / "x.py").write_text("x = 2\n", encoding="utf-8")
+    (worktree / "new.py").write_text("new = True\n", encoding="utf-8")
     assert "x.py" in manager.status(worktree)
+    assert "new.py" in manager.diff(worktree)
     sha = manager.commit(worktree, "repair(incident-1): fix")
     assert len(sha) == 40
     manager.destroy(worktree)
@@ -54,3 +57,9 @@ def test_impact_and_resume_are_conservative():
     assert invalidated_stages("KERNEL_TRAIN") == ("KERNEL_TRAIN", "VALIDATE_SUB", "TELEGRAM_APPROVE", "SUBMIT", "FEEDBACK", "HEAL", "REPORT")
     request = ResumeRequest("c", "i", "old", "new", "KERNEL_TRAIN", "KERNEL_TRAIN", ("CODE",), invalidated_stages("KERNEL_TRAIN"), ())
     assert request.resume_from_stage == "KERNEL_TRAIN"
+
+
+def test_policy_enforces_repair_spec_allowed_paths():
+    policy = RepairPolicy()
+    assert policy.allowed_path_violations(["src/module.py", "tests/test_module.py"], ("src", "tests")) == ()
+    assert policy.allowed_path_violations(["README.md"], ("src", "tests")) == ("README.md",)

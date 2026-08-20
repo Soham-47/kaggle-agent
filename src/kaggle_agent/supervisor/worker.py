@@ -28,6 +28,10 @@ class WorkerLauncher:
         environment = os.environ.copy()
         environment["KAGGLE_AGENT_SUPERVISOR_DIR"] = str(self.layout.state_root)
         environment["KAGGLE_AGENT_STATE_ROOT"] = str(self.layout.state_root)
+        source_path = str((cwd or self.layout.code_root) / "src")
+        environment["PYTHONPATH"] = source_path + (
+            os.pathsep + environment["PYTHONPATH"] if environment.get("PYTHONPATH") else ""
+        )
         command = [sys.executable, "-m", "kaggle_agent.supervisor.worker", "--request", str(request_path)]
         return subprocess.Popen(command, cwd=str(cwd or self.layout.code_root), env=environment, text=True)
 

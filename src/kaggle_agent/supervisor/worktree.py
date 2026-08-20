@@ -40,6 +40,10 @@ class WorktreeManager:
         return self._git(worktree, "status", "--porcelain").stdout
 
     def diff(self, worktree: Path) -> str:
+        # Intent-to-add makes newly created source/tests visible to the same
+        # policy and review diff as edits to tracked files. It does not stage
+        # their content for the supervisor's later commit.
+        self._git(worktree, "add", "--intent-to-add", "--all")
         return self._git(worktree, "diff", "--no-ext-diff").stdout
 
     def commit(self, worktree: Path, message: str) -> str:

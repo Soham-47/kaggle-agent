@@ -29,3 +29,27 @@ def test_command_queue_is_durable_and_control_is_safe_by_default(tmp_path: Path)
     assert queue.paused() is True
     queue.set_paused(False)
     assert queue.paused() is False
+
+
+def test_telegram_duplicate_run_is_durable_and_status_reports_supervisor_owner(tmp_path: Path, monkeypatch):
+    save_state(AgentState(paused=False, competition="demo"), tmp_path)
+    queue = SupervisorCommandQueue(RuntimeLayout.for_repo(tmp_path, tmp_path / "state"))
+    monkeypatch.setattr(commands, "_supervisor_queue", lambda root: queue)
+
+    first = commands.handle_command("/run dry", root=tmp_path)
+    duplicate = commands.handle_command("/run dry", root=tmp_path)
+    status = commands.handle_command("/status", root=tmp_path)
+
+    assert first.ok and duplicate.ok
+    assert [item.command for item in queue.pending()] == ["run", "run"]
+    assert "Queued commands: 2" in status.reply
+    assert "supervisor" in status.reply.lower()
+
+
+def test_telegram_commands_survive_supervisor_reinstantiation(tmp_path: Path):
+    layout = RuntimeLayout.for_repo(tmp_path, tmp_path / "state")
+    first = SupervisorCommandQueue(layout)
+    first.enqueue("run", {"dry_run": True})
+    second = SupervisorCommandQueue(layout)
+
+    assert [item.command for item in second.pending()] == ["run"]

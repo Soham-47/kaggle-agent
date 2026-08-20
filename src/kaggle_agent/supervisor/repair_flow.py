@@ -58,7 +58,11 @@ class RepairCoordinator:
             diff = self.worktrees.diff(worktree)
             paths = self._changed_paths(worktree)
             changed_lines = self._changed_lines(worktree)
-            policy_findings = self.policy.check_diff(paths, changed_lines) + self.policy.semantic_violations(diff)
+            policy_findings = (
+                self.policy.check_diff(paths, changed_lines)
+                + self.policy.allowed_path_violations(paths, spec.allowed_paths)
+                + self.policy.semantic_violations(diff)
+            )
             test_findings = self.policy.scan_test_diff(diff)
             verification = self.verifier.verify(worktree, spec.verification_commands)
             review = reviewer(incident, spec, diff, verification)
@@ -69,7 +73,7 @@ class RepairCoordinator:
                 protected_semantics_pass=not self.policy.semantic_violations(diff),
                 reproduction_pass=verification.passed, focused_tests_pass=verification.passed,
                 subsystem_tests_pass=verification.passed, full_tests_pass=verification.passed,
-                diff_limits_pass=not any(item in policy_findings for item in ("source_file_limit", "test_file_limit", "changed_line_limit", "dependency_change")),
+                diff_limits_pass=bool(diff.strip()) and not policy_findings,
                 static_safety_pass=not self.policy.scan_text(diff), test_integrity_pass=not test_findings,
                 review_approved=review.verdict is ReviewVerdict.APPROVE and not review.blocking_findings,
                 external_state_safe=True, repair_budget_available=True,

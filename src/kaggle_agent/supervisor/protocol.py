@@ -48,6 +48,8 @@ class WorkerRequest:
         raw["revision"] = RuntimeRevision(**revision) if isinstance(revision, dict) else None
         resume = raw.get("resume_request")
         if isinstance(resume, dict):
+            for field in ("preserved_stages", "invalidated_stages", "external_refs"):
+                resume[field] = tuple(resume.get(field, ()))
             resume = ResumeRequest(
                 **{**resume, "replay_epochs": tuple(tuple(item) for item in resume.get("replay_epochs", ()))},
             )

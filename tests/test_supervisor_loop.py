@@ -27,3 +27,19 @@ def test_auto_safe_refuses_dirty_checkout(tmp_path: Path, monkeypatch):
     monkeypatch.setattr("kaggle_agent.supervisor.policy.RepairPolicy.require_clean_auto_safe", refuse)
     result = Supervisor(settings, tmp_path).run_once(wait=False)
     assert result.status == "DIRTY_SOURCE_BASELINE"
+
+
+def test_supervisor_does_not_start_replacement_for_live_unadoptable_worker(tmp_path: Path, monkeypatch):
+    settings = _settings(tmp_path, "observe")
+    monkeypatch.setattr(
+        Supervisor,
+        "recover_startup",
+        lambda self, timeout_seconds: (type("Recovery", (), {"action": "TERMINATE_OR_RECONCILE", "worker_id": "w1"})(),),
+    )
+    started = []
+    monkeypatch.setattr("kaggle_agent.supervisor.loop.WorkerLauncher.start", lambda *args, **kwargs: started.append(True))
+
+    result = Supervisor(settings, tmp_path).run_once(wait=False)
+
+    assert result.status == "RECOVERY_BLOCKED"
+    assert started == []
