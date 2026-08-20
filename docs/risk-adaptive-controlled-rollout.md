@@ -63,8 +63,26 @@ case also exercises `RepairCoordinator` and verifies that the implementer
 callback is never invoked and no candidate is created.
 
 The prior real DeepSeek synthetic AUTO_SAFE canary remains the basis for
-`AUTO_SAFE_CANARY: READY`; this phase did not rerun provider calls because no
-DeepSeek credential is available in the clean certification worktree.
+`AUTO_SAFE_CANARY: READY`. With the replacement credential loaded only in the
+validation subprocess, the production role smoke passed for classifier,
+spec author, spec reviewer, implementer, and code reviewer. The result was:
+
+```text
+classifier=CODE_DEFECT
+spec=smoke-repair
+spec_review=APPROVE
+implementer=verified candidate is ready
+code_review=APPROVE
+```
+
+The real disposable `REPAIR_ONLY` coordinator path also passed against a
+repository-shaped synthetic project: classification and spec review approved,
+the implementer produced a one-file patch on its first bounded attempt,
+focused verification passed, the independent code review approved, and a
+candidate commit was persisted. The active generation remained unchanged.
+The initial fixture attempts failed closed on generated `uv.lock`/bytecode,
+missing `pythonpath`, and missing package metadata; these were corrected in
+the disposable fixture only and did not require production permission changes.
 
 ## Process-kill and rollback validation
 
@@ -99,7 +117,8 @@ incident handling, and risk metrics. REPAIR_ONLY tests exercised candidate
 creation, verification, independent review, and the unchanged active
 generation.
 
-DeepSeek credential: **UNAVAILABLE**.
+DeepSeek credential: **AVAILABLE** through the normal local dotenv path; the
+value was not printed or persisted by validation.
 Telegram credentials: **UNAVAILABLE**.
 
 Live Telegram ownership tests were not run. This is a provider/environment
@@ -133,6 +152,8 @@ submission was created for this certification.
 ## Test and code-review results
 
 Focused risk/repair/validation tests: `35 passed`.
+Real DeepSeek role smoke: `PASS` (all five roles, separate sessions).
+Real disposable REPAIR_ONLY coordinator: `PASS` (candidate persisted, no promotion).
 Controlled canary and subprocess tests: `8 passed`.
 Supervisor/recovery/replay/outbox/Telegram suite: `190 passed`.
 Full non-integration suite: `692 passed, 1 deselected`.
@@ -157,9 +178,11 @@ RISK_ADAPTIVE_AUTO_SAFE: CONDITIONAL
 UNRESTRICTED_AUTO_SAFE: NOT READY
 ```
 
-`RISK_ADAPTIVE_AUTO_SAFE` is CONDITIONAL because this environment could not
-run real DeepSeek role sessions, live Telegram ownership, or real configured
-worker shadow cycles. The deterministic policy, canaries, process recovery,
-rollback, and read-only Kaggle boundary are validated. Controlled rollout may
-proceed only after the replacement DeepSeek/Telegram credentials and a real
-competition configuration are supplied through the normal local paths.
+`RISK_ADAPTIVE_AUTO_SAFE` remains CONDITIONAL because live Telegram ownership
+and real configured worker shadow cycles were not run in this validation
+worktree. DeepSeek provider execution is no longer the blocker: all five role
+smoke sessions and the disposable real REPAIR_ONLY coordinator path passed.
+The deterministic policy, canaries, process recovery, rollback, and read-only
+Kaggle boundary are validated. Controlled rollout may proceed after the
+Telegram credential and a real competition configuration are supplied through
+the normal local paths.
