@@ -111,7 +111,7 @@ def copy_min_workspace(
     competition_config.write_text(text, encoding="utf-8")
     (root / "memory").mkdir()
     for name in ("MEMORY.md", "COMPETITION.md", "state.md", "research.md"):
-        shutil.copy(real / "memory" / name, root / "memory" / name)
+        shutil.copy(real / "memory" / "templates" / name, root / "memory" / name)
     (root / "memory" / "experiments").mkdir()
     (root / "memory" / "daily").mkdir()
     write_min_study_csv(root)

@@ -31,7 +31,7 @@ def _copy_min(root: Path, real: Path) -> None:
     )
     (root / "memory").mkdir()
     for name in ("MEMORY.md", "COMPETITION.md", "state.md", "research.md"):
-        shutil.copy(real / "memory" / name, root / "memory" / name)
+        shutil.copy(real / "memory" / "templates" / name, root / "memory" / name)
     (root / "memory" / "experiments").mkdir()
     (root / "memory" / "daily").mkdir()
     save_state(AgentState(paused=False, competition="rsna_knee"), root)

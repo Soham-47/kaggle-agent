@@ -1,6 +1,6 @@
 # COMPETITION
 
-Active contest only. Replace this file when you switch competitions.
+Active contest only. The agent creates this file when a competition is initialized.
 
 | Field | Value |
 |-------|--------|

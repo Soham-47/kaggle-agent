@@ -105,7 +105,7 @@ def test_mcp_and_api_failure_never_falls_back_to_browser(tmp_path: Path, monkeyp
     _disable_research_fleet(root)
     (root / "memory").mkdir()
     for name in ("MEMORY.md", "COMPETITION.md", "state.md", "research.md"):
-        shutil.copy(real / "memory" / name, root / "memory" / name)
+        shutil.copy(real / "memory" / "templates" / name, root / "memory" / name)
     (root / "memory" / "experiments").mkdir()
     (root / "memory" / "daily").mkdir()
     from kaggle_agent.state_md import AgentState, save_state
@@ -175,7 +175,7 @@ def test_mcp_success_skips_api(tmp_path: Path, monkeypatch):
     _disable_research_fleet(root)
     (root / "memory").mkdir()
     for name in ("MEMORY.md", "COMPETITION.md", "state.md", "research.md"):
-        shutil.copy(real / "memory" / name, root / "memory" / name)
+        shutil.copy(real / "memory" / "templates" / name, root / "memory" / name)
     (root / "memory" / "experiments").mkdir()
     (root / "memory" / "daily").mkdir()
     from kaggle_agent.state_md import AgentState, save_state
@@ -236,7 +236,7 @@ def test_live_submit_uses_api_not_mcp(tmp_path: Path, monkeypatch):
     _disable_research_fleet(root)
     (root / "memory").mkdir()
     for name in ("MEMORY.md", "COMPETITION.md", "state.md", "research.md"):
-        shutil.copy(real / "memory" / name, root / "memory" / name)
+        shutil.copy(real / "memory" / "templates" / name, root / "memory" / name)
     (root / "memory" / "experiments").mkdir()
     (root / "memory" / "daily").mkdir()
     from kaggle_agent.state_md import AgentState, save_state

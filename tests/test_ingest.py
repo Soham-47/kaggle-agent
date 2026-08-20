@@ -1,9 +1,20 @@
+from pathlib import Path
+
 from kaggle_agent.memory.ingest import CORE, build_context_pack, retrieve
-from kaggle_agent.paths import repo_root
 
 
-def test_context_pack_is_lean():
-    pack = build_context_pack(repo_root())
+def _template_memory(root: Path) -> Path:
+    memory = root / "memory"
+    memory.mkdir()
+    source = Path(__file__).resolve().parents[1] / "memory" / "templates"
+    for name in CORE:
+        (memory / name).write_text((source / name).read_text(encoding="utf-8"), encoding="utf-8")
+    return memory
+
+
+def test_context_pack_is_lean(tmp_path):
+    _template_memory(tmp_path)
+    pack = build_context_pack(tmp_path)
     assert CORE == ("MEMORY.md", "COMPETITION.md", "state.md", "research.md")
     for name in CORE:
         assert name in pack.sections
@@ -13,10 +24,11 @@ def test_context_pack_is_lean():
     assert pack.missing == []
 
 
-def test_prompt_block():
-    block = build_context_pack(repo_root()).as_prompt_block()
+def test_prompt_block(tmp_path):
+    _template_memory(tmp_path)
+    block = build_context_pack(tmp_path).as_prompt_block()
     assert "## MEMORY.md" in block
-    assert "rsna" in block.lower() or "RSNA" in block
+    assert "active contest" in block.lower()
 
 
 def test_context_pack_prefers_digest_and_source_cards(tmp_path):
@@ -78,13 +90,9 @@ def test_scored_experiments_preferred(tmp_path):
 
 
 def test_competition_memory_records_ground_truth():
-    from kaggle_agent.paths import repo_root
-
-    text = (repo_root() / "memory" / "COMPETITION.md").read_text(encoding="utf-8")
-    assert "## Ground truth" in text
-    assert "58" in text
-    assert "reports" in text
-    assert "metadata ranker" in text
+    text = (Path(__file__).resolve().parents[1] / "memory" / "templates" / "COMPETITION.md").read_text(encoding="utf-8")
+    assert "my_contest" in text
+    assert "rsna" not in text.lower()
 
 
 def test_retrieve_ranks_token_overlap_when_phrase_order_differs(tmp_path):
