@@ -1026,6 +1026,7 @@ class Orchestrator:
                             "search": "source_search",
                             "fetch_url": "url",
                             "pull_kernel": "kaggle_kernel",
+                            "harvest_cards": "source_harvest",
                         },
                         tracer=self._tracer,
                     ),
@@ -1033,6 +1034,15 @@ class Orchestrator:
             )
         out = run_fleet(agents, log=lambda msg: append_daily_log(msg, self.root))
         result.research_passes = max(1, out.turns)
+        # The bounded harvest fallback materializes shared, source-backed cards
+        # when no LLM is available. Attribute those artifacts to the executions
+        # that explicitly performed the typed harvest operation so verification
+        # remains evidence-based without requiring a synthetic per-agent write.
+        cards = sorted(dest.glob("source-*.md")) if dest.is_dir() else []
+        harvested_paths = [str(path) for path in cards]
+        for execution in out.executions:
+            if not execution.writes and "harvest_cards" in execution.tool_calls:
+                execution.writes = list(harvested_paths)
         research_verification = verify_research_fleet(out.executions, roster)
         result.research_verified = research_verification.ok
         result.research_verification_detail = research_verification.detail

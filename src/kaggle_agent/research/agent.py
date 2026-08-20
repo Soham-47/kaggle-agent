@@ -79,5 +79,10 @@ class ResearchAgent(StageAgent):
                 "search": "source_search",
                 "fetch_url": "url",
                 "pull_kernel": "kaggle_kernel",
+                # harvest_cards is a bounded source-acquisition operation: it
+                # reads the Kaggle snapshot/cache and materializes source cards.
+                # Register it explicitly so fallback harvesting remains typed
+                # evidence rather than being inferred from a write alone.
+                "harvest_cards": "source_harvest",
             },
         )

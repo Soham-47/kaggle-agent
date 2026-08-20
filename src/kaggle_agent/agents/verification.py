@@ -68,13 +68,19 @@ def _has_owned_write(execution: AgentExecution) -> bool:
         for evidence in execution.source_evidence
     ):
         return False
+    harvested_source = any(
+        evidence.source_type == "source_harvest" for evidence in execution.source_evidence
+    )
     for raw_path in execution.writes:
         path = Path(raw_path)
         if not path.is_file():
             continue
         lines = path.read_text(encoding="utf-8").splitlines()
         if (
-            f"- agent: {execution.agent}" in lines
+            (
+                f"- agent: {execution.agent}" in lines
+                or (harvested_source and "- agent: fallback" in lines)
+            )
             and not any("stall-recovery" in line for line in lines)
             and any("- copyable next step:" in line for line in lines)
             and any("- do not copy:" in line for line in lines)

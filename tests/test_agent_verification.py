@@ -216,6 +216,31 @@ def test_research_verification_rejects_card_without_source_evidence(tmp_path: Pa
     assert not verdict.ok
 
 
+def test_harvested_fallback_card_requires_typed_source_evidence(tmp_path: Path):
+    card = tmp_path / "source-user-baseline.md"
+    card.write_text(
+        "# card\n- agent: fallback\n- ref: kaggle/baseline\n"
+        "- copyable next step: inspect\n- do not copy: unknown\n",
+        encoding="utf-8",
+    )
+    evidence = SourceEvidence(
+        "harvest_cards", "source_harvest", content_hash="abc123"
+    )
+    assert verify_research_fleet(
+        [
+            AgentExecution(
+                agent="notebooks",
+                writes=[str(card)],
+                source_evidence=[evidence],
+            )
+        ],
+        ["notebooks"],
+    ).ok
+    assert not verify_research_fleet(
+        [AgentExecution(agent="notebooks", writes=[str(card)])], ["notebooks"]
+    ).ok
+
+
 def test_plan_and_code_verification_require_stage_artifacts():
     assert verify_plan_stage(wrote=True, judge_ready=True).ok
     assert not verify_plan_stage(wrote=False, judge_ready=True).ok
