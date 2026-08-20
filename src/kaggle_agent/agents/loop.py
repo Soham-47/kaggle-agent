@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import inspect
 import re
 import time
 from dataclasses import dataclass, field
@@ -257,10 +258,7 @@ class StageAgent:
                     if fn is None:
                         obs = f"unknown tool {name}"
                     else:
-                        try:
-                            obs = str(fn(**args))
-                        except Exception as exc:  # noqa: BLE001
-                            obs = f"tool error: {exc}"
+                        obs = self._invoke_tool(fn, args)
                 turns += 1
                 observations.append(obs[:4000])
                 transcript.append(f"tool={name} args={args} result={obs[:2000]}")
@@ -311,15 +309,7 @@ class StageAgent:
             if fn is None:
                 obs = f"unknown tool {tool}"
             else:
-                try:
-                    obs = str(fn(**args))
-                except TypeError:
-                    try:
-                        obs = str(fn())
-                    except Exception as exc:  # noqa: BLE001
-                        obs = f"tool error: {exc}"
-                except Exception as exc:  # noqa: BLE001
-                    obs = f"tool error: {exc}"
+                obs = self._invoke_tool(fn, args)
             turns += 1
             observations.append(obs[:4000])
             transcript.append(f"tool={tool} args={args} result={obs[:2000]}")
@@ -473,15 +463,36 @@ class StageAgent:
             return
         self._tracer.emit(kind, stage=self._name, agent=self._agent_id, **fields)
 
+    @staticmethod
+    def _invoke_tool(fn: ToolFn, args: dict[str, Any]) -> str:
+        """Validate a call contract before executing a tool exactly once."""
+        try:
+            signature = inspect.signature(fn)
+        except (TypeError, ValueError):
+            # Some extension/builtin callables have no inspectable signature.
+            # Execute once; an exception is an execution error, never a reason
+            # to retry with a different argument set.
+            signature = None
+        if signature is not None:
+            try:
+                signature.bind(**args)
+            except TypeError as exc:
+                return f"invalid tool arguments: {exc}"
+        try:
+            return str(fn(**args))
+        except Exception as exc:  # noqa: BLE001
+            return f"tool error: {exc}"
+
     def _record_tool(self, tool: str, result: str) -> None:
         if tool in {"done", "no_llm", "invalid_json"}:
             return
         self._tool_calls.append(tool)
-        if result.startswith("tool error:"):
+        if result.startswith(("tool error:", "invalid tool arguments:")):
             self._errors.append(result)
         if tool not in WRITE_TOOLS and result.strip() and not result.startswith(
             (
                 "tool error:",
+                "invalid tool arguments:",
                 "refuse:",
                 "no source",
                 "no kaggle",
