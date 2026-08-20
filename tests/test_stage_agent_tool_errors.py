@@ -159,3 +159,25 @@ def test_nudge_is_counted_as_control_action_not_llm_call():
     assert out.control_actions >= 1
     assert out.llm_calls >= 1
     assert out.turns <= 4
+
+
+def test_registered_source_tool_emits_typed_evidence_only_for_content():
+    zen = _ScriptedZen(
+        [
+            {"tool": "fetch_url", "args": {"url": "https://example.test"}},
+            {"tool": "done", "args": {}},
+        ]
+    )
+    agent = StageAgent(
+        zen,
+        "model",
+        {"fetch_url": lambda url: "source body"},
+        ResearchAgentSettings(max_minutes=5, max_tool_turns=5),
+        system="test",
+        source_tools={"fetch_url": "url"},
+    )
+    out = agent.run("context")
+
+    assert len(out.source_evidence) == 1
+    assert out.source_evidence[0].source_type == "url"
+    assert out.source_evidence[0].content_hash

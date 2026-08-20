@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import inspect
 import re
@@ -11,7 +12,7 @@ from typing import Any, Callable, Literal
 
 from kaggle_agent.config import ResearchAgentSettings
 from kaggle_agent.llm.zen_client import ZenClient
-from kaggle_agent.agents.verification import AgentExecution
+from kaggle_agent.agents.verification import AgentExecution, SourceEvidence
 
 StageAgentConfig = ResearchAgentSettings
 LogFn = Callable[[str], None]
@@ -41,6 +42,7 @@ class StageAgentResult:
     agent: str = ""
     tool_calls: list[str] = field(default_factory=list)
     source_reads: list[str] = field(default_factory=list)
+    source_evidence: list[SourceEvidence] = field(default_factory=list)
     writes: list[str] = field(default_factory=list)
     rejected_writes: list[str] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
@@ -55,6 +57,7 @@ class StageAgentResult:
             control_actions=self.control_actions,
             tool_calls=list(self.tool_calls),
             source_reads=list(self.source_reads),
+            source_evidence=list(self.source_evidence),
             writes=list(self.writes),
             rejected_writes=list(self.rejected_writes),
             errors=list(self.errors),
@@ -191,6 +194,7 @@ class StageAgent:
         | Callable[[int], tuple[str, dict[str, Any]] | None]
         | None = None,
         force_after_stall: str | None = None,
+        source_tools: dict[str, str] | None = None,
     ) -> None:
         self._zen = zen
         self._model = model
@@ -225,6 +229,8 @@ class StageAgent:
         self._writes: list[str] = []
         self._rejected_writes: list[str] = []
         self._errors: list[str] = []
+        self._source_tools = dict(source_tools or {})
+        self._source_evidence: list[SourceEvidence] = []
         self._loop_iterations = 0
         self._llm_calls = 0
         self._control_actions = 0
@@ -516,6 +522,31 @@ class StageAgent:
             )
         ):
             self._source_reads.append(tool)
+        if (
+            tool in self._source_tools
+            and result.strip()
+            and not result.startswith(
+                (
+                    "tool error:",
+                    "invalid tool arguments:",
+                    "refuse:",
+                    "no source",
+                    "no kaggle",
+                    "missing",
+                    "none",
+                    "search budget exhausted",
+                )
+            )
+        ):
+            uri_match = re.search(r"https?://\S+", result)
+            self._source_evidence.append(
+                SourceEvidence(
+                    tool=tool,
+                    source_type=self._source_tools[tool],
+                    uri=uri_match.group(0).rstrip(".,)") if uri_match else None,
+                    content_hash=hashlib.sha256(result.encode("utf-8")).hexdigest(),
+                )
+            )
         if result.startswith("search budget exhausted") and self._source_reads:
             self._forced_tool_choice = "write_card"
         if tool in WRITE_TOOLS and tool != "harvest_cards":
@@ -537,6 +568,7 @@ class StageAgent:
             agent=self._agent_id,
             tool_calls=list(self._tool_calls),
             source_reads=list(self._source_reads),
+            source_evidence=list(self._source_evidence),
             writes=list(self._writes),
             rejected_writes=list(self._rejected_writes),
             errors=list(self._errors),

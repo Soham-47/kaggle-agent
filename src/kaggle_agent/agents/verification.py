@@ -4,6 +4,15 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
+@dataclass(frozen=True)
+class SourceEvidence:
+    """Typed proof that a registered research source tool returned content."""
+
+    tool: str
+    source_type: str
+    source_id: str | None = None
+    uri: str | None = None
+    content_hash: str | None = None
 
 
 @dataclass
@@ -18,6 +27,7 @@ class AgentExecution:
     control_actions: int = 0
     tool_calls: list[str] = field(default_factory=list)
     source_reads: list[str] = field(default_factory=list)
+    source_evidence: list[SourceEvidence] = field(default_factory=list)
     writes: list[str] = field(default_factory=list)
     rejected_writes: list[str] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
@@ -43,6 +53,7 @@ def verify_research_fleet(
         detail = {
             name: {
                 "source_reads": by_agent.get(name, AgentExecution(name)).source_reads,
+                "source_evidence": by_agent.get(name, AgentExecution(name)).source_evidence,
                 "writes": by_agent.get(name, AgentExecution(name)).writes,
             }
             for name in missing
@@ -52,7 +63,10 @@ def verify_research_fleet(
 
 
 def _has_owned_write(execution: AgentExecution) -> bool:
-    if not execution.source_reads:
+    if not any(
+        evidence.content_hash or evidence.uri or evidence.source_id
+        for evidence in execution.source_evidence
+    ):
         return False
     for raw_path in execution.writes:
         path = Path(raw_path)

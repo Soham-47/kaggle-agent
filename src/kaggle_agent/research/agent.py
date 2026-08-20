@@ -75,4 +75,9 @@ class ResearchAgent(StageAgent):
             stall_after=stall_after,
             stall_nudge=stall_nudge,
             stall_force=stall_force,
+            source_tools={
+                "search": "source_search",
+                "fetch_url": "url",
+                "pull_kernel": "kaggle_kernel",
+            },
         )

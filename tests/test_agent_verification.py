@@ -8,6 +8,7 @@ from pathlib import Path
 from kaggle_agent.agents.loop import StageAgent, StageAgentConfig
 from kaggle_agent.agents.verification import (
     AgentExecution,
+    SourceEvidence,
     verify_code_stage,
     verify_plan_stage,
     verify_research_fleet,
@@ -50,6 +51,7 @@ def _agent(name: str, path: Path):
         name="research",
         agent_id=name,
         accept_done=lambda: True,
+        source_tools={"search": "source_search"},
     )
 
 
@@ -146,6 +148,7 @@ def test_transient_tool_error_does_not_fail_owned_write(tmp_path: Path):
             agent="github",
             stop_reason="done",
             source_reads=["search"],
+            source_evidence=[SourceEvidence("search", "source_search", uri="https://example.test")],
             writes=[str(card)],
             errors=["tool error: http fetch failed: HTTP Error 404: Not Found"],
         )
@@ -154,6 +157,48 @@ def test_transient_tool_error_does_not_fail_owned_write(tmp_path: Path):
     verdict = verify_research_fleet(executions, ["github"])
 
     assert verdict.ok
+
+
+def test_typed_source_evidence_requires_registered_source_content(tmp_path: Path):
+    card = tmp_path / "source-github-x.md"
+    card.write_text(
+        "# card\n- agent: github\n- ref: owner/source\n"
+        "- copyable next step: inspect\n- do not copy: unknown\n",
+        encoding="utf-8",
+    )
+    no_source = AgentExecution(
+        agent="github",
+        writes=[str(card)],
+        source_evidence=[SourceEvidence("search", "source_search", uri="https://example.test")],
+    )
+    assert verify_research_fleet([no_source], ["github"]).ok
+    assert not verify_research_fleet(
+        [
+            AgentExecution(
+                agent="github",
+                writes=[str(card)],
+                source_evidence=[SourceEvidence("search", "source_search")],
+            )
+        ],
+        ["github"],
+    ).ok
+    assert not verify_research_fleet(
+        [AgentExecution(agent="github", writes=[str(card)], source_evidence=[])],
+        ["github"],
+    ).ok
+
+
+def test_write_only_activity_never_counts_as_research_evidence(tmp_path: Path):
+    card = tmp_path / "source-github-x.md"
+    card.write_text(
+        "# card\n- agent: github\n- ref: owner/source\n"
+        "- copyable next step: inspect\n- do not copy: unknown\n",
+        encoding="utf-8",
+    )
+    verdict = verify_research_fleet(
+        [AgentExecution(agent="github", writes=[str(card)])], ["github"]
+    )
+    assert not verdict.ok
 
 
 def test_research_verification_rejects_card_without_source_evidence(tmp_path: Path):

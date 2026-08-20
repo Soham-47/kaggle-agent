@@ -1061,6 +1061,11 @@ class Orchestrator:
                         name="research",
                         agent_id=name,
                         tool_schemas=fleet_tool_schemas(spec),
+                        source_tools={
+                            "search": "source_search",
+                            "fetch_url": "url",
+                            "pull_kernel": "kaggle_kernel",
+                        },
                         tracer=self._tracer,
                     ),
                 )
@@ -1080,6 +1085,16 @@ class Orchestrator:
                     turns=execution.turns,
                     tool_calls=execution.tool_calls,
                     source_reads=execution.source_reads,
+                    source_evidence=[
+                        {
+                            "tool": evidence.tool,
+                            "source_type": evidence.source_type,
+                            "source_id": evidence.source_id,
+                            "uri": evidence.uri,
+                            "content_hash": evidence.content_hash,
+                        }
+                        for evidence in execution.source_evidence
+                    ],
                     writes=execution.writes,
                     rejected_writes=execution.rejected_writes,
                     errors=execution.errors,
