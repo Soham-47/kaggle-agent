@@ -66,6 +66,12 @@ def _list(value: Any, role: str, field: str) -> tuple[str, ...]:
     return tuple(value)
 
 
+def _finding_text_list(value: Any, role: str, field: str) -> tuple[str, ...]:
+    if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+        raise AgentProtocolError(f"{role}.{field} must be a list of strings")
+    return tuple(value)
+
+
 def _confidence(value: Any, role: str) -> float:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise AgentProtocolError(f"{role}.confidence must be numeric")
@@ -183,7 +189,12 @@ class DeepSeekSupervisorAgents:
             verdict = SpecReviewVerdict(_str(raw["verdict"], "spec reviewer", "verdict").upper())
         except ValueError as exc:
             raise AgentProtocolError("spec reviewer verdict is invalid") from exc
-        return SpecReview(verdict, tuple(raw["blocking_findings"]), tuple(raw["non_blocking_findings"]), _str(raw["rationale"], "spec reviewer", "rationale"))
+        return SpecReview(
+            verdict,
+            _finding_text_list(raw["blocking_findings"], "spec reviewer", "blocking_findings"),
+            _finding_text_list(raw["non_blocking_findings"], "spec reviewer", "non_blocking_findings"),
+            _str(raw["rationale"], "spec reviewer", "rationale"),
+        )
 
     def review_code(self, incident: Incident, spec: RepairSpec, diff: str, verification: Any) -> Review:
         raw = _object(

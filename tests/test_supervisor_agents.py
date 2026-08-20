@@ -166,6 +166,20 @@ def test_spec_author_rejects_unbounded_or_malformed_model_output():
         agents.author_spec(incident, classification, repair_id="repair-1")
 
 
+def test_spec_reviewer_rejects_non_string_findings():
+    agents = DeepSeekSupervisorAgents(_FakeRouter([
+        _classification_response(),
+        _spec_response(),
+        _spec_review_response(blocking_findings=[{"issue": "not a string"}]),
+    ]))
+    incident = _incident()
+    classification = agents.classify(incident)
+    spec = agents.author_spec(incident, classification, repair_id="repair-1")
+
+    with pytest.raises(AgentProtocolError, match="spec reviewer"):
+        agents.review_spec(incident, classification, spec)
+
+
 def test_repair_implementer_uses_only_restricted_tools(tmp_path: Path):
     source = tmp_path / "src" / "x.py"
     source.parent.mkdir()
