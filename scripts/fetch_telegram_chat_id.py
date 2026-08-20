@@ -12,17 +12,16 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 ENV = ROOT / ".env"
+src = ROOT / "src"
+if str(src) not in sys.path:
+    sys.path.insert(0, str(src))
+
+from kaggle_agent.config import load_dotenv  # noqa: E402
 
 
 def load_env() -> None:
-    if not ENV.is_file():
-        return
-    for line in ENV.read_text(encoding="utf-8").splitlines():
-        line = line.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        k, v = line.split("=", 1)
-        os.environ.setdefault(k.strip(), v.strip().strip("'\""))
+    """Compatibility wrapper around the canonical config loader."""
+    load_dotenv(ROOT)
 
 
 def main() -> int:

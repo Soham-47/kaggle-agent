@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
+import inspect
 import re
 import time
 from dataclasses import dataclass, field
@@ -10,7 +12,7 @@ from typing import Any, Callable, Literal
 
 from kaggle_agent.config import ResearchAgentSettings
 from kaggle_agent.llm.zen_client import ZenClient
-from kaggle_agent.agents.verification import AgentExecution
+from kaggle_agent.agents.verification import AgentExecution, SourceEvidence
 
 StageAgentConfig = ResearchAgentSettings
 LogFn = Callable[[str], None]
@@ -33,10 +35,14 @@ WRITE_TOOLS = frozenset(
 class StageAgentResult:
     stop_reason: str
     turns: int
+    loop_iterations: int = 0
+    llm_calls: int = 0
+    control_actions: int = 0
     observations: list[str] = field(default_factory=list)
     agent: str = ""
     tool_calls: list[str] = field(default_factory=list)
     source_reads: list[str] = field(default_factory=list)
+    source_evidence: list[SourceEvidence] = field(default_factory=list)
     writes: list[str] = field(default_factory=list)
     rejected_writes: list[str] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
@@ -46,8 +52,12 @@ class StageAgentResult:
             agent=self.agent,
             stop_reason=self.stop_reason,
             turns=self.turns,
+            loop_iterations=self.loop_iterations,
+            llm_calls=self.llm_calls,
+            control_actions=self.control_actions,
             tool_calls=list(self.tool_calls),
             source_reads=list(self.source_reads),
+            source_evidence=list(self.source_evidence),
             writes=list(self.writes),
             rejected_writes=list(self.rejected_writes),
             errors=list(self.errors),
@@ -184,6 +194,7 @@ class StageAgent:
         | Callable[[int], tuple[str, dict[str, Any]] | None]
         | None = None,
         force_after_stall: str | None = None,
+        source_tools: dict[str, str] | None = None,
     ) -> None:
         self._zen = zen
         self._model = model
@@ -218,6 +229,11 @@ class StageAgent:
         self._writes: list[str] = []
         self._rejected_writes: list[str] = []
         self._errors: list[str] = []
+        self._source_tools = dict(source_tools or {})
+        self._source_evidence: list[SourceEvidence] = []
+        self._loop_iterations = 0
+        self._llm_calls = 0
+        self._control_actions = 0
 
     def _logmsg(self, msg: str) -> None:
         if self._log is not None:
@@ -231,6 +247,7 @@ class StageAgent:
         turns = 0
         stall = self._stall
         while True:
+            self._loop_iterations += 1
             if time.monotonic() >= deadline:
                 self._logmsg(f"{self._name} agent stop: time")
                 self._trace("agent_stop", reason="time", turns=turns)
@@ -245,6 +262,7 @@ class StageAgent:
                 self._trace("agent_stop", reason="stalled", turns=turns)
                 return self._result("stalled", turns, observations)
             if decision.action in ("force_tool", "force_done"):
+                self._control_actions += 1
                 name, args = decision.tool_name, dict(decision.tool_args)
                 if decision.action == "force_done":
                     if self._accept_done is None or self._accept_done():
@@ -257,10 +275,7 @@ class StageAgent:
                     if fn is None:
                         obs = f"unknown tool {name}"
                     else:
-                        try:
-                            obs = str(fn(**args))
-                        except Exception as exc:  # noqa: BLE001
-                            obs = f"tool error: {exc}"
+                        obs = self._invoke_tool(fn, args)
                 turns += 1
                 observations.append(obs[:4000])
                 transcript.append(f"tool={name} args={args} result={obs[:2000]}")
@@ -279,6 +294,7 @@ class StageAgent:
                 stall.stall_forced = False
                 continue
             if decision.action == "nudge":
+                self._control_actions += 1
                 nudge_text = decision.nudge_text
                 self._forced_tool_choice = self._force_after_stall
                 if nudge_text not in self._nudges:
@@ -311,15 +327,7 @@ class StageAgent:
             if fn is None:
                 obs = f"unknown tool {tool}"
             else:
-                try:
-                    obs = str(fn(**args))
-                except TypeError:
-                    try:
-                        obs = str(fn())
-                    except Exception as exc:  # noqa: BLE001
-                        obs = f"tool error: {exc}"
-                except Exception as exc:  # noqa: BLE001
-                    obs = f"tool error: {exc}"
+                obs = self._invoke_tool(fn, args)
             turns += 1
             observations.append(obs[:4000])
             transcript.append(f"tool={tool} args={args} result={obs[:2000]}")
@@ -411,6 +419,7 @@ class StageAgent:
             }
         else:
             choice = "auto" if used & WRITE_TOOLS else "required"
+        self._llm_calls += 1
         raw = self._zen.chat(
             self._model,
             [
@@ -442,6 +451,7 @@ class StageAgent:
         if tool != "invalid_json":
             self._reset_invalid_streak()
             return tool, args
+        self._llm_calls += 1
         raw2 = self._zen.chat(
             self._model,
             [
@@ -473,15 +483,36 @@ class StageAgent:
             return
         self._tracer.emit(kind, stage=self._name, agent=self._agent_id, **fields)
 
+    @staticmethod
+    def _invoke_tool(fn: ToolFn, args: dict[str, Any]) -> str:
+        """Validate a call contract before executing a tool exactly once."""
+        try:
+            signature = inspect.signature(fn)
+        except (TypeError, ValueError):
+            # Some extension/builtin callables have no inspectable signature.
+            # Execute once; an exception is an execution error, never a reason
+            # to retry with a different argument set.
+            signature = None
+        if signature is not None:
+            try:
+                signature.bind(**args)
+            except TypeError as exc:
+                return f"invalid tool arguments: {exc}"
+        try:
+            return str(fn(**args))
+        except Exception as exc:  # noqa: BLE001
+            return f"tool error: {exc}"
+
     def _record_tool(self, tool: str, result: str) -> None:
         if tool in {"done", "no_llm", "invalid_json"}:
             return
         self._tool_calls.append(tool)
-        if result.startswith("tool error:"):
+        if result.startswith(("tool error:", "invalid tool arguments:")):
             self._errors.append(result)
         if tool not in WRITE_TOOLS and result.strip() and not result.startswith(
             (
                 "tool error:",
+                "invalid tool arguments:",
                 "refuse:",
                 "no source",
                 "no kaggle",
@@ -491,10 +522,35 @@ class StageAgent:
             )
         ):
             self._source_reads.append(tool)
+        if (
+            tool in self._source_tools
+            and result.strip()
+            and not result.startswith(
+                (
+                    "tool error:",
+                    "invalid tool arguments:",
+                    "refuse:",
+                    "no source",
+                    "no kaggle",
+                    "missing",
+                    "none",
+                    "search budget exhausted",
+                )
+            )
+        ):
+            uri_match = re.search(r"https?://\S+", result)
+            self._source_evidence.append(
+                SourceEvidence(
+                    tool=tool,
+                    source_type=self._source_tools[tool],
+                    uri=uri_match.group(0).rstrip(".,)") if uri_match else None,
+                    content_hash=hashlib.sha256(result.encode("utf-8")).hexdigest(),
+                )
+            )
         if result.startswith("search budget exhausted") and self._source_reads:
             self._forced_tool_choice = "write_card"
         if tool in WRITE_TOOLS and tool != "harvest_cards":
-            if result.startswith(("rejected:", "tool error:")):
+            if result.startswith(("rejected:", "tool error:", "invalid tool arguments:")):
                 self._rejected_writes.append(result[:400])
             elif result.strip():
                 self._writes.append(result.strip()[:4000])
@@ -505,10 +561,14 @@ class StageAgent:
         return StageAgentResult(
             stop_reason,
             turns,
+            self._loop_iterations,
+            self._llm_calls,
+            self._control_actions,
             observations,
             agent=self._agent_id,
             tool_calls=list(self._tool_calls),
             source_reads=list(self._source_reads),
+            source_evidence=list(self._source_evidence),
             writes=list(self._writes),
             rejected_writes=list(self._rejected_writes),
             errors=list(self._errors),

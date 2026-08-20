@@ -1,6 +1,7 @@
 from pathlib import Path
 
 import os
+import multiprocessing
 import time
 
 from kaggle_agent.state_md import AgentState, RunLock, load_state, parse_kv_markdown, save_state
@@ -49,11 +50,50 @@ def test_run_lock_records_owner_pid(tmp_path: Path):
 def test_run_lock_stale_dead_pid_taken_over(tmp_path: Path):
     a = RunLock(tmp_path)
     assert a.acquire() is True
+    a.release()
     a.path.write_text("pid=999999999 at=2026-08-15T00:00:00+00:00\n", encoding="utf-8")
     b = RunLock(tmp_path)
     assert b.acquire() is True
     assert b.took_over is True
     b.release()
+
+
+def test_run_lock_non_owner_release_does_not_remove_new_owner(tmp_path: Path):
+    old = RunLock(tmp_path)
+    assert old.acquire() is True
+    old.release()
+    old.path.write_text("pid=999999999 token=stale at=2026-08-15T00:00:00+00:00\n", encoding="utf-8")
+
+    new = RunLock(tmp_path)
+    assert new.acquire() is True
+    # Model a delayed release from the old owner after takeover.
+    old._held = True
+    old._owner_token = "stale"
+    old.release()
+    assert new.path.exists()
+    new.release()
+
+
+def _lock_attempt(path: str, queue: multiprocessing.Queue) -> None:
+    lock = RunLock(Path(path))
+    acquired = lock.acquire()
+    queue.put(acquired)
+    if acquired:
+        time.sleep(0.2)
+        lock.release()
+
+
+def test_run_lock_exclusive_across_processes(tmp_path: Path):
+    queue: multiprocessing.Queue = multiprocessing.Queue()
+    first = multiprocessing.Process(target=_lock_attempt, args=(str(tmp_path), queue))
+    second = multiprocessing.Process(target=_lock_attempt, args=(str(tmp_path), queue))
+    first.start()
+    time.sleep(0.05)
+    second.start()
+    results = [queue.get(timeout=5), queue.get(timeout=5)]
+    first.join(timeout=5)
+    second.join(timeout=5)
+    assert sorted(results) == [False, True]
 
 
 def test_run_lock_legacy_lock_refused_while_fresh(tmp_path: Path):

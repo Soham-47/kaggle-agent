@@ -8,12 +8,49 @@ from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import dataclass
+import math
+import re
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
 from kaggle_agent.autonomy.outcomes import OutcomeState, StageOutcome
+
+_LEDGER_SCHEMA_VERSION = 1
+_SECRET_KEY = re.compile(
+    r"(?:secret|token|password|api[_-]?key|authorization|credential|header|environment|env)",
+    re.IGNORECASE,
+)
+
+
+def _safe_value(value: Any, *, key: str = "") -> Any:
+    """Keep durable outputs JSON-safe and exclude secret-like fields."""
+    if key and _SECRET_KEY.search(key):
+        return None
+    if value is None or isinstance(value, (str, bool, int)):
+        return value
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+    if isinstance(value, Mapping):
+        return {
+            str(child_key): safe
+            for child_key, child_value in value.items()
+            if (safe := _safe_value(child_value, key=str(child_key))) is not None
+        }
+    if isinstance(value, (list, tuple)):
+        return [safe for child in value if (safe := _safe_value(child)) is not None]
+    return None
+
+
+def _safe_outputs(outputs: Mapping[str, Any] | None) -> dict[str, Any]:
+    if not outputs:
+        return {}
+    return {
+        str(key): safe
+        for key, value in outputs.items()
+        if (safe := _safe_value(value, key=str(key))) is not None
+    }
 
 
 def _now() -> str:
@@ -29,6 +66,11 @@ class StageInput:
     competition: str
     idempotency_key: str
     inputs: Mapping[str, Any]
+
+    @property
+    def stage_execution_key(self) -> str:
+        """Cycle-scoped identity used only for replaying this stage execution."""
+        return self.idempotency_key
 
     @classmethod
     def create(
@@ -55,9 +97,18 @@ class StageLedger:
     def __init__(self, root: Path) -> None:
         self.path = root / ".agent" / "stage-ledger.jsonl"
 
-    def append(self, event: str, request: StageInput, *, outcome: StageOutcome | None = None, attempt: int = 0) -> None:
+    def append(
+        self,
+        event: str,
+        request: StageInput,
+        *,
+        outcome: StageOutcome | None = None,
+        outputs: Mapping[str, Any] | None = None,
+        attempt: int = 0,
+    ) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         record: dict[str, Any] = {
+            "schema_version": _LEDGER_SCHEMA_VERSION,
             "ts": _now(), "event": event, "stage": request.stage,
             "cycle_id": request.cycle_id, "competition": request.competition,
             "idempotency_key": request.idempotency_key, "attempt": attempt,
@@ -68,7 +119,10 @@ class StageLedger:
                 "failure_signature": outcome.failure_signature,
                 "external_job": outcome.external_job, "evidence": list(outcome.evidence),
                 "artifacts": list(outcome.artifacts),
+                "retryable": outcome.retryable,
             })
+            if outputs is not None:
+                record["outputs"] = _safe_outputs(outputs)
         with self.path.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(record, sort_keys=True, default=str) + "\n")
 
@@ -97,9 +151,16 @@ class StageExecution:
     outcome: StageOutcome
     attempt: int
     replayed: bool = False
+    outputs: Mapping[str, Any] = field(default_factory=dict)
 
 
-StageCallable = Callable[[StageInput], StageOutcome]
+@dataclass(frozen=True)
+class StageResult:
+    outcome: StageOutcome
+    outputs: Mapping[str, Any] = field(default_factory=dict)
+
+
+StageCallable = Callable[[StageInput], StageOutcome | StageResult]
 
 
 class StageExecutor:
@@ -110,15 +171,29 @@ class StageExecutor:
 
     def execute(self, request: StageInput, run: StageCallable) -> StageExecution:
         previous = self.ledger.latest(request.idempotency_key)
-        if previous and previous.get("state") == OutcomeState.SUCCESS.value:
-            return StageExecution(self._outcome_from_record(previous), int(previous["attempt"]), True)
+        if (
+            previous
+            and previous.get("state") == OutcomeState.SUCCESS.value
+            and "outputs" in previous
+        ):
+            return StageExecution(
+                self._outcome_from_record(previous),
+                int(previous["attempt"]),
+                True,
+                dict(previous.get("outputs") or {}),
+            )
         attempt = int(previous["attempt"]) + 1 if previous else 1
         self.ledger.append("stage_started", request, attempt=attempt)
-        outcome = run(request)
+        returned = run(request)
+        result = returned if isinstance(returned, StageResult) else StageResult(returned)
+        outcome = result.outcome
         if outcome.stage != request.stage:
             raise ValueError(f"stage outcome mismatch: expected {request.stage}, got {outcome.stage}")
-        self.ledger.append("stage_finished", request, outcome=outcome, attempt=attempt)
-        return StageExecution(outcome, attempt)
+        outputs = _safe_outputs(result.outputs)
+        self.ledger.append(
+            "stage_finished", request, outcome=outcome, outputs=outputs, attempt=attempt
+        )
+        return StageExecution(outcome, attempt, outputs=outputs)
 
     @staticmethod
     def _outcome_from_record(record: Mapping[str, Any]) -> StageOutcome:
@@ -129,4 +204,5 @@ class StageExecutor:
             artifacts=tuple(str(x) for x in record.get("artifacts", ())),
             failure_signature=record.get("failure_signature"),
             external_job=record.get("external_job"),
+            retryable=bool(record.get("retryable", False)),
         )

@@ -9,6 +9,7 @@ import threading
 from dataclasses import dataclass
 from pathlib import Path
 
+from kaggle_agent.config import load_dotenv
 from kaggle_agent.paths import memory_dir, repo_root
 from kaggle_agent.state_md import RunLock, load_state
 
@@ -21,15 +22,8 @@ class RunStartResult:
 
 
 def _load_dotenv(root: Path) -> None:
-    env_path = root / ".env"
-    if not env_path.is_file():
-        return
-    for line in env_path.read_text(encoding="utf-8").splitlines():
-        line = line.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        key, val = line.split("=", 1)
-        os.environ.setdefault(key.strip(), val.strip().strip("'\""))
+    """Compatibility wrapper around the canonical config loader."""
+    load_dotenv(root)
 
 
 def start_agent_cycle(

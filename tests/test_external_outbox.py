@@ -1,4 +1,11 @@
-from kaggle_agent.autonomy.outbox import ExternalActionOutbox, reconcile_with_kaggle
+from kaggle_agent.autonomy.outbox import (
+    ExternalActionOutbox,
+    kernel_push_key,
+    reconcile_with_kaggle,
+    submission_description,
+    submission_marker,
+    submission_key,
+)
 from kaggle_agent.kaggle_api.models import SubmissionRow
 
 
@@ -62,3 +69,88 @@ def test_reconciliation_accepts_only_exact_kernel_and_submission_evidence(tmp_pa
     )
     assert accepted.status == "accepted"
     assert accepted.external_ref == "s2"
+
+
+def test_external_keys_are_stable_across_stage_cycles():
+    first = kernel_push_key("demo", "owner/kernel", "package-sha")
+    second = kernel_push_key("demo", "owner/kernel", "package-sha")
+    assert first == second
+    assert first == kernel_push_key("demo", "owner/kernel", "package-sha")
+
+
+def test_external_keys_change_for_competition_or_artifact():
+    base = submission_key("demo", "file", "output-sha")
+    assert submission_key("other", "file", "output-sha") != base
+    assert submission_key("demo", "file", "other-output") != base
+    assert submission_key("demo", "notebook", "output-sha") != base
+
+
+def test_pending_external_key_reuses_one_action_across_cycles(tmp_path):
+    outbox = ExternalActionOutbox(tmp_path)
+    key = kernel_push_key("demo", "owner/kernel", "package-sha")
+    first = outbox.enqueue(
+        action="kernel_push", idempotency_key=key, payload={"cycle_id": "cycle-1"}
+    )
+    second = outbox.enqueue(
+        action="kernel_push", idempotency_key=key, payload={"cycle_id": "cycle-2"}
+    )
+    assert first.action_id == second.action_id
+
+
+def test_submission_marker_is_stable_and_unique_per_artifact():
+    marker = submission_marker("rsna-knee-abnormality-detection", "abcdef0123456789deadbeef")
+    assert marker == submission_marker("rsna-knee-abnormality-detection", "abcdef0123456789deadbeef")
+    assert marker.startswith("ka:rsna-knee-abnormality-detection:abcdef0123456789")
+    assert marker != submission_marker("rsna-knee-abnormality-detection", "0000000123456789deadbeef")
+    assert submission_description("demo", "abcdef0123456789", "cycle-2").startswith(
+        "ka:demo:abcdef0123456789"
+    )
+    assert submission_description("demo", "abcdef0123456789", "cycle-1").split(" | ")[0] == submission_description(
+        "demo", "abcdef0123456789", "cycle-2"
+    ).split(" | ")[0]
+
+
+def test_marker_reconciliation_selects_exact_unique_row(tmp_path):
+    outbox = ExternalActionOutbox(tmp_path)
+    marker = submission_marker("demo", "abcdef0123456789")
+    item = outbox.enqueue(
+        action="submit",
+        idempotency_key="stable",
+        payload={
+            "competition": "demo",
+            "message": f"{marker} | agent cycle-1",
+            "reconciliation_marker": marker,
+        },
+    )
+    outbox.mark_sent(item.action_id)
+    rows = [
+        SubmissionRow("old", "x.csv", "complete", description="ka:demo:other | agent"),
+        SubmissionRow("new", "x.csv", "complete", description=f"{marker} | agent cycle-2"),
+    ]
+    accepted = reconcile_with_kaggle(
+        outbox,
+        item,
+        kernel_status=lambda _: "",
+        submissions=lambda _: rows,
+    )
+    assert accepted.status == "accepted"
+    assert accepted.external_ref == "new"
+
+
+def test_ambiguous_marker_remains_pending(tmp_path):
+    outbox = ExternalActionOutbox(tmp_path)
+    marker = submission_marker("demo", "abcdef0123456789")
+    item = outbox.enqueue(
+        action="submit",
+        idempotency_key="stable",
+        payload={"competition": "demo", "reconciliation_marker": marker},
+    )
+    outbox.mark_sent(item.action_id)
+    rows = [
+        SubmissionRow("a", "x.csv", "complete", description=marker),
+        SubmissionRow("b", "x.csv", "complete", description=f"{marker} | duplicate"),
+    ]
+    unresolved = reconcile_with_kaggle(
+        outbox, item, kernel_status=lambda _: "", submissions=lambda _: rows
+    )
+    assert unresolved.status == "sent"

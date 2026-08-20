@@ -32,12 +32,12 @@ git clone https://github.com/Soham-47/kaggle-agent.git
 cd kaggle-agent
 uv sync --extra dev
 cp .env.example .env
-# edit .env: OPENCODE_API_KEY, optional Telegram tokens
+# edit .env: DEEPSEEK_API_KEY, optional Telegram tokens
 # put ~/.kaggle/kaggle.json in place (Kaggle account → Settings → API)
 ```
 
 Copy `.env.example` to `.env`.
-Set `OPENCODE_API_KEY` in `.env`. Telegram tokens are optional.
+Set `DEEPSEEK_API_KEY` in `.env`. Telegram tokens are optional.
 Put `kaggle.json` in `~/.kaggle/` (Kaggle account, Settings, API).
 
 For discussion HTML, run this command:
@@ -109,7 +109,7 @@ CAUTION: Do not submit through the browser.
 |------|-------------|
 | Limits, LB, kernels, submit | `kaggle_agent.kaggle_api.KaggleClient` + `~/.kaggle/kaggle.json` |
 | Discussion HTML | browser-use on `scripts/start_research_chrome.sh` |
-| Plan / code brief | OpenCode Zen (`OPENCODE_API_KEY`) |
+| Plan / code brief | Official DeepSeek API (`DEEPSEEK_API_KEY`) |
 | Approve submit | Telegram `/yes` |
 
 ## Memory

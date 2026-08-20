@@ -8,9 +8,9 @@ paths:
   competitions_dir: competitions
   config_competitions_dir: config/competitions
 
-llm:
-  # Official DeepSeek only (DEEPSEEK_API_KEY from .env). Zen is not used.
-  provider: deepseek
+# Production LLM: official DeepSeek only (DEEPSEEK_API_KEY from .env).
+# The compatibility provider blocks below are not selected by runtime config;
+# they remain as reference data for explicitly constructed test integrations.
 
 deepseek:
   base_url: https://api.deepseek.com
@@ -21,7 +21,7 @@ deepseek:
   default_distill_model: deepseek-v4-flash
   default_vision_model: deepseek-v4-flash
 
-# https://docs.agentrouter.org — OpenAI-compatible. Key: AGENTROUTER_API_KEY
+# Legacy reference block; not selected by production runtime.
 agentrouter:
   base_url: https://agentrouter.org/v1
   timeout_s: 90
@@ -30,16 +30,15 @@ agentrouter:
   default_distill_model: gpt-5.5
   default_vision_model: gpt-5.5
 
-# Hosted NIM workhorses (high catalog traffic), not Ultra / GLM-5.2 flagship
+# Legacy reference block; not selected by production runtime.
 nvidia:
   base_url: https://integrate.api.nvidia.com/v1
-  # API key from env: NVIDIA_API_KEY
   default_plan_model: deepseek-ai/deepseek-v4-flash-0731
   default_code_model: deepseek-ai/deepseek-v4-flash-0731
   default_distill_model: nvidia/nemotron-3-nano-30b-a3b
   default_vision_model: nvidia/nemotron-3-nano-30b-a3b
 
-# Chinese OpenAI-compatible relay. Key: HETZNEZ_API_KEY. Host: HETZNEZ_BASE_URL or here.
+# Legacy reference block; not selected by production runtime.
 hetznez:
   base_url: ""
   timeout_s: 90
@@ -51,8 +50,8 @@ hetznez:
 zen:
   base_url: https://opencode.ai/zen/v1
   timeout_s: 180
-  # API key from env: OPENCODE_API_KEY
-  # Free Zen ids only (https://opencode.ai/docs/zen/#pricing). Do not use gpt-5.5.
+  # Legacy reference only; production does not select this block.
+  # Explicit compatibility tests may use these OpenAI-compatible ids.
   default_plan_model: deepseek-v4-flash-free
   default_code_model: deepseek-v4-flash-free
   default_distill_model: nemotron-3.5-lightning-free

@@ -1,4 +1,10 @@
-"""Minimal OpenCode Zen client (OpenAI-compatible chat completions)."""
+"""Minimal DeepSeek client for OpenAI-compatible chat completions.
+
+The class name is retained for compatibility with existing call sites.  The
+production builder configures it for the official DeepSeek API; alternate
+OpenAI-compatible endpoints remain available only when a caller constructs a
+client explicitly (for tests or isolated integrations).
+"""
 
 from __future__ import annotations
 
@@ -51,22 +57,19 @@ def _usage_from_payload(payload: dict[str, Any]) -> dict[str, int]:
 
 @dataclass
 class ZenClient:
-    """Call https://opencode.ai/zen/v1/chat/completions with OPENCODE_API_KEY."""
+    """Call an OpenAI-compatible endpoint using an explicitly supplied key."""
 
     api_key: str
-    base_url: str = "https://opencode.ai/zen/v1"
+    base_url: str = "https://api.deepseek.com"
     timeout_s: float = 120.0
 
     @classmethod
     def from_env(cls, base_url: str | None = None) -> ZenClient | None:
-        key = os.environ.get("OPENCODE_API_KEY", "").strip()
+        """Build the supported production client from ``DEEPSEEK_API_KEY``."""
+        key = os.environ.get("DEEPSEEK_API_KEY", "").strip()
         if key:
-            url = (base_url or "https://opencode.ai/zen/v1").rstrip("/")
+            url = (base_url or "https://api.deepseek.com").rstrip("/")
             return cls(api_key=key, base_url=url)
-        nvidia = os.environ.get("NVIDIA_API_KEY", "").strip()
-        if nvidia:
-            url = (base_url or "https://integrate.api.nvidia.com/v1").rstrip("/")
-            return cls(api_key=nvidia, base_url=url, timeout_s=180.0)
         return None
 
     def chat(

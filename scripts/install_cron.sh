@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Install daily kaggle-agent cron job (UTC hour, default 6).
-# Loads .env so OPENCODE / TELEGRAM work under cron.
+# Loads .env so DeepSeek / Telegram work under cron.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"

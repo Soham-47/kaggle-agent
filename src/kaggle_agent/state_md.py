@@ -5,9 +5,12 @@ from __future__ import annotations
 import os
 import re
 import time
+import uuid
 from dataclasses import dataclass, fields
 from datetime import datetime, timezone
 from pathlib import Path
+
+import fcntl
 
 from kaggle_agent.paths import memory_dir
 
@@ -110,24 +113,57 @@ class RunLock:
     def __init__(self, root: Path | None = None) -> None:
         self.path = memory_dir(root) / "run.lock"
         self._held = False
+        self._fd: int | None = None
+        self._owner_token = uuid.uuid4().hex
         self.took_over = False
 
     def acquire(self) -> bool:
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        if self.path.exists() and not self.is_stale():
-            return False
-        if self.path.exists():
-            self.took_over = True
-        self.path.write_text(
-            f"pid={os.getpid()} at={datetime.now(timezone.utc).isoformat()}\n",
-            encoding="utf-8",
-        )
+        # flock is an OS-level ownership primitive.  Unlike an existence
+        # check followed by write_text, it serializes contenders before any
+        # metadata is inspected or replaced.
+        fd = os.open(self.path, os.O_RDWR | os.O_CREAT, 0o600)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except (BlockingIOError, OSError) as exc:
+            if isinstance(exc, BlockingIOError) or getattr(exc, "errno", None) in {11, 13}:
+                os.close(fd)
+                return False
+            os.close(fd)
+            raise
+
+        try:
+            os.lseek(fd, 0, os.SEEK_SET)
+            existing = os.read(fd, 4096).decode("utf-8", errors="replace").strip()
+            if existing and not self._is_stale_text(existing):
+                fcntl.flock(fd, fcntl.LOCK_UN)
+                os.close(fd)
+                return False
+            self.took_over = bool(existing)
+            metadata = (
+                f"pid={os.getpid()} token={self._owner_token} "
+                f"at={datetime.now(timezone.utc).isoformat()}\n"
+            ).encode("utf-8")
+            os.ftruncate(fd, 0)
+            os.lseek(fd, 0, os.SEEK_SET)
+            os.write(fd, metadata)
+            os.fsync(fd)
+        except Exception:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+            os.close(fd)
+            raise
+        self._fd = fd
         self._held = True
         return True
 
     def is_stale(self) -> bool:
         """True if the lock file cannot belong to a live run."""
+        if not self.path.exists():
+            return False
         text = self.path.read_text(encoding="utf-8").strip()
+        return self._is_stale_text(text)
+
+    def _is_stale_text(self, text: str) -> bool:
         pid = self._read_pid(text)
         if pid is not None:
             try:
@@ -137,8 +173,16 @@ class RunLock:
             except PermissionError:
                 return False
             return False
+
         age = time.time() - self.path.stat().st_mtime
         return age > self.STALE_AGE_SECONDS
+
+    @staticmethod
+    def _read_token(text: str) -> str | None:
+        for tok in text.split():
+            if tok.startswith("token="):
+                return tok[6:]
+        return None
 
     @staticmethod
     def _read_pid(text: str) -> int | None:
@@ -151,7 +195,19 @@ class RunLock:
         return None
 
     def release(self) -> None:
-        if self._held and self.path.exists():
-            self.path.unlink(missing_ok=True)
-        self._held = False
-        self.took_over = False
+        if not self._held:
+            return
+        try:
+            # The token check protects against a delayed release after a
+            # stale takeover or an external replacement of the path.
+            if self.path.exists():
+                current = self.path.read_text(encoding="utf-8").strip()
+                if self._read_token(current) == self._owner_token:
+                    self.path.unlink(missing_ok=True)
+        finally:
+            if self._fd is not None:
+                fcntl.flock(self._fd, fcntl.LOCK_UN)
+                os.close(self._fd)
+            self._fd = None
+            self._held = False
+            self.took_over = False

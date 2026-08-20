@@ -3,6 +3,7 @@ from pathlib import Path
 from kaggle_agent.config import load_competition, load_settings
 from kaggle_agent.kaggle_api.models import SubmissionRow
 from kaggle_agent.orchestrator import CycleResult, Orchestrator
+from kaggle_agent.autonomy.outbox import kernel_push_key, submission_key
 from kaggle_agent.pipeline.validate import validate_submission_csv
 from kaggle_agent.experiment_fingerprint import submission_output_hash
 from kaggle_agent.state_md import AgentState
@@ -41,7 +42,7 @@ def test_unreconciled_submission_intent_is_never_sent_again(tmp_path: Path):
     output_hash = submission_output_hash(candidate, orch.competition.id_column)
     action = orch._outbox.enqueue(
         action="submit",
-        idempotency_key=f"{orch.competition.slug}:{orch.competition.submit_mode}:{output_hash}",
+        idempotency_key=submission_key(orch.competition.slug, orch.competition.submit_mode, output_hash),
         payload={"competition": orch.competition.slug, "message": message},
     )
     orch._outbox.mark_sent(action.action_id)
@@ -71,7 +72,8 @@ def test_unreconciled_kernel_push_intent_is_never_pushed_again(tmp_path: Path, m
     from kaggle_agent.train.kernel_history import package_fingerprint
 
     action = orch._outbox.enqueue(
-        action="kernel_push", idempotency_key=package_fingerprint(folder),
+        action="kernel_push",
+        idempotency_key=kernel_push_key(orch.competition.slug, package.kernel_ref, package_fingerprint(folder)),
         payload={"kernel_ref": package.kernel_ref},
     )
     orch._outbox.mark_sent(action.action_id)

@@ -118,11 +118,17 @@ from kaggle_agent.ops.tracing import Tracer
 from kaggle_agent.autonomy.approval import SubmissionAutonomy
 from kaggle_agent.autonomy.outcomes import OutcomeState, StageOutcome, failure_signature
 from kaggle_agent.autonomy.repair_tools import IncidentStore
-from kaggle_agent.autonomy.runtime import StageExecutor, StageInput, StageLedger
+from kaggle_agent.autonomy.runtime import StageExecutor, StageInput, StageLedger, StageResult
+from kaggle_agent.autonomy.stage_outputs import capture as capture_stage_outputs
+from kaggle_agent.autonomy.stage_outputs import restore as restore_stage_outputs
 from kaggle_agent.autonomy.outbox import (
     ExternalAction,
     ExternalActionOutbox,
+    kernel_push_key,
     reconcile_with_kaggle,
+    submission_description,
+    submission_marker,
+    submission_key,
 )
 
 DEFAULT_HYPOTHESIS = "dry-run default: schema-valid 0.5 baseline then improve"
@@ -131,7 +137,6 @@ TRAIN_SLICE_PHASES = ("PLAN", "CODE", "LOCAL_SMOKE", "KERNEL_TRAIN", "VALIDATE_S
 SUBMIT_PHASES = ("TELEGRAM_APPROVE", "SUBMIT", "FEEDBACK")
 TAIL_PHASES = ("HEAL", "REPORT")
 _SLICE_ERR_PREFIXES = ("code:", "smoke:", "kernel:", "validate:")
-
 
 @dataclass
 class CycleResult:
@@ -484,16 +489,18 @@ class Orchestrator:
                 continue
             request = self._stage_input(phase, dry, result)
 
-            def run_stage(_: StageInput) -> StageOutcome:
+            def run_stage(_: StageInput) -> StageResult:
                 nonlocal state
                 result.phases_run.append(phase)
                 run = stage.run_typed(state, dry, result)
                 state = run.state
-                return run.outcome or self._stage_outcome(phase, result, errors_before)
+                outcome = run.outcome or self._stage_outcome(phase, result, errors_before)
+                return StageResult(outcome, capture_stage_outputs(phase, result))
 
             execution = self._stage_executor.execute(request, run_stage)
             outcome = execution.outcome
             if execution.replayed:
+                restore_stage_outputs(phase, result, execution.outputs)
                 append_daily_log(f"{phase} replayed from durable stage ledger", self.root)
             result.stage_outcomes.append(outcome)
             if self._tracer is not None:
@@ -522,14 +529,15 @@ class Orchestrator:
                 result.stage_outcomes.append(repaired)
                 if repaired.state is OutcomeState.SUCCESS:
                     del result.errors[errors_before:]
-                    def retry_stage(_: StageInput) -> StageOutcome:
+                    def retry_stage(_: StageInput) -> StageResult:
                         nonlocal state
                         result.phases_run.append(phase)
                         retried = stage.run_typed(state, dry, result)
                         state = retried.state
-                        return retried.outcome or self._stage_outcome(
+                        outcome = retried.outcome or self._stage_outcome(
                             phase, result, errors_before
                         )
+                        return StageResult(outcome, capture_stage_outputs(phase, result))
 
                     result.stage_outcomes.append(
                         self._stage_executor.execute(request, retry_stage).outcome
@@ -1014,12 +1022,27 @@ class Orchestrator:
                         name="research",
                         agent_id=name,
                         tool_schemas=fleet_tool_schemas(spec),
+                        source_tools={
+                            "search": "source_search",
+                            "fetch_url": "url",
+                            "pull_kernel": "kaggle_kernel",
+                            "harvest_cards": "source_harvest",
+                        },
                         tracer=self._tracer,
                     ),
                 )
             )
         out = run_fleet(agents, log=lambda msg: append_daily_log(msg, self.root))
         result.research_passes = max(1, out.turns)
+        # The bounded harvest fallback materializes shared, source-backed cards
+        # when no LLM is available. Attribute those artifacts to the executions
+        # that explicitly performed the typed harvest operation so verification
+        # remains evidence-based without requiring a synthetic per-agent write.
+        cards = sorted(dest.glob("source-*.md")) if dest.is_dir() else []
+        harvested_paths = [str(path) for path in cards]
+        for execution in out.executions:
+            if not execution.writes and "harvest_cards" in execution.tool_calls:
+                execution.writes = list(harvested_paths)
         research_verification = verify_research_fleet(out.executions, roster)
         result.research_verified = research_verification.ok
         result.research_verification_detail = research_verification.detail
@@ -1033,6 +1056,16 @@ class Orchestrator:
                     turns=execution.turns,
                     tool_calls=execution.tool_calls,
                     source_reads=execution.source_reads,
+                    source_evidence=[
+                        {
+                            "tool": evidence.tool,
+                            "source_type": evidence.source_type,
+                            "source_id": evidence.source_id,
+                            "uri": evidence.uri,
+                            "content_hash": evidence.content_hash,
+                        }
+                        for evidence in execution.source_evidence
+                    ],
                     writes=execution.writes,
                     rejected_writes=execution.rejected_writes,
                     errors=execution.errors,
@@ -1768,8 +1801,16 @@ class Orchestrator:
                     if should_push:
                         push_action = self._outbox.enqueue(
                             action="kernel_push",
-                            idempotency_key=kernel_package_fingerprint(package.folder),
-                            payload={"kernel_ref": package.kernel_ref},
+                            idempotency_key=kernel_push_key(
+                                self.competition.slug,
+                                package.kernel_ref,
+                                kernel_package_fingerprint(package.folder),
+                            ),
+                            payload={
+                                "competition": self.competition.slug,
+                                "kernel_ref": package.kernel_ref,
+                                "package_fingerprint": kernel_package_fingerprint(package.folder),
+                            },
                         )
                         if push_action.status in {"sent", "unknown"}:
                             push_action = self._reconcile_outbox_action(push_action)
@@ -2344,13 +2385,18 @@ class Orchestrator:
         outbox_action: ExternalAction | None = None
         if not dry:
             output_hash = submission_output_hash(Path(csv_path), self.competition.id_column)
+            marker = submission_marker(self.competition.slug, output_hash)
+            msg = submission_description(
+                self.competition.slug, output_hash, result.experiment_id or "unknown"
+            )
             outbox_action = self._outbox.enqueue(
                 action="submit",
-                idempotency_key=f"{self.competition.slug}:{mode}:{output_hash}",
+                idempotency_key=submission_key(self.competition.slug, mode, output_hash),
                 payload={
                     "competition": self.competition.slug,
                     "message": msg,
                     "output_hash": output_hash,
+                    "reconciliation_marker": marker,
                 },
             )
             if outbox_action.status in {"sent", "unknown"}:

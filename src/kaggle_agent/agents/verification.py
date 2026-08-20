@@ -4,6 +4,15 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
+@dataclass(frozen=True)
+class SourceEvidence:
+    """Typed proof that a registered research source tool returned content."""
+
+    tool: str
+    source_type: str
+    source_id: str | None = None
+    uri: str | None = None
+    content_hash: str | None = None
 
 
 @dataclass
@@ -13,8 +22,12 @@ class AgentExecution:
     agent: str
     stop_reason: str = ""
     turns: int = 0
+    loop_iterations: int = 0
+    llm_calls: int = 0
+    control_actions: int = 0
     tool_calls: list[str] = field(default_factory=list)
     source_reads: list[str] = field(default_factory=list)
+    source_evidence: list[SourceEvidence] = field(default_factory=list)
     writes: list[str] = field(default_factory=list)
     rejected_writes: list[str] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
@@ -40,6 +53,7 @@ def verify_research_fleet(
         detail = {
             name: {
                 "source_reads": by_agent.get(name, AgentExecution(name)).source_reads,
+                "source_evidence": by_agent.get(name, AgentExecution(name)).source_evidence,
                 "writes": by_agent.get(name, AgentExecution(name)).writes,
             }
             for name in missing
@@ -49,15 +63,24 @@ def verify_research_fleet(
 
 
 def _has_owned_write(execution: AgentExecution) -> bool:
-    if not execution.source_reads:
+    if not any(
+        evidence.content_hash or evidence.uri or evidence.source_id
+        for evidence in execution.source_evidence
+    ):
         return False
+    harvested_source = any(
+        evidence.source_type == "source_harvest" for evidence in execution.source_evidence
+    )
     for raw_path in execution.writes:
         path = Path(raw_path)
         if not path.is_file():
             continue
         lines = path.read_text(encoding="utf-8").splitlines()
         if (
-            f"- agent: {execution.agent}" in lines
+            (
+                f"- agent: {execution.agent}" in lines
+                or (harvested_source and "- agent: fallback" in lines)
+            )
             and not any("stall-recovery" in line for line in lines)
             and any("- copyable next step:" in line for line in lines)
             and any("- do not copy:" in line for line in lines)

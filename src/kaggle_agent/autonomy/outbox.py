@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -22,6 +23,42 @@ class ExternalAction:
     payload: Mapping[str, Any]
     status: str
     external_ref: str | None = None
+
+
+def external_action_key(operation: str, competition: str, **facts: str) -> str:
+    """Build a stable identity for one intended external mutation."""
+    canonical = json.dumps(
+        {"operation": operation, "competition": competition, **facts},
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def kernel_push_key(competition: str, kernel_ref: str, package_fingerprint: str) -> str:
+    return external_action_key(
+        "kernel_push",
+        competition,
+        kernel_ref=kernel_ref,
+        package_fingerprint=package_fingerprint,
+    )
+
+
+def submission_key(competition: str, mode: str, artifact_hash: str) -> str:
+    return external_action_key(
+        "submit", competition, mode=mode, artifact_hash=artifact_hash
+    )
+
+
+def submission_marker(competition: str, artifact_hash: str) -> str:
+    """Return a concise machine-readable marker stable for one artifact."""
+    slug = re.sub(r"[^a-z0-9-]+", "-", competition.lower()).strip("-")[:32]
+    return f"ka:{slug}:{artifact_hash[:16]}"
+
+
+def submission_description(competition: str, artifact_hash: str, experiment_id: str) -> str:
+    marker = submission_marker(competition, artifact_hash)
+    return f"{marker} | agent {experiment_id}"[:100]
 
 
 class ExternalActionOutbox:
@@ -117,14 +154,19 @@ def reconcile_with_kaggle(
     if item.action == "submit":
         competition = str(item.payload.get("competition") or "")
         message = str(item.payload.get("message") or "")
+        marker = str(item.payload.get("reconciliation_marker") or "")
         try:
             rows = submissions(competition)
         except Exception:  # noqa: BLE001
             return item
+        matches = []
         for row in rows or []:
-            if str(getattr(row, "description", "")) == message:
+            description = str(getattr(row, "description", ""))
+            if (marker and marker in description) or (not marker and description == message):
                 ref = str(getattr(row, "ref", "") or "")
                 if ref:
-                    return outbox.reconcile(item.action_id, status="accepted", external_ref=ref)
+                    matches.append(ref)
+        if len(matches) == 1:
+            return outbox.reconcile(item.action_id, status="accepted", external_ref=matches[0])
         return item
     raise ValueError(f"unsupported external action: {item.action}")

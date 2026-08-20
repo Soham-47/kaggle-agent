@@ -1,5 +1,5 @@
 from kaggle_agent.train import kernel_runner
-from kaggle_agent.train.kernel_runner import KernelRunResult
+from kaggle_agent.train.kernel_runner import KernelPushRepair, KernelRunResult
 from kaggle_agent.train.kernel_job import KernelJob, load_kernel_job, save_kernel_job
 
 
@@ -9,6 +9,12 @@ class ErrorClient:
 
     def kernels_failure_message(self, kernel_ref):
         return "worker failed"
+
+
+def test_kernel_push_repair_policy_classifies_without_network_calls():
+    assert KernelPushRepair.classify("Model instance version-number is required") == "pin"
+    assert KernelPushRepair.classify("HTTP 409 title conflict") == "title_conflict"
+    assert KernelPushRepair.classify("HTTP 500 worker failed") is None
 
 
 def test_browser_traceback_extracts_short_traceback(monkeypatch):

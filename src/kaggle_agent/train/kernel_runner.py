@@ -59,6 +59,43 @@ class KernelRunResult:
     kernel_version: int | None = None
 
 
+class KernelPushRepair:
+    """Classify and apply bounded repairs for a failed kernel push."""
+
+    @staticmethod
+    def classify(message: str) -> str | None:
+        from kaggle_agent.heal.pins import is_pin_error
+        from kaggle_agent.heal.submit_errors import is_409_title_conflict
+
+        if is_pin_error(message):
+            return "pin"
+        if is_409_title_conflict(message):
+            return "title_conflict"
+        return None
+
+    @staticmethod
+    def apply(
+        action: str,
+        *,
+        client: KaggleClient,
+        package_folder: Path,
+        root: Path | None,
+    ) -> bool:
+        if action == "pin":
+            if root is None:
+                return False
+            from kaggle_agent.heal.pins import apply_pin_heal
+
+            apply_pin_heal(package_folder.parent.parent, package_folder)
+            return True
+        if action == "title_conflict":
+            from kaggle_agent.kaggle_api.submit_ops import _fix_metadata_owner
+
+            _fix_metadata_owner(client.api, package_folder)
+            return True
+        return False
+
+
 def _push_result(client: KaggleClient, folder: Path):
     method = getattr(client, "kernels_push_result", None)
     return method(folder) if method is not None else client.kernels_push(folder)
@@ -146,18 +183,14 @@ def run_kernel_phase(
             try:
                 push_resp = _push_result(client, package.folder)
             except Exception as exc2:  # noqa: BLE001
-                from kaggle_agent.heal.pins import apply_pin_heal, is_pin_error
-                from kaggle_agent.heal.submit_errors import is_409_title_conflict
-
                 err_str = str(exc2)
-                if is_pin_error(err_str) and root is not None:
-                    workspace = package.folder.parent.parent
-                    apply_pin_heal(workspace, package.folder)
-                    push_resp = _push_result(client, package.folder)
-                elif is_409_title_conflict(err_str):
-                    from kaggle_agent.kaggle_api.submit_ops import _fix_metadata_owner
-
-                    _fix_metadata_owner(client.api, package.folder)
+                repair = KernelPushRepair.classify(err_str)
+                if repair and KernelPushRepair.apply(
+                    repair,
+                    client=client,
+                    package_folder=package.folder,
+                    root=root,
+                ):
                     push_resp = _push_result(client, package.folder)
                 else:
                     raise

@@ -1,4 +1,4 @@
-"""OpenCode Zen LLM access."""
+"""DeepSeek LLM access with compatibility client naming."""
 
 from kaggle_agent.llm.router import ModelRouter
 from kaggle_agent.llm.fallback import FallbackClient, build_llm_client
