@@ -11,7 +11,9 @@ from kaggle_agent.supervisor.risk import (
     RepairRiskTier,
     ReproductionStrength,
     evaluate_repair_risk,
+    record_risk_decision,
 )
+from kaggle_agent.supervisor.state import RuntimeLayout, SupervisorStateStore
 from kaggle_agent.supervisor.spec import RepairSpec
 
 
@@ -217,3 +219,95 @@ def test_reviewer_findings_escalate_a_low_candidate():
     )
     assert decision.tier is RepairRiskTier.MEDIUM
     assert decision.automatic_promotion_allowed is True
+
+
+def test_same_repair_high_floor_cannot_deescalate_after_narrow_candidate_diff():
+    high = evaluate_repair_risk(
+        _incident("KERNEL_TRAIN"),
+        FailureClassification(FailureClass.CODE_DEFECT, 0.95, True),
+        _spec(stage="KERNEL_TRAIN", paths=("src/kaggle_agent/supervisor/resume.py",)),
+        changed_paths=["src/kaggle_agent/supervisor/resume.py"],
+        changed_lines=20,
+    )
+    narrowed = evaluate_repair_risk(
+        _incident("KERNEL_TRAIN"),
+        FailureClassification(FailureClass.CODE_DEFECT, 0.95, True),
+        _spec(stage="KERNEL_TRAIN"),
+        changed_paths=["src/example/parser.py"],
+        changed_lines=2,
+        minimum_tier=high.tier,
+    )
+
+    assert high.tier is RepairRiskTier.HIGH
+    assert narrowed.tier is RepairRiskTier.HIGH
+    assert narrowed.automatic_promotion_allowed is False
+    assert "risk floor" in " ".join(narrowed.reasons).lower()
+
+
+def test_same_repair_prohibited_floor_remains_prohibited():
+    prohibited = evaluate_repair_risk(
+        _incident(),
+        FailureClassification(FailureClass.CODE_DEFECT, 0.99, True),
+        _spec(paths=("src/kaggle_agent/autonomy/outbox.py",)),
+        changed_paths=["src/kaggle_agent/autonomy/outbox.py"],
+        changed_lines=2,
+    )
+    narrowed = evaluate_repair_risk(
+        _incident(),
+        FailureClassification(FailureClass.CODE_DEFECT, 0.99, True),
+        _spec(),
+        changed_paths=["src/example/parser.py"],
+        changed_lines=2,
+        minimum_tier=prohibited.tier,
+    )
+
+    assert prohibited.tier is RepairRiskTier.PROHIBITED
+    assert narrowed.tier is RepairRiskTier.PROHIBITED
+    assert narrowed.candidate_generation_allowed is False
+    assert narrowed.automatic_promotion_allowed is False
+
+
+def test_floored_risk_decision_round_trip_preserves_floor():
+    decision = evaluate_repair_risk(
+        _incident("KERNEL_TRAIN"),
+        FailureClassification(FailureClass.CODE_DEFECT, 0.95, True),
+        _spec(stage="KERNEL_TRAIN"),
+        changed_paths=["src/example/parser.py"],
+        changed_lines=2,
+        minimum_tier=RepairRiskTier.HIGH,
+    )
+
+    restored = type(decision).from_dict(decision.to_dict())
+
+    assert restored == decision
+    assert restored.risk_floor is RepairRiskTier.HIGH
+
+
+def test_risk_transition_metrics_record_escalation_and_deescalation_attempt(tmp_path: Path):
+    state = SupervisorStateStore(RuntimeLayout.for_repo(tmp_path / "repo", tmp_path / "state"))
+    low = evaluate_repair_risk(
+        _incident(),
+        FailureClassification(FailureClass.CODE_DEFECT, 0.95, True),
+        _spec(),
+        changed_paths=["src/example/parser.py"],
+        changed_lines=2,
+    )
+    medium = evaluate_repair_risk(
+        _incident(),
+        FailureClassification(FailureClass.CODE_DEFECT, 0.95, True),
+        _spec(),
+        changed_paths=["src/example/parser.py", "src/kaggle_agent/orchestrator.py"],
+        changed_lines=300,
+        minimum_tier=low.tier,
+    )
+
+    record_risk_decision(state, low, phase="pre-spec", incident_id="incident-1")
+    record_risk_decision(
+        state, medium, phase="post-diff", previous_tier=low.tier, incident_id="incident-1"
+    )
+    metrics = state.read_json("risk-metrics.json")
+
+    assert metrics["transitions"]["NONE->LOW"] == 1
+    assert metrics["transitions"]["LOW->MEDIUM"] == 1
+    assert metrics["risk_escalations"] == 1
+    assert metrics["transition_reasons"]["LOW->MEDIUM"]

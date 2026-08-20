@@ -1,32 +1,33 @@
-# Implementation Plan: Risk-Adaptive AUTO_SAFE
+# Implementation Plan: Risk-Adaptive AUTO_SAFE Controlled Rollout
 
 ## Overview
 
-Add a deterministic risk-evaluation layer around the existing supervisor repair
-artifacts. The layer will assign LOW, MEDIUM, HIGH, or PROHIBITED, derive
-tier-specific envelopes, persist decisions, and gate candidate generation and
-automatic promotion without changing the existing generation, replay, outbox,
-verification, or review implementations.
+Validate and minimally harden the existing deterministic risk-evaluation layer
+against controlled rollout scenarios. The policy and tier set are frozen; only
+concrete validation defects may change implementation behavior. The work must
+preserve the existing generation, replay, outbox, verification, review, and
+promotion architecture.
 
 ## Architecture decisions
 
-- Risk policy is a pure evaluation layer in `supervisor/risk.py`.
+- Risk policy remains a pure evaluation layer in `supervisor/risk.py`.
 - Protected paths and semantic checks remain deterministic and cannot be
   overridden by configuration or model output.
-- Risk is evaluated before spec authoring, after spec approval, and after the
-  actual candidate diff exists; the safest final result wins.
+- Risk is evaluated before spec authoring, after spec approval, after the
+  candidate diff, and after review; same-repair HIGH/PROHIBITED floors cannot
+  silently de-escalate.
 - Existing `RepairAcceptance` and `GenerationPromotion` remain the final
   enforcement points.
-- Checked-in defaults keep AUTO_SAFE disabled; the explicit controlled profile
-  opts into the risk-adaptive policy.
+- Checked-in defaults keep AUTO_SAFE disabled; live validation uses disposable
+  state/generation roots only.
 
 ## Tasks
 
-1. Add typed risk tiers, inputs, decisions, and deterministic evaluation.
-2. Add strict risk-adaptive configuration and explicit profile defaults.
-3. Persist and enforce provisional/final risk decisions in repair flow.
-4. Add scenario and invariant tests, status/metrics artifacts, and docs.
-5. Run full verification, review the complete diff, and record findings.
+1. Audit merged-main behavior and reproduce the green baseline.
+2. Enforce monotonic same-repair risk floors and persist transition metrics.
+3. Add scenario, canary, process-recovery, rollback, and external-state gate tests.
+4. Run controlled OBSERVE/REPAIR_ONLY/live read-only validation where available.
+5. Run full verification, review the complete diff, and write certification docs.
 
 ## Invariants
 
@@ -37,3 +38,6 @@ verification, or review implementations.
   budget gates remain mandatory.
 - External logical action keys do not depend on Git revisions.
 - AUTO_SAFE remains disabled by default.
+- HIGH and PROHIBITED decisions cannot de-escalate within one repair attempt.
+- Ambiguous or unknown external state blocks autonomous candidate generation and
+  promotion until reconciliation is exact.

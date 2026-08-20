@@ -38,6 +38,12 @@ verification evidence. Diff size is only one guardrail. An unresolved kernel
 push or submission always blocks automatic promotion, and Git revisions are
 never added to external-action identity keys.
 
+Risk is evaluated at pre-spec, post-spec, post-diff, and post-review phases.
+Within one repair, the highest previously established tier is a durable floor:
+a later narrower diff cannot de-escalate HIGH or PROHIBITED work. Transition
+counts and escalation reasons are stored in the supervisor state root for
+controlled-rollout review.
+
 The explicit profile is opt-in:
 
 ```bash

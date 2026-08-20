@@ -1,10 +1,10 @@
-# Risk-Adaptive AUTO_SAFE checklist
+# Risk-Adaptive AUTO_SAFE controlled-rollout checklist
 
-- [x] Typed deterministic risk model
-- [x] Strict tier profiles and safe configuration
-- [x] Pre-spec and post-spec evaluation
-- [x] Post-diff escalation and acceptance integration
-- [x] Promotion gate integration
-- [x] Scenario and invariant tests
-- [x] Durable decision/metrics artifacts
-- [x] Documentation and final verification
+- [x] Fresh merged-main baseline reproduced
+- [x] Same-repair risk floors are monotonic
+- [x] Provisional-to-post-diff transitions are durable and measurable
+- [x] LOW/MEDIUM/HIGH/PROHIBITED disposable canaries are covered
+- [x] Process-kill and rollback validation is covered
+- [x] OBSERVE and REPAIR_ONLY operational evidence recorded
+- [x] Read-only Telegram/Kaggle validation recorded when available
+- [x] Full verification and certification report complete

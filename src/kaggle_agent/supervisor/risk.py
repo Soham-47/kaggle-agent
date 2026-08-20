@@ -24,6 +24,14 @@ class RepairRiskTier(str, Enum):
     PROHIBITED = "PROHIBITED"
 
 
+_RISK_TIER_ORDER = {
+    RepairRiskTier.LOW: 0,
+    RepairRiskTier.MEDIUM: 1,
+    RepairRiskTier.HIGH: 2,
+    RepairRiskTier.PROHIBITED: 3,
+}
+
+
 class ExternalStateCertainty(str, Enum):
     NO_EXTERNAL_ACTION = "NO_EXTERNAL_ACTION"
     RECONCILED_EXACT = "RECONCILED_EXACT"
@@ -70,6 +78,7 @@ class RepairRiskDecision:
     changed_source_files: int = 0
     changed_test_files: int = 0
     changed_lines: int = 0
+    risk_floor: RepairRiskTier | None = None
 
     @property
     def accepted_for_candidate(self) -> bool:
@@ -77,7 +86,9 @@ class RepairRiskDecision:
 
     def to_dict(self) -> dict[str, Any]:
         value = asdict(self)
-        for field in ("tier", "required_reproduction_strength", "reproduction_strength", "external_state"):
+        for field in ("tier", "risk_floor", "required_reproduction_strength", "reproduction_strength", "external_state"):
+            if value[field] is None:
+                continue
             value[field] = value[field].value
         for field in ("reasons", "positive_factors", "negative_factors"):
             value[field] = list(value[field])
@@ -87,6 +98,7 @@ class RepairRiskDecision:
     def from_dict(cls, value: dict[str, Any]) -> "RepairRiskDecision":
         raw = dict(value)
         raw["tier"] = RepairRiskTier(raw["tier"])
+        raw["risk_floor"] = RepairRiskTier(raw["risk_floor"]) if raw.get("risk_floor") else None
         raw["external_state"] = ExternalStateCertainty(raw.get("external_state", "NO_EXTERNAL_ACTION"))
         raw["required_reproduction_strength"] = ReproductionStrength(raw["required_reproduction_strength"])
         raw["reproduction_strength"] = ReproductionStrength(raw.get("reproduction_strength", "NO_REPRO"))
@@ -182,6 +194,10 @@ def _tier(score: int, *, prohibited: bool) -> RepairRiskTier:
     return RepairRiskTier.LOW
 
 
+def _max_tier(left: RepairRiskTier, right: RepairRiskTier) -> RepairRiskTier:
+    return left if _RISK_TIER_ORDER[left] >= _RISK_TIER_ORDER[right] else right
+
+
 def _reproduction_rank(value: ReproductionStrength) -> int:
     return {
         ReproductionStrength.NO_REPRO: 0,
@@ -205,6 +221,7 @@ def evaluate_repair_risk(
     failed_attempts: int = 0,
     same_signature_failures: int = 0,
     reviewer_findings: Iterable[str] = (),
+    minimum_tier: RepairRiskTier | None = None,
     settings=None,
 ) -> RepairRiskDecision:
     """Evaluate one repair using only deterministic, explicit evidence."""
@@ -289,6 +306,12 @@ def evaluate_repair_risk(
     tier = _tier(score, prohibited=prohibited)
     if subsystem == "lifecycle_or_external_runtime" and not prohibited:
         tier = RepairRiskTier.HIGH
+    if minimum_tier is not None:
+        floored_tier = _max_tier(tier, minimum_tier)
+        if floored_tier is not tier:
+            reasons.append(f"same-repair risk floor retained {minimum_tier.value}")
+            negative.append("risk cannot de-escalate within the same repair")
+        tier = floored_tier
     profile = settings.profile(tier.value)
     unresolved_external = external_state in {
         ExternalStateCertainty.PENDING, ExternalStateCertainty.AMBIGUOUS, ExternalStateCertainty.UNKNOWN,
@@ -353,6 +376,7 @@ def evaluate_repair_risk(
         changed_source_files=source_files,
         changed_test_files=test_files,
         changed_lines=changed_lines,
+        risk_floor=minimum_tier,
     )
 
 
@@ -372,7 +396,15 @@ def external_state_for_incident(incident: Incident, outbox) -> ExternalStateCert
     return ExternalStateCertainty.UNKNOWN
 
 
-def record_risk_decision(state, decision: RepairRiskDecision, *, phase: str, failure_class: str = "UNKNOWN", incident_id: str | None = None) -> None:
+def record_risk_decision(
+    state,
+    decision: RepairRiskDecision,
+    *,
+    phase: str,
+    failure_class: str = "UNKNOWN",
+    incident_id: str | None = None,
+    previous_tier: RepairRiskTier | None = None,
+) -> None:
     """Persist bounded, non-sensitive policy counters and the latest decision."""
     metrics = state.read_json("risk-metrics.json", {}) or {}
     metrics.setdefault("decisions", 0)
@@ -383,6 +415,20 @@ def record_risk_decision(state, decision: RepairRiskDecision, *, phase: str, fai
     failure_classes[failure_class] = failure_classes.get(failure_class, 0) + 1
     phases = metrics.setdefault("phases", {})
     phases[phase] = phases.get(phase, 0) + 1
+    from_tier = previous_tier.value if previous_tier is not None else "NONE"
+    transition = f"{from_tier}->{decision.tier.value}"
+    transitions = metrics.setdefault("transitions", {})
+    transitions[transition] = transitions.get(transition, 0) + 1
+    if previous_tier is not None:
+        if _RISK_TIER_ORDER[decision.tier] > _RISK_TIER_ORDER[previous_tier]:
+            metrics["risk_escalations"] = metrics.get("risk_escalations", 0) + 1
+        elif _RISK_TIER_ORDER[decision.tier] < _RISK_TIER_ORDER[previous_tier]:
+            metrics["risk_deescalation_attempts"] = metrics.get("risk_deescalation_attempts", 0) + 1
+    transition_reasons = metrics.setdefault("transition_reasons", {})
+    if previous_tier is not None and _RISK_TIER_ORDER[decision.tier] > _RISK_TIER_ORDER[previous_tier]:
+        transition_reasons.setdefault(transition, []).extend(
+            reason for reason in decision.negative_factors if reason not in transition_reasons[transition]
+        )
     if decision.automatic_promotion_allowed:
         metrics["automatic_promotion_eligible"] = metrics.get("automatic_promotion_eligible", 0) + 1
     if decision.authority_required:
@@ -392,5 +438,12 @@ def record_risk_decision(state, decision: RepairRiskDecision, *, phase: str, fai
     state.write_json("risk-metrics.json", metrics)
     state.write_json(
         "risk-latest.json",
-        {"incident_id": incident_id, "phase": phase, "failure_class": failure_class, "decision": decision.to_dict()},
+        {
+            "incident_id": incident_id,
+            "phase": phase,
+            "failure_class": failure_class,
+            "previous_tier": previous_tier.value if previous_tier is not None else None,
+            "transition": transition,
+            "decision": decision.to_dict(),
+        },
     )
