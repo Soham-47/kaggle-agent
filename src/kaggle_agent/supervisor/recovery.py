@@ -60,11 +60,20 @@ class SupervisorRecovery:
 
     def recover_workers(self, *, timeout_seconds: float, owner_token: str) -> tuple[WorkerRecovery, ...]:
         workers = self.store.layout.state_root / "workers"
+        promotion = self.store.read_json("promotion.json", {}) or {}
+        promoted_worker = (
+            str(promotion.get("replacement_worker_id") or "")
+            if promotion.get("status") == "PROMOTED" else ""
+        )
         recovered: list[WorkerRecovery] = []
         for metadata in sorted(workers.glob("*/metadata.json")):
             worker_id = metadata.parent.name
             item = self.inspect_worker(worker_id, timeout_seconds=timeout_seconds, owner_token=owner_token)
-            if item.action == "START_OR_RESUME" and not (metadata.parent / "result.json").is_file():
+            if (
+                item.action == "START_OR_RESUME"
+                and worker_id != promoted_worker
+                and not (metadata.parent / "result.json").is_file()
+            ):
                 self.store.write_json(
                     f"workers/{worker_id}/result.json",
                     {

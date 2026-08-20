@@ -3,8 +3,16 @@ from pathlib import Path
 import yaml
 
 from kaggle_agent.config import load_settings
+from kaggle_agent.supervisor.generation import GenerationStore, RuntimeGeneration, RuntimeRevision
+from kaggle_agent.supervisor.health import HealthResult
+from kaggle_agent.supervisor.incidents import Incident
 from kaggle_agent.supervisor.loop import Supervisor
 from kaggle_agent.supervisor.policy import SafetyViolation
+from kaggle_agent.supervisor.repair_flow import RepairFlowResult
+from kaggle_agent.supervisor.resume import ResumeRequest
+from kaggle_agent.supervisor.promote import RepairAcceptance
+from kaggle_agent.supervisor.review import Review, ReviewVerdict
+from kaggle_agent.supervisor.state import RuntimeLayout, SupervisorStateStore
 
 
 def _settings(tmp_path: Path, mode: str, enabled: bool = True):
@@ -43,3 +51,50 @@ def test_supervisor_does_not_start_replacement_for_live_unadoptable_worker(tmp_p
 
     assert result.status == "RECOVERY_BLOCKED"
     assert started == []
+
+
+def test_auto_safe_promotes_accepted_generation_and_starts_one_resume_worker(tmp_path: Path, monkeypatch):
+    settings = _settings(tmp_path, "auto_safe")
+    monkeypatch.setenv("KAGGLE_AGENT_SUPERVISOR_DIR", str(tmp_path / "state"))
+    state = SupervisorStateStore(RuntimeLayout.for_repo(tmp_path, tmp_path / "state"))
+    old = RuntimeGeneration("generation-0001", RuntimeRevision("a", "b", "generation-0001"), str(tmp_path), created_at="now")
+    new = RuntimeGeneration("generation-0002", RuntimeRevision("c", "d", "generation-0002"), str(tmp_path), parent_generation=old.generation_id, repair_id="r1", created_at="now")
+    GenerationStore(state).save(old)
+    GenerationStore(state).save(new)
+    state.write_json("active-generation.json", old.to_dict())
+    incident = Incident(
+        "i1", "w1", old.generation_id, "cycle-1", None, "demo", "KERNEL_TRAIN", 1,
+        old.revision, "recoverable_failure", "NameError", "NameError", None, "sig", (), (),
+        None, None, None, (), "now",
+    )
+    resume = ResumeRequest(
+        "cycle-1", "i1", old.generation_id, new.generation_id, "KERNEL_TRAIN", "KERNEL_TRAIN",
+        ("RESEARCH", "PLAN", "CODE", "LOCAL_SMOKE"), ("KERNEL_TRAIN",), (), (("KERNEL_TRAIN", 1),),
+    )
+    outcome = RepairFlowResult("ACCEPTED", RepairAcceptance.all_passed(), new.generation_id, resume)
+    supervisor = Supervisor(settings, tmp_path)
+    monkeypatch.setattr("kaggle_agent.supervisor.loop.RepairPolicy.require_clean_auto_safe", lambda *_: None)
+    monkeypatch.setattr("kaggle_agent.supervisor.loop.read_git_revision", lambda *_: "c")
+    monkeypatch.setattr("kaggle_agent.supervisor.promote.GenerationPromotion.health_check", lambda *_: HealthResult(True, ("import",)))
+    requests = []
+
+    class FakeProcess:
+        pid = 12345
+
+        def wait(self):
+            return 0
+
+    def start(_launcher, request, *, cwd=None):
+        requests.append((request, cwd))
+        return FakeProcess()
+
+    monkeypatch.setattr("kaggle_agent.supervisor.loop.WorkerLauncher.start", start)
+    status, reason = supervisor._promote_and_resume(outcome, incident, selected_competition="demo")
+
+    assert status == "WORKER_STARTED"
+    assert reason.startswith("worker-")
+    assert state.read_json("active-generation.json")["generation_id"] == new.generation_id
+    assert state.read_json("promotion.json")["status"] == "PROMOTED"
+    assert len(requests) == 1
+    assert requests[0][0].generation_id == new.generation_id
+    assert requests[0][0].resume_request == resume

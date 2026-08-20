@@ -39,14 +39,27 @@ class RepairFlowResult:
 
 
 class RepairCoordinator:
-    def __init__(self, source_root: Path, state: SupervisorStateStore) -> None:
+    def __init__(
+        self,
+        source_root: Path,
+        state: SupervisorStateStore,
+        *,
+        max_attempts_per_incident: int = 3,
+        max_repairs_per_cycle: int = 5,
+        max_repairs_per_day: int = 20,
+    ) -> None:
         self.source_root = source_root.resolve()
         self.state = state
         self.worktrees = WorktreeManager(self.source_root, state.layout.state_root)
         self.generations = GenerationStore(state)
         self.policy = RepairPolicy()
         self.verifier = VerificationHarness()
-        self.budgets = RepairBudgetStore(state.layout.state_root)
+        self.budgets = RepairBudgetStore(
+            state.layout.state_root,
+            max_attempts_per_incident=max_attempts_per_incident,
+            max_repairs_per_cycle=max_repairs_per_cycle,
+            max_repairs_per_day=max_repairs_per_day,
+        )
 
     def execute(self, incident: Incident, classification: FailureClassification, spec: RepairSpec, *, spec_approved: bool, implementer: Callable[..., object], reviewer: Callable[[Incident, RepairSpec, str, object], Review], cycle_id: str | None = None, mode: str = "auto_safe", max_implementation_attempts: int = 2) -> RepairFlowResult:
         if mode not in {"repair_only", "auto_safe"}:

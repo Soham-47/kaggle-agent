@@ -33,5 +33,13 @@ class ResumeRequest:
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
+    @classmethod
+    def from_dict(cls, value: dict[str, Any]) -> "ResumeRequest":
+        raw = dict(value)
+        for field in ("preserved_stages", "invalidated_stages", "external_refs"):
+            raw[field] = tuple(raw.get(field) or ())
+        raw["replay_epochs"] = tuple(tuple(item) for item in raw.get("replay_epochs", ()))
+        return cls(**raw)
+
     def epoch_for(self, stage: str) -> int:
         return dict(self.replay_epochs).get(stage, 0)

@@ -32,7 +32,7 @@ from kaggle_agent.memory.write import (
     write_experiment,
 )
 from kaggle_agent.notify.telegram import SupportsTelegram, TelegramClient
-from kaggle_agent.paths import memory_dir
+from kaggle_agent.paths import memory_dir, runtime_state_root
 from kaggle_agent.pipeline.validate import validate_submission_csv
 from kaggle_agent.pipeline.image_template import validate_image_runtime_evidence
 from kaggle_agent.research.apply_snapshot import apply_kaggle_research
@@ -248,8 +248,9 @@ class Orchestrator:
         self._skip_phases = skip_phases or frozenset()
         self._resume_request: ResumeRequest | None = None
         self._stages: dict[str, Stage] = build_stage_registry(self)
-        self._stage_executor = StageExecutor(StageLedger(self.root))
-        self._outbox = ExternalActionOutbox(self.root)
+        shared_state_root = runtime_state_root(self.root)
+        self._stage_executor = StageExecutor(StageLedger(self.root, state_root=shared_state_root))
+        self._outbox = ExternalActionOutbox(self.root, state_root=shared_state_root)
         supervisor_enabled = self.settings.supervisor_config().enabled
         self._debug_runner = None if supervisor_enabled else debug_runner
         if self._debug_runner is None and not supervisor_enabled and self._llm_available():
