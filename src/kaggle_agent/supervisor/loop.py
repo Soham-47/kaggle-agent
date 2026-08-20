@@ -226,17 +226,17 @@ class Supervisor:
             generation.revision,
             resume_request,
         )
+        metadata = {
+            "pid": None,
+            "worker_id": worker_id,
+            "generation_id": generation.generation_id,
+            "supervisor_token": self.lock.owner_token,
+            "resume_request": resume_request.to_dict() if resume_request else None,
+            "launch_state": "STARTING",
+        }
+        self.store.write_json(f"workers/{worker_id}/metadata.json", metadata)
         process = WorkerLauncher(self.layout).start(request, cwd=Path(generation.path))
-        self.store.write_json(
-            f"workers/{worker_id}/metadata.json",
-            {
-                "pid": process.pid,
-                "worker_id": worker_id,
-                "generation_id": generation.generation_id,
-                "supervisor_token": self.lock.owner_token,
-                "resume_request": resume_request.to_dict() if resume_request else None,
-            },
-        )
+        self.store.write_json(f"workers/{worker_id}/metadata.json", {**metadata, "pid": process.pid, "launch_state": "STARTED"})
         if not wait:
             return worker_id, None
         process.wait()
@@ -325,6 +325,9 @@ class Supervisor:
             result = self.store.read_json(f"workers/{worker_id}/result.json", {}) or {}
             return self._settle_promoted_result(transaction, worker_id, result)
         if metadata_path.is_file():
+            metadata = self.store.read_json(f"workers/{worker_id}/metadata.json", {}) or {}
+            if metadata.get("launch_state") == "STARTING" and metadata.get("pid") is None:
+                return SupervisorRun("RECOVERY_BLOCKED", worker_id=worker_id, reason="replacement worker launch has no durable PID; reconcile before retrying")
             item = SupervisorRecovery(self.store).inspect_worker(worker_id, timeout_seconds=timeout_seconds, owner_token=self.lock.owner_token)
             if item.action == "ADOPT":
                 return SupervisorRun("ADOPTED", worker_id=worker_id, reason="replacement worker heartbeat is fresh")
