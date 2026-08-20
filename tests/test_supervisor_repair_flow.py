@@ -6,6 +6,7 @@ from kaggle_agent.supervisor.generation import RuntimeRevision, read_git_revisio
 from kaggle_agent.supervisor.incidents import Incident
 from kaggle_agent.supervisor.repair_flow import RepairCoordinator
 from kaggle_agent.supervisor.review import Review, ReviewVerdict
+from kaggle_agent.supervisor.risk import RepairRiskTier, evaluate_repair_risk
 from kaggle_agent.supervisor.spec import RepairSpec
 from kaggle_agent.supervisor.state import RuntimeLayout, SupervisorStateStore
 from kaggle_agent.supervisor.verify import VerificationResult
@@ -152,3 +153,49 @@ def test_same_failed_patch_is_not_retried_indefinitely(tmp_path: Path):
     assert result.status == "REJECTED"
     assert result.findings == ("REPEATED_BAD_PATCH",)
     assert calls == 2
+
+
+def test_prohibited_risk_never_invokes_implementer(tmp_path: Path):
+    root = tmp_path / "repo"
+    root.mkdir()
+    run = lambda *args: subprocess.run(("git", "-C", str(root), *args), check=True, capture_output=True)
+    run("init", "-q")
+    (root / "x.py").write_text("x = 1\n", encoding="utf-8")
+    run("add", "x.py")
+    run("-c", "user.email=t@e", "-c", "user.name=t", "commit", "-qm", "init")
+    revision = RuntimeRevision(read_git_revision(root), read_tree_revision(root), "generation-0001")
+    incident = Incident(
+        incident_id="i6", worker_id="w", generation_id="generation-0001", cycle_id="c",
+        experiment_id=None, competition="demo", stage="SUBMIT", stage_attempt=1,
+        revision=revision, outcome_state="recoverable_failure", exception_type="NameError",
+        exception_message="NameError", traceback=None, failure_signature="sig-6",
+        evidence=(), artifacts=(), external_job=None, kernel_ref=None, candidate_csv=None,
+        recent_logs=(), created_at="now",
+    )
+    spec = RepairSpec("r6", "i6", "generation-0001", revision, "identity", "SUBMIT", "NameError", "bad identity", "fails", "works", ("src/kaggle_agent/autonomy/outbox.py",), "EXISTING_TEST_REPRO", (), (), (), (), (), ("src/kaggle_agent/autonomy/outbox.py",), 8, 5, 500, "SUBMIT", "low", ("focused test passes",))
+    risk = evaluate_repair_risk(
+        incident,
+        FailureClassification(FailureClass.CODE_DEFECT, 0.99, True),
+        spec,
+        minimum_tier=RepairRiskTier.PROHIBITED,
+    )
+    calls = 0
+
+    def implementer(*_args):
+        nonlocal calls
+        calls += 1
+
+    result = RepairCoordinator(root, SupervisorStateStore(RuntimeLayout.for_repo(root, tmp_path / "state"))).execute(
+        incident,
+        FailureClassification(FailureClass.CODE_DEFECT, 0.99, True),
+        spec,
+        spec_approved=True,
+        implementer=implementer,
+        reviewer=lambda *_: Review(ReviewVerdict.APPROVE, True, True, True, True, True),
+        mode="repair_only",
+        risk_decision=risk,
+    )
+
+    assert result.status == "REJECTED"
+    assert result.findings == ("risk_policy_block",)
+    assert calls == 0

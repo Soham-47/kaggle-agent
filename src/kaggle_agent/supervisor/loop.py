@@ -131,14 +131,19 @@ class Supervisor:
             return ("NEEDS_AUTHORITY", "recoverable worker result has no durable incident")
         outbox = ExternalActionOutbox(self.root, state_root=self.layout.state_root)
         classification = classify_after_reconciliation(incident, outbox, lambda item: item)
-        sessions = DeepSeekSupervisorAgents.from_env()
+        sessions = None
+        classification_error: str | None = None
         if classification.failure_class is FailureClass.UNKNOWN:
+            sessions = DeepSeekSupervisorAgents.from_env()
             if sessions is None:
-                return ("NEEDS_AUTHORITY", "DEEPSEEK_API_KEY is unavailable for ambiguous classification")
+                classification_error = "DEEPSEEK_API_KEY is unavailable for ambiguous classification"
             try:
-                classification = sessions.classify(incident)
+                if sessions is not None:
+                    classification = sessions.classify(incident)
             except AgentProtocolError as exc:
-                return ("NEEDS_AUTHORITY", str(exc))
+                classification_error = str(exc)
+        elif classification.failure_class in {FailureClass.CODE_DEFECT, FailureClass.TEST_FAILURE}:
+            sessions = DeepSeekSupervisorAgents.from_env()
         self.store.write_json(
             f"incidents/{incident.incident_id}/classification.json",
             {
@@ -149,19 +154,7 @@ class Supervisor:
                 "reason": classification.reason,
             },
         )
-        if classification.failure_class not in {FailureClass.CODE_DEFECT, FailureClass.TEST_FAILURE} or not classification.repairable:
-            return (classification.failure_class.value, classification.reason)
         supervisor_config = self.settings.supervisor_config()
-        if not supervisor_config.repair.enabled:
-            return ("NEEDS_AUTHORITY", "supervisor repair is disabled")
-        if mode == "auto_safe" and not supervisor_config.promotion_automatic:
-            return ("NEEDS_AUTHORITY", "automatic promotion is disabled unless supervisor.promotion.automatic is true")
-        if mode == "auto_safe" and not supervisor_config.auto_safe.enabled:
-            return ("NEEDS_AUTHORITY", "risk-adaptive AUTO_SAFE is disabled unless supervisor.auto_safe.enabled is true")
-        if classification.confidence < supervisor_config.repair.classification_min_confidence:
-            return ("NEEDS_AUTHORITY", "classification confidence is below repair threshold")
-        if sessions is None:
-            return ("NEEDS_AUTHORITY", "DEEPSEEK_API_KEY is unavailable for repair roles")
         external_state = external_state_for_incident(incident, outbox)
         provisional_risk = evaluate_repair_risk(
             incident, classification, None, external_state=external_state,
@@ -175,7 +168,44 @@ class Supervisor:
             self.store, provisional_risk, phase="pre-spec",
             failure_class=classification.failure_class.value, incident_id=incident.incident_id,
         )
+
+        def record_observe_post_spec(reason: str) -> None:
+            if mode != "observe":
+                return
+            self.store.write_json(
+                f"incidents/{incident.incident_id}/risk-post-spec.json",
+                {"status": "NOT_AUTHORED", "reason": reason, "decision": provisional_risk.to_dict()},
+            )
+            record_risk_decision(
+                self.store, provisional_risk, phase="post-spec",
+                failure_class=classification.failure_class.value,
+                incident_id=incident.incident_id,
+                previous_tier=provisional_risk.tier,
+            )
+
+        if classification_error is not None:
+            record_observe_post_spec(classification_error)
+            return ("NEEDS_AUTHORITY", classification_error)
+        if classification.failure_class not in {FailureClass.CODE_DEFECT, FailureClass.TEST_FAILURE} or not classification.repairable:
+            record_observe_post_spec("classification is not a repairable source defect")
+            return (classification.failure_class.value, classification.reason)
+        if not supervisor_config.repair.enabled:
+            record_observe_post_spec("supervisor repair is disabled")
+            return ("NEEDS_AUTHORITY", "supervisor repair is disabled")
+        if mode == "auto_safe" and not supervisor_config.promotion_automatic:
+            record_observe_post_spec("automatic promotion is disabled")
+            return ("NEEDS_AUTHORITY", "automatic promotion is disabled unless supervisor.promotion.automatic is true")
+        if mode == "auto_safe" and not supervisor_config.auto_safe.enabled:
+            record_observe_post_spec("risk-adaptive AUTO_SAFE is disabled")
+            return ("NEEDS_AUTHORITY", "risk-adaptive AUTO_SAFE is disabled unless supervisor.auto_safe.enabled is true")
+        if classification.confidence < supervisor_config.repair.classification_min_confidence:
+            record_observe_post_spec("classification confidence is below repair threshold")
+            return ("NEEDS_AUTHORITY", "classification confidence is below repair threshold")
+        if sessions is None:
+            record_observe_post_spec("DEEPSEEK_API_KEY is unavailable for repair roles")
+            return ("NEEDS_AUTHORITY", "DEEPSEEK_API_KEY is unavailable for repair roles")
         if provisional_risk.tier is RepairRiskTier.PROHIBITED or external_state in {ExternalStateCertainty.PENDING, ExternalStateCertainty.AMBIGUOUS, ExternalStateCertainty.UNKNOWN}:
+            record_observe_post_spec("risk policy blocks autonomous candidate generation")
             return ("NEEDS_AUTHORITY", "risk policy does not permit autonomous candidate generation")
         repair_id = f"repair-{incident.incident_id[:12]}-a1"
         try:
@@ -200,6 +230,7 @@ class Supervisor:
                 },
             )
         except (AgentProtocolError, OSError, ValueError) as exc:
+            record_observe_post_spec(str(exc))
             return ("NEEDS_AUTHORITY", str(exc))
         limits = supervisor_config.repair
         if mode != "observe" and (
@@ -210,14 +241,22 @@ class Supervisor:
             return ("REJECTED", "RepairSpec exceeds configured repair limits")
         spec_risk = evaluate_repair_risk(
             incident, classification, spec, external_state=external_state,
+            minimum_tier=provisional_risk.tier,
             settings=supervisor_config.auto_safe,
         )
         self.store.write_json(f"repairs/{repair_id}/risk-spec.json", spec_risk.to_dict())
+        self.store.write_json(
+            f"incidents/{incident.incident_id}/risk-post-spec.json",
+            {"status": "AUTHORED", "repair_id": repair_id, "decision": spec_risk.to_dict()},
+        )
         record_risk_decision(
             self.store, spec_risk, phase="post-spec",
-            failure_class=classification.failure_class.value, incident_id=incident.incident_id,
+            failure_class=classification.failure_class.value,
+            incident_id=incident.incident_id,
+            previous_tier=provisional_risk.tier,
         )
         if not spec_risk.candidate_generation_allowed:
+            record_observe_post_spec("risk policy does not permit this RepairSpec")
             return ("NEEDS_AUTHORITY", "risk policy does not permit this RepairSpec")
         if mode == "observe":
             return ("SPEC_READY", repair_id)

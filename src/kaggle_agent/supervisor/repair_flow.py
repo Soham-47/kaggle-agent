@@ -113,7 +113,8 @@ class RepairCoordinator:
                     incident, classification, spec,
                     changed_paths=paths, changed_lines=changed_lines, diff=diff,
                     external_state=initial_risk.external_state,
-                    failed_attempts=max(0, attempts - 1), settings=self.risk_settings,
+                    failed_attempts=max(0, attempts - 1),
+                    minimum_tier=initial_risk.tier, settings=self.risk_settings,
                 )
                 candidate_policy = RepairPolicy(DiffLimits(
                     max_changed_source_files=min(spec.max_changed_source_files, candidate_risk.max_source_files),
@@ -174,19 +175,22 @@ class RepairCoordinator:
             self.state.write_json(f"repairs/{spec.repair_id}/risk-post-diff.json", candidate_risk.to_dict())
             record_risk_decision(
                 self.state, candidate_risk, phase="post-diff",
-                failure_class=classification.failure_class.value, incident_id=incident.incident_id,
+                failure_class=classification.failure_class.value,
+                incident_id=incident.incident_id,
+                previous_tier=initial_risk.tier,
             )
             review = reviewer(incident, spec, diff, verification)
             review_findings = tuple(
                 f"{finding.severity}:{finding.issue}"
                 for finding in (*review.blocking_findings, *review.non_blocking_findings)
             )
+            post_diff_risk = candidate_risk
             candidate_risk = evaluate_repair_risk(
                 incident, classification, spec,
                 changed_paths=paths, changed_lines=self._changed_lines(worktree), diff=diff,
                 external_state=initial_risk.external_state,
                 failed_attempts=max(0, attempts - 1), reviewer_findings=review_findings,
-                settings=self.risk_settings,
+                minimum_tier=post_diff_risk.tier, settings=self.risk_settings,
             )
             acceptance = RepairAcceptance(
                 classification_allows_repair=True, spec_approved=True,
@@ -205,7 +209,9 @@ class RepairCoordinator:
             self.state.write_json(f"repairs/{spec.repair_id}/risk-post-review.json", candidate_risk.to_dict())
             record_risk_decision(
                 self.state, candidate_risk, phase="post-review",
-                failure_class=classification.failure_class.value, incident_id=incident.incident_id,
+                failure_class=classification.failure_class.value,
+                incident_id=incident.incident_id,
+                previous_tier=post_diff_risk.tier,
             )
             self.budgets.record(incident.incident_id, incident.failure_signature, cycle_id, accepted=acceptance.accepted)
             if not acceptance.accepted:

@@ -89,6 +89,36 @@ def test_observe_captures_incident_and_persists_spec_without_repair(tmp_path: Pa
     assert agents.classify_calls == 0
     assert supervisor.store.read_json(f"incidents/{incident.incident_id}/classification.json")["failure_class"] == "CODE_DEFECT"
     assert supervisor.store.read_json(f"repairs/repair-{incident.incident_id[:12]}-a1/spec.json")["incident_id"] == incident.incident_id
+    pre = supervisor.store.read_json(f"incidents/{incident.incident_id}/risk-pre-spec.json")
+    post = supervisor.store.read_json(f"repairs/repair-{incident.incident_id[:12]}-a1/risk-spec.json")
+    assert post["tier"] in {"LOW", "MEDIUM", "HIGH", "PROHIBITED"}
+    assert post["risk_floor"] == pre["tier"]
+
+
+def test_observe_persists_hypothetical_risk_for_nonrepairable_incident(tmp_path: Path, monkeypatch):
+    root = tmp_path / "repo"
+    root.mkdir()
+    revision = RuntimeRevision("a" * 40, "b" * 40, "generation-0001")
+    settings = _observe_settings(root)
+    monkeypatch.setenv("KAGGLE_AGENT_SUPERVISOR_DIR", str(tmp_path / "state"))
+    supervisor = Supervisor(settings, root)
+    incident = _observe_incident(revision, "HTTP 503 from Kaggle", "observe-transient")
+    supervisor.store.write_json(f"incidents/{incident.incident_id}.json", incident.to_dict())
+
+    result = supervisor._handle_worker_result(
+        {"status": "RECOVERABLE_FAILURE", "incident_id": incident.incident_id}, "observe", "demo"
+    )
+
+    assert result[0] == "TRANSIENT_EXTERNAL"
+    risk = supervisor.store.read_json(f"incidents/{incident.incident_id}/risk-pre-spec.json")
+    assert risk["tier"] == "PROHIBITED"
+    assert risk["candidate_generation_allowed"] is False
+    post = supervisor.store.read_json(f"incidents/{incident.incident_id}/risk-post-spec.json")
+    assert post["status"] == "NOT_AUTHORED"
+    assert post["decision"]["tier"] == risk["tier"]
+    metrics = supervisor.store.read_json("risk-metrics.json")
+    assert metrics["phases"]["pre-spec"] == 1
+    assert metrics["phases"]["post-spec"] == 1
 
 
 def test_observe_uses_deepseek_only_for_unknown_classification(tmp_path: Path, monkeypatch):
