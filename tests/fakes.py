@@ -36,7 +36,7 @@ def successful_kernel_train(root: Path):
             (output / "semantic_evidence.json").write_text(json.dumps(evidence), encoding="utf-8")
             (output / "artifact_manifest.runtime.json").write_text(
                 json.dumps({
-                    "template_version": "rsna-2d-dino-mil-v1",
+                    "template_version": "image-2d-dino-mil-v1",
                     "fold_outputs": evidence["fold_outputs"],
                     "prediction_hashes": evidence["prediction_hashes"],
                 }),
@@ -222,7 +222,7 @@ class FakeKaggleApi:
         (dest / "semantic_evidence.json").write_text(json.dumps(evidence), encoding="utf-8")
         (dest / "artifact_manifest.runtime.json").write_text(
             json.dumps({
-                "template_version": "rsna-2d-dino-mil-v1",
+                "template_version": "image-2d-dino-mil-v1",
                 "fold_outputs": evidence["fold_outputs"],
                 "prediction_hashes": evidence["prediction_hashes"],
             }),

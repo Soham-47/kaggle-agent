@@ -111,10 +111,6 @@ print("fallback constant wrote", len(out))
     }
 
 
-# Older tests and call sites still use this name.
-build_rsna_baseline_notebook = build_baseline_notebook
-
-
 def _load_methods(root: Path, competition: CompetitionConfig) -> dict:
     path = root / competition.workspace_relative / "pipeline" / "methods.json"
     if not path.is_file():

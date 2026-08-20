@@ -1,4 +1,4 @@
-"""Rendered RSNA 2D DINO MIL image template."""
+"""Rendered 2D DINO MIL image template."""
 
 KERNEL_RECIPE_SOURCE = r'''
 import csv
@@ -463,6 +463,6 @@ evidence = {
     "prediction_hashes": prediction_hashes,
 }
 Path("semantic_evidence.json").write_text(json.dumps(evidence, indent=2), encoding="utf-8")
-Path("artifact_manifest.runtime.json").write_text(json.dumps({"template_version": "rsna-2d-dino-mil-v1", "fold_outputs": fold_outputs, "prediction_hashes": prediction_hashes, "semantic_evidence": evidence}, indent=2), encoding="utf-8")
+Path("artifact_manifest.runtime.json").write_text(json.dumps({"template_version": IMAGE_CONTRACT["template"], "fold_outputs": fold_outputs, "prediction_hashes": prediction_hashes, "semantic_evidence": evidence}, indent=2), encoding="utf-8")
 print("wrote verified DINO MIL submission", len(sub))
 '''

@@ -1,5 +1,5 @@
 {
-  "template_version": "rsna-2d-dino-mil-v1",
+  "template_version": "image-2d-dino-mil-v1",
   "competition_id": "rsna_knee",
   "source_card_refs": [
     "source-model-metaresearch-dinov2-small",

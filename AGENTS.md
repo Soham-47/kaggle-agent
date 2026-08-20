@@ -1,56 +1,43 @@
-# Agent instructions: kaggle-agent
+# Agent instructions: Kaggle Agent
 
-## Codex team routing
+This is a generic framework for one Kaggle competition at a time. Use
+`config/competitions/_template.yaml` and `kaggle-agent init --competition …`
+to create a competition contract and pipeline scaffold. Do not assume a
+particular competition, dataset, target, metric, or identifier column.
 
-This repository follows the reusable local Codex orchestration policy in `~/.codex/AGENTS.md`. For implementation, fix, refactor, or test work, the Sol lead should delegate the complete plan to exactly one `coder`; the coder owns repository investigation, implementation, tests, debugging, and verification before returning a handoff to Sol. Use `researcher`, `browser_debugger`, or `reviewer` only when their specialist scope is genuinely needed. Every spawn call must set `fork_turns = "none"` explicitly.
+## Architecture and safety
 
-This repo runs one Kaggle competition at a time. Set `default_competition` in `config/settings.yaml` and keep that contest's facts in `memory/COMPETITION.md` plus `config/competitions/<id>.yaml`.
+- `StageLedger`, `StageExecutor`, durable stage outputs, `RunLock`, and
+  `ExternalActionOutbox` are canonical. Do not build parallel replacements.
+- The supervisor and worker are separate processes. The worker never replaces
+  its own running source tree.
+- Kernel pushes and submissions must record durable intent before mutation and
+  reconcile authoritative Kaggle state after uncertainty.
+- Never submit through a browser.
+- Keep credentials, private data, generated memory, datasets, and competition
+  outputs outside tracked source.
+- `auto_safe` is disabled by default. Do not weaken protected paths, approval,
+  outbox, replay, promotion, rollback, or validation policy.
 
-## Channels
+## Runtime state
 
-| Action | Tool |
-|--------|------|
-| Download meta CSV, list kernels, submit, LB, limits | `kaggle_agent.kaggle_api.KaggleClient` + `~/.kaggle/kaggle.json` |
-| Discussions / HTML pages the API cannot give | browser-harness (research only; headed Chrome from `scripts/start_research_chrome.sh`) |
-| Deep research (notebooks, papers, repos, web) | `research/agent.py` tool loop; `source_cards.py` / `deep.py` as tools |
-| LLM plan / code brief / distill / vision | Official DeepSeek v4-flash (`DEEPSEEK_API_KEY`) |
-| Approve a real submit | Telegram `/yes` (when enabled) |
+Checked-in `memory/templates/` files are sanitized starters. Runtime memory is
+generated under the configured state root. `KAGGLE_AGENT_STATE_ROOT` and
+`KAGGLE_AGENT_SUPERVISOR_DIR` may relocate mutable state.
 
-Never submit via the browser. Never invent a second memory store.
+## Research and code
 
-RESEARCH always runs in this order: Kaggle snapshot, then browser pages, then the research tool-loop. PLAN and CODE are the same kind of tool-loop. Source cards and `pipeline/methods.json` are what CODE implements.
+Research evidence must be collected before planning. Plans and code must use
+the active competition contract and its source cards. Local execution is smoke
+testing; full training belongs on Kaggle Kernels.
 
-## Memory (only these are ingested)
-
-| File | Role |
-|------|------|
-| `memory/MEMORY.md` | user prefs, goals, best score, lessons |
-| `memory/COMPETITION.md` | active contest only |
-| `memory/state.md` | phase, budget, heartbeat fields |
-| `memory/research.md` | distilled research (Kaggle snapshot + browser + deep digest) |
-| `memory/research-deep/source-*.md` | last 2 method cards (PLAN/CODE) |
-| `memory/experiments/*.md` | last 2 loaded into context |
-| `memory/daily/` | logs only; not in the context pack |
-
-## Rules
-
-1. Read memory before PLAN/HEAL.
-2. Smallest code change that can improve score.
-3. Train on Kaggle Kernels; local = smoke.
-4. No secrets in memory files.
-5. One approved slice at a time unless the user grants autonomy.
-6. CODE follows method cards: attach named datasets, find hidden test IDs from folders, rank-average members.
-
-## Commands
+## Verification
 
 ```bash
-cd ~/kaggle-agent
-uv run pytest
-uv run python scripts/run_daily.py --competition <id>
-# with Zen plan:
-OPENCODE_API_KEY=... uv run python scripts/run_daily.py
-# ops (Waku-style traces + evals + local dashboard)
-uv run kaggle-agent evals
-uv run kaggle-agent dashboard   # http://127.0.0.1:7777  (Run live or type /run)
-uv run kaggle-agent run         # same live cycle as /run
+uv run python -m compileall -q src
+uv run pytest -q -m "not integration"
+git diff --check
 ```
+
+For changes affecting supervisor or external actions, run the focused
+supervisor, replay, outbox, and approval tests as well.

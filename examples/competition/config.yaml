@@ -1,0 +1,11 @@
+id: example
+slug: example
+title: Synthetic Example Competition
+metric:
+  name: auc
+  direction: max
+submission:
+  id_column: id
+  probability_columns: [target]
+workspace:
+  relative: examples/competition

@@ -1,0 +1,1 @@
+"""Synthetic example competition pipeline."""

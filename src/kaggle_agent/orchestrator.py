@@ -1556,15 +1556,15 @@ class Orchestrator:
                 result.errors.append(f"code: image contract JSON invalid: {exc}")
                 return state
             if (
-                contract.get("template") == "rsna-2d-dino-mil-v1"
-                and manifest.get("template_version") == "rsna-2d-dino-mil-v1"
+                contract.get("template") == "image-2d-dino-mil-v1"
+                and manifest.get("template_version") == "image-2d-dino-mil-v1"
                 and zen is None
             ):
                 result.code_ok = True
                 result.wrote_recipe = True
                 result.wrote_methods = True
-                result.code_agent = "rsna-2d-dino-mil-template"
-                append_daily_log("code: using validated RSNA 2D DINO MIL template", self.root)
+                result.code_agent = "image-2d-dino-mil-template"
+                append_daily_log("code: using validated 2D DINO MIL template", self.root)
                 return state
         agent, code_state = make_code_agent(
             zen,
@@ -2059,7 +2059,7 @@ class Orchestrator:
             result.errors.append("validate: image artifact manifest is invalid JSON")
             append_daily_log("validate rejected: image artifact manifest invalid JSON", self.root)
             return False
-        if manifest.get("template_version") != "rsna-2d-dino-mil-v1":
+        if manifest.get("template_version") != "image-2d-dino-mil-v1":
             return True
         evidence_path = submission_path.parent / "semantic_evidence.json"
         if not evidence_path.is_file():
@@ -2097,7 +2097,7 @@ class Orchestrator:
             append_daily_log("validate rejected: image runtime artifact manifest invalid JSON", self.root)
             return False
         if (
-            runtime_manifest.get("template_version") != "rsna-2d-dino-mil-v1"
+            runtime_manifest.get("template_version") != "image-2d-dino-mil-v1"
             or runtime_manifest.get("fold_outputs") != evidence.get("fold_outputs")
             or runtime_manifest.get("prediction_hashes") != evidence.get("prediction_hashes")
         ):
@@ -2155,8 +2155,8 @@ class Orchestrator:
             except json.JSONDecodeError:
                 contract = manifest = {}
             if (
-                contract.get("template") == "rsna-2d-dino-mil-v1"
-                and manifest.get("template_version") == "rsna-2d-dino-mil-v1"
+                contract.get("template") == "image-2d-dino-mil-v1"
+                and manifest.get("template_version") == "image-2d-dino-mil-v1"
             ):
                 result.plan_verified = True
                 result.plan_text = write_plan_text(
@@ -2164,7 +2164,7 @@ class Orchestrator:
                     "validated image template",
                     "run the local smoke and preserve the image contract",
                 )
-                append_daily_log("plan: using validated RSNA 2D DINO MIL template", self.root)
+                append_daily_log("plan: using validated 2D DINO MIL template", self.root)
                 return state
 
         agent, _state = make_plan_agent(

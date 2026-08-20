@@ -28,7 +28,7 @@ def test_sanitize_drops_junk_keeps_full_pin():
     datasets = sanitize_datasets(
         ["dataset/model", "wguesdon/rsna-knee-llm-report-labels-opus", "metaresearch/dinov2"]
     )
-    assert datasets == ["sohamgawd47foden/rsna-knee-dinov2-vits14"]
+    assert datasets == ["wguesdon/rsna-knee-llm-report-labels-opus"]
 
 
 def test_valid_attach_ref_rejects_url_fragment_dataset_refs():

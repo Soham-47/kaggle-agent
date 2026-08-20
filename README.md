@@ -1,151 +1,137 @@
-# kaggle-agent
+# Kaggle Agent
 
-kaggle-agent is a daily loop for one Kaggle contest at a time.
-It reads public kernels, writes a small experiment, and trains on Kaggle Kernels.
-It submits a file only after you approve.
+Kaggle Agent is a competition-agnostic framework for researching public
+solutions, planning experiments, generating competition pipeline code, running
+local smoke checks, training on Kaggle Kernels, validating artifacts, and
+optionally submitting through the Kaggle API. It also includes a conservative,
+out-of-process supervisor for incident capture and reviewed self-repair.
 
-The agent code does not bind to one contest.
-A contest is three files: YAML in `config/competitions/`, `memory/COMPETITION.md`, and a pipeline in `competitions/<id>/`.
-`competitions/rsna_knee/` is one example. It is not the only contest.
+## Architecture
 
-## What a cycle does
+```mermaid
+flowchart LR
+    S[Supervisor] --> W[Worker]
+    W --> R[Research]
+    R --> P[Plan]
+    P --> C[Code]
+    C --> T[Train]
+    T --> V[Validate]
+    V --> U[Submit]
+    U --> F[Feedback]
+    W -->|failure| S
+    S --> I[Incident]
+    I --> X[Repair, verify, review]
+    X --> G[New generation]
+    G --> W
+```
 
-RESEARCH always runs first:
+## Key features
 
-1. Kaggle API snapshot (limits, leaderboard, kernels, meta files)
-2. Browser pages that the API does not give (overview, discussion)
-3. One method card per top public kernel
-4. Recursive search over Kaggle, arXiv, GitHub, and the web
+- Competition-neutral configuration and generated scaffolds.
+- Durable stage outputs, replay epochs, and checkpoint-aware resume.
+- Exactly-once logical identity for kernel pushes and submissions.
+- Kaggle API submissions only; browser access is research-only.
+- Optional Telegram approval and operational controls.
+- DeepSeek-backed research, planning, coding, and supervisor repair roles.
+- Isolated repair worktrees, independent verification, and code review.
+- Dry-run and supervisor `observe` modes enabled by conservative defaults.
 
-PLAN reads those cards.
-CODE applies the contest recipe and the listed datasets.
-Then the cycle does a local smoke test and builds a kernel package.
-It can push the package.
-A live submit waits for Telegram `/yes`.
+## Requirements
 
-## Setup
+Python 3.11+, [uv](https://docs.astral.sh/uv/), a Kaggle account, and a
+`DEEPSEEK_API_KEY` for LLM-backed stages. Telegram is optional. Put Kaggle
+credentials in `~/.kaggle/kaggle.json`; never commit credentials or `.env`.
 
-You need Python 3.11+, [uv](https://github.com/astral-sh/uv), and a Kaggle account.
+## Quick start
 
 ```bash
 git clone https://github.com/Soham-47/kaggle-agent.git
 cd kaggle-agent
 uv sync --extra dev
 cp .env.example .env
-# edit .env: DEEPSEEK_API_KEY, optional Telegram tokens
-# put ~/.kaggle/kaggle.json in place (Kaggle account → Settings → API)
+kaggle-agent init --competition my_competition --slug kaggle-url-slug
 ```
 
-Copy `.env.example` to `.env`.
-Set `DEEPSEEK_API_KEY` in `.env`. Telegram tokens are optional.
-Put `kaggle.json` in `~/.kaggle/` (Kaggle account, Settings, API).
+Review the generated files under `config/competitions/` and
+`competitions/my_competition/pipeline/`. Initialization refuses to overwrite
+existing configuration, pipeline, or runtime memory files.
 
-For discussion HTML, run this command:
+## Add a competition
+
+Use the generic contract template and scaffold:
 
 ```bash
-bash scripts/start_research_chrome.sh
-# sign in to Kaggle once in that window; leave it running
+kaggle-agent init --competition my_competition --slug kaggle-url-slug
+# edit config/competitions/my_competition.yaml
+# implement competitions/my_competition/pipeline/
 ```
 
-Sign in to Kaggle one time in that window.
-Leave the window running.
-
-## Point it at a contest
-
-```bash
-bash scripts/new_competition.sh my_id the-kaggle-url-slug
-# edit config/competitions/my_id.yaml (metric, labels, submit.mode)
-# edit competitions/my_id/pipeline/ (schema, baseline, recipe)
-# set default_competition: my_id in config/settings.yaml
-```
-
-Edit `config/competitions/my_id.yaml` (metric, labels, `submit.mode`).
-Edit `competitions/my_id/pipeline/` (schema, baseline, recipe).
-Set `default_competition: my_id` in `config/settings.yaml`.
-
-`submit.mode` is `notebook` when the host accepts only kernel submits.
-`submit.mode` is `file` for a CSV upload.
-
-Obey the host GPU rules in `kernel.enable_gpu`.
-Some contests reject P100.
+`kaggle-agent onboard <slug>` can verify a public Kaggle competition and create
+a contract from its sample submission when authenticated access is available.
+The older `scripts/new_competition.sh` command remains as a wrapper around
+`kaggle-agent init`.
 
 ## Run
 
 ```bash
-uv run pytest
-uv run python scripts/run_daily.py --competition my_id
-# dry-run is the default
-uv run python scripts/run_daily.py --competition my_id --no-dry-run
+kaggle-agent run dry
+kaggle-agent --competition my_competition --dry-run
+kaggle-agent --competition my_competition --no-dry-run
 ```
 
-Dry-run is the default.
-If you want a live cycle, add `--no-dry-run`.
+The repository does not select a competition by default. Pass `--competition`
+or set one explicitly in `config/settings.yaml` after initialization.
 
-Telegram is a separate process:
+Supervisor modes are explicit and conservative:
 
 ```bash
-uv run python scripts/telegram_bot.py
+kaggle-agent supervisor --competition my_competition --mode observe
+kaggle-agent supervisor --competition my_competition --mode repair_only
 ```
 
-Commands:
+`auto_safe` remains disabled by default and is not a production rollout
+recommendation.
 
-- `/run` does a full live loop. It counts as approval.
-- `/run dry` does a practice loop. It does not spend a submission.
-- `/status`, `/pause`, `/resume`
+## Safety
 
-## Submit safety
+- Dry-run is the default.
+- Browser submission is prohibited.
+- Real submissions require the configured approval flow.
+- External actions use a durable outbox and authoritative reconciliation.
+- Repairs run in isolated committed generations with independent gates.
+- Protected supervisor, approval, outbox, credential, and replay paths are
+  excluded from autonomous repair.
+- Runtime state is generated outside the tracked templates and can be placed
+  under `KAGGLE_AGENT_STATE_ROOT` or `KAGGLE_AGENT_SUPERVISOR_DIR`.
 
-1. `/run` is a full live loop: research until cards, N train slices, one submit.
-2. `/run` counts as approval.
-3. Cron still writes `memory/pending_submit.md`.
-4. Cron can wait for `/yes` unless you pass `--assume-approved`.
-5. `/run dry` does not spend a submission.
+See [docs/safety.md](docs/safety.md) and [docs/supervisor.md](docs/supervisor.md).
 
-CAUTION: Do not submit through the browser.
-
-## Tools
-
-| Need | What we use |
-|------|-------------|
-| Limits, LB, kernels, submit | `kaggle_agent.kaggle_api.KaggleClient` + `~/.kaggle/kaggle.json` |
-| Discussion HTML | browser-use on `scripts/start_research_chrome.sh` |
-| Plan / code brief | Official DeepSeek API (`DEEPSEEK_API_KEY`) |
-| Approve submit | Telegram `/yes` |
-
-## Memory
-
-Only these files go into the LLM pack:
+## Repository structure
 
 ```text
-memory/MEMORY.md
-memory/COMPETITION.md
-memory/state.md
-memory/research.md
-memory/research-deep/source-*.md   # last 2
-memory/experiments/                # last 2
+config/competitions/       competition contracts and the generic template
+competitions/<id>/         competition-local pipeline code
+examples/competition/      small local example scaffold
+memory/templates/          sanitized runtime templates
+src/kaggle_agent/          shared runtime and supervisor
+tests/                     unit and local integration tests
+docs/                      architecture, operations, and safety guidance
 ```
 
-Starter copies are in `memory/templates/`.
-Do not put secrets in memory files.
-
-## Cron
+## Development
 
 ```bash
-bash scripts/install_cron.sh 6
+uv run python -m compileall -q src
+uv run pytest -q -m "not integration"
+git diff --check
 ```
 
-The heal ladder is tune, then recipe, then new, then pause.
-Read `docs/cron.md` for details.
+## Status
 
-## Layout
+The supervisor is implemented with `observe` and `repair_only` flows. DeepSeek
+and external-service validation depends on local credentials. `AUTO_SAFE` is
+disabled by default; unrestricted autonomous repair is not certified.
 
-```text
-src/kaggle_agent/           shared agent
-competitions/<id>/pipeline  per-contest training recipe
-config/competitions/        contest YAML
-memory/                     lean files the loop reads
-scripts/run_daily.py        entry
-scripts/new_competition.sh  scaffold a new contest
-```
+## License
 
-The project uses the MIT license. See `LICENSE`.
+MIT. See [LICENSE](LICENSE).
