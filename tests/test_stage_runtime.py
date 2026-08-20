@@ -2,7 +2,8 @@ from __future__ import annotations
 
 from kaggle_agent.autonomy.outcomes import OutcomeState, StageOutcome
 from kaggle_agent.autonomy.runtime import StageExecutor, StageInput, StageLedger, StageResult
-from kaggle_agent.orchestrator import CycleResult, Orchestrator
+from kaggle_agent.autonomy.stage_outputs import restore
+from kaggle_agent.orchestrator import CycleResult
 
 
 def test_executor_records_success_and_replays_same_idempotency_key(tmp_path):
@@ -77,9 +78,9 @@ def test_outputs_exclude_secret_like_fields(tmp_path):
 
 def test_orchestrator_rehydrates_only_allowlisted_stage_outputs():
     result = CycleResult("demo", dry_run=False)
-    Orchestrator._restore_stage_outputs(
-        result,
+    restore(
         "KERNEL_TRAIN",
+        result,
         {
             "kernel_ref": "owner/kernel",
             "kernel_pending": True,

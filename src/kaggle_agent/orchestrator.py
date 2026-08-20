@@ -10,7 +10,7 @@ import time
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any
 
 from kaggle_agent.code.workspace import ensure_pipeline_ready
 from kaggle_agent.config import CompetitionConfig, Settings, load_competition, load_settings
@@ -119,6 +119,8 @@ from kaggle_agent.autonomy.approval import SubmissionAutonomy
 from kaggle_agent.autonomy.outcomes import OutcomeState, StageOutcome, failure_signature
 from kaggle_agent.autonomy.repair_tools import IncidentStore
 from kaggle_agent.autonomy.runtime import StageExecutor, StageInput, StageLedger, StageResult
+from kaggle_agent.autonomy.stage_outputs import capture as capture_stage_outputs
+from kaggle_agent.autonomy.stage_outputs import restore as restore_stage_outputs
 from kaggle_agent.autonomy.outbox import (
     ExternalAction,
     ExternalActionOutbox,
@@ -135,29 +137,6 @@ TRAIN_SLICE_PHASES = ("PLAN", "CODE", "LOCAL_SMOKE", "KERNEL_TRAIN", "VALIDATE_S
 SUBMIT_PHASES = ("TELEGRAM_APPROVE", "SUBMIT", "FEEDBACK")
 TAIL_PHASES = ("HEAL", "REPORT")
 _SLICE_ERR_PREFIXES = ("code:", "smoke:", "kernel:", "validate:")
-
-_STAGE_OUTPUT_FIELDS: dict[str, tuple[str, ...]] = {
-    "RESEARCH": (
-        "research_verified", "research_verification_detail", "research_passes",
-        "deep_ok", "deep_learnings", "deep_sources", "kaggle_ok", "browser_ok",
-    ),
-    "PLAN": ("plan_text", "plan_verified"),
-    "CODE": (
-        "code_ok", "code_verified", "code_agent", "wrote_custom_infer",
-        "wrote_methods", "wrote_recipe",
-    ),
-    "LOCAL_SMOKE": ("smoke_ok", "smoke_path", "code_ok", "code_verified"),
-    "KERNEL_TRAIN": (
-        "kernel_ok", "kernel_pending", "kernel_duplicate", "kernel_ref",
-        "kernel_version", "kernel_path", "kernel_resumed", "kernel_judge_ok",
-    ),
-    "VALIDATE_SUB": ("validate_ok", "candidate_csv", "output_duplicate"),
-    "TELEGRAM_APPROVE": ("approve_ok", "waiting_approve"),
-    "SUBMIT": ("submit_ok", "submit_message", "submission_pending", "candidate_csv"),
-    "FEEDBACK": ("feedback_score", "feedback_pending"),
-    "HEAL": ("heal_decision",),
-}
-
 
 @dataclass
 class CycleResult:
@@ -516,12 +495,12 @@ class Orchestrator:
                 run = stage.run_typed(state, dry, result)
                 state = run.state
                 outcome = run.outcome or self._stage_outcome(phase, result, errors_before)
-                return StageResult(outcome, self._stage_outputs(phase, result))
+                return StageResult(outcome, capture_stage_outputs(phase, result))
 
             execution = self._stage_executor.execute(request, run_stage)
             outcome = execution.outcome
             if execution.replayed:
-                self._restore_stage_outputs(result, phase, execution.outputs)
+                restore_stage_outputs(phase, result, execution.outputs)
                 append_daily_log(f"{phase} replayed from durable stage ledger", self.root)
             result.stage_outcomes.append(outcome)
             if self._tracer is not None:
@@ -558,30 +537,12 @@ class Orchestrator:
                         outcome = retried.outcome or self._stage_outcome(
                             phase, result, errors_before
                         )
-                        return StageResult(outcome, self._stage_outputs(phase, result))
+                        return StageResult(outcome, capture_stage_outputs(phase, result))
 
                     result.stage_outcomes.append(
                         self._stage_executor.execute(request, retry_stage).outcome
                     )
         return state
-
-    def _stage_outputs(self, phase: str, result: CycleResult) -> dict[str, Any]:
-        """Return the allowlisted downstream-visible outputs for one stage."""
-        return {
-            field: getattr(result, field)
-            for field in _STAGE_OUTPUT_FIELDS.get(phase, ())
-            if hasattr(result, field)
-        }
-
-    @staticmethod
-    def _restore_stage_outputs(
-        result: CycleResult, phase: str, outputs: Mapping[str, Any]
-    ) -> None:
-        """Rehydrate only the explicit output contract for a replayed stage."""
-        allowed = set(_STAGE_OUTPUT_FIELDS.get(phase, ()))
-        for field, value in outputs.items():
-            if field in allowed and hasattr(result, field):
-                setattr(result, field, value)
 
     def _stage_input(self, phase: str, dry: bool, result: CycleResult) -> StageInput:
         """Build a secret-free idempotency identity for one phase attempt."""
