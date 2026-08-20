@@ -47,7 +47,7 @@ class RepairAgentBoundary:
                 return self.tools.apply_patch(str(args.get("patch", "")))
             except ToolPolicyError as exc:
                 message = str(exc)
-                if any(marker in message for marker in ("patch has no scoped", "patch rejected", "patch failed")):
+                if any(marker in message for marker in ("patch has no scoped", "patch rejected", "patch failed", "corrupt patch")):
                     raise ToolProtocolError(message) from exc
                 raise
         if name == "run_reproduction":

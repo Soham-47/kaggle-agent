@@ -320,6 +320,66 @@ def test_repair_implementer_uses_only_restricted_tools(tmp_path: Path):
     assert all("DEEPSEEK_API_KEY" not in call[2] for call in router.calls)
 
 
+def test_repair_implementer_retries_malformed_patch_as_tool_feedback(tmp_path: Path):
+    source = tmp_path / "src" / "x.py"
+    source.parent.mkdir()
+    source.write_text("x = 1\n", encoding="utf-8")
+    malformed = (
+        "diff --git a/src/x.py b/src/x.py\n"
+        "--- a/src/x.py\n+++ b/src/x.py\n"
+        "@@ -1,2 +1,2 @@\n-x = 1\n+x = 2\n"
+    )
+    valid = (
+        "diff --git a/src/x.py b/src/x.py\n"
+        "--- a/src/x.py\n+++ b/src/x.py\n"
+        "@@ -1 +1 @@\n-x = 1\n+x = 2\n"
+    )
+    router = _FakeRouter([
+        _classification_response(),
+        _spec_response(allowed_paths=["src/x.py"], likely_files=["src/x.py"]),
+        json.dumps({"action": "tool", "tool": "read_file", "args": {"path": "src/x.py"}, "reason": "inspect"}),
+        json.dumps({"action": "tool", "tool": "apply_patch", "args": {"patch": malformed}, "reason": "first patch"}),
+        json.dumps({"action": "tool", "tool": "apply_patch", "args": {"patch": valid}, "reason": "corrected patch"}),
+        json.dumps({"action": "done", "tool": "done", "args": {}, "reason": "ready"}),
+    ])
+    agents = DeepSeekSupervisorAgents(router)
+    incident = _incident()
+    spec = agents.author_spec(incident, agents.classify(incident), repair_id="repair-malformed-patch")
+
+    result = agents.implement(tmp_path, spec)
+
+    assert result.status is ImplementerStatus.PATCH_READY
+    assert source.read_text(encoding="utf-8") == "x = 2\n"
+    assert len(router.calls) == 6
+
+
+def test_repair_implementer_does_not_repeat_successful_reads(tmp_path: Path):
+    source = tmp_path / "src" / "x.py"
+    source.parent.mkdir()
+    source.write_text("x = 1\n", encoding="utf-8")
+    valid = (
+        "diff --git a/src/x.py b/src/x.py\n"
+        "--- a/src/x.py\n+++ b/src/x.py\n"
+        "@@ -1 +1 @@\n-x = 1\n+x = 2\n"
+    )
+    router = _FakeRouter([
+        _classification_response(),
+        _spec_response(allowed_paths=["src/x.py"], likely_files=["src/x.py"]),
+        json.dumps({"action": "tool", "tool": "read_file", "args": {"path": "src/x.py"}, "reason": "inspect"}),
+        json.dumps({"action": "tool", "tool": "read_file", "args": {"path": "src/x.py"}, "reason": "inspect again"}),
+        json.dumps({"action": "tool", "tool": "apply_patch", "args": {"patch": valid}, "reason": "fix"}),
+        json.dumps({"action": "done", "tool": "done", "args": {}, "reason": "ready"}),
+    ])
+    agents = DeepSeekSupervisorAgents(router)
+    incident = _incident()
+    spec = agents.author_spec(incident, agents.classify(incident), repair_id="repair-duplicate-read")
+
+    result = agents.implement(tmp_path, spec)
+
+    assert result.status is ImplementerStatus.PATCH_READY
+    assert source.read_text(encoding="utf-8") == "x = 2\n"
+
+
 def test_repair_boundary_accepts_model_file_path_alias(tmp_path: Path):
     source = tmp_path / "src" / "x.py"
     source.parent.mkdir()

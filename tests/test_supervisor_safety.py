@@ -5,7 +5,7 @@ import pytest
 
 from kaggle_agent.supervisor.impact import StageImpactAnalyzer
 from kaggle_agent.supervisor.policy import RepairPolicy, SafetyViolation
-from kaggle_agent.supervisor.resume import ResumeRequest, invalidated_stages
+from kaggle_agent.supervisor.resume import ResumeRequest, invalidated_stages, preserved_stages
 from kaggle_agent.supervisor.worktree import WorktreeManager
 
 
@@ -68,7 +68,8 @@ def test_impact_and_resume_are_conservative():
     assert analyzer.earliest_affected_stage(["train/kernel_runner.py"]) == "KERNEL_TRAIN"
     assert analyzer.earliest_affected_stage(["src/kaggle_agent/orchestrator.py"]) == "RESEARCH"
     assert invalidated_stages("KERNEL_TRAIN") == ("KERNEL_TRAIN", "VALIDATE_SUB", "TELEGRAM_APPROVE", "SUBMIT", "FEEDBACK", "HEAL", "REPORT")
-    request = ResumeRequest("c", "i", "old", "new", "KERNEL_TRAIN", "KERNEL_TRAIN", ("CODE",), invalidated_stages("KERNEL_TRAIN"), ())
+    assert preserved_stages("KERNEL_TRAIN") == ("RESEARCH", "PLAN", "CODE", "LOCAL_SMOKE")
+    request = ResumeRequest("c", "i", "old", "new", "KERNEL_TRAIN", "KERNEL_TRAIN", preserved_stages("KERNEL_TRAIN"), invalidated_stages("KERNEL_TRAIN"), ())
     assert request.resume_from_stage == "KERNEL_TRAIN"
 
 
