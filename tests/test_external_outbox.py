@@ -1,4 +1,9 @@
-from kaggle_agent.autonomy.outbox import ExternalActionOutbox, reconcile_with_kaggle
+from kaggle_agent.autonomy.outbox import (
+    ExternalActionOutbox,
+    kernel_push_key,
+    reconcile_with_kaggle,
+    submission_key,
+)
 from kaggle_agent.kaggle_api.models import SubmissionRow
 
 
@@ -62,3 +67,29 @@ def test_reconciliation_accepts_only_exact_kernel_and_submission_evidence(tmp_pa
     )
     assert accepted.status == "accepted"
     assert accepted.external_ref == "s2"
+
+
+def test_external_keys_are_stable_across_stage_cycles():
+    first = kernel_push_key("demo", "owner/kernel", "package-sha")
+    second = kernel_push_key("demo", "owner/kernel", "package-sha")
+    assert first == second
+    assert first == kernel_push_key("demo", "owner/kernel", "package-sha")
+
+
+def test_external_keys_change_for_competition_or_artifact():
+    base = submission_key("demo", "file", "output-sha")
+    assert submission_key("other", "file", "output-sha") != base
+    assert submission_key("demo", "file", "other-output") != base
+    assert submission_key("demo", "notebook", "output-sha") != base
+
+
+def test_pending_external_key_reuses_one_action_across_cycles(tmp_path):
+    outbox = ExternalActionOutbox(tmp_path)
+    key = kernel_push_key("demo", "owner/kernel", "package-sha")
+    first = outbox.enqueue(
+        action="kernel_push", idempotency_key=key, payload={"cycle_id": "cycle-1"}
+    )
+    second = outbox.enqueue(
+        action="kernel_push", idempotency_key=key, payload={"cycle_id": "cycle-2"}
+    )
+    assert first.action_id == second.action_id

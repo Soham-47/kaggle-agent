@@ -67,6 +67,11 @@ class StageInput:
     idempotency_key: str
     inputs: Mapping[str, Any]
 
+    @property
+    def stage_execution_key(self) -> str:
+        """Cycle-scoped identity used only for replaying this stage execution."""
+        return self.idempotency_key
+
     @classmethod
     def create(
         cls, *, stage: str, cycle_id: str, competition: str, inputs: Mapping[str, Any]

@@ -24,6 +24,31 @@ class ExternalAction:
     external_ref: str | None = None
 
 
+def external_action_key(operation: str, competition: str, **facts: str) -> str:
+    """Build a stable identity for one intended external mutation."""
+    canonical = json.dumps(
+        {"operation": operation, "competition": competition, **facts},
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def kernel_push_key(competition: str, kernel_ref: str, package_fingerprint: str) -> str:
+    return external_action_key(
+        "kernel_push",
+        competition,
+        kernel_ref=kernel_ref,
+        package_fingerprint=package_fingerprint,
+    )
+
+
+def submission_key(competition: str, mode: str, artifact_hash: str) -> str:
+    return external_action_key(
+        "submit", competition, mode=mode, artifact_hash=artifact_hash
+    )
+
+
 class ExternalActionOutbox:
     """Append-only intent state; only reconciliation resolves an action."""
 

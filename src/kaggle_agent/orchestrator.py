@@ -122,7 +122,9 @@ from kaggle_agent.autonomy.runtime import StageExecutor, StageInput, StageLedger
 from kaggle_agent.autonomy.outbox import (
     ExternalAction,
     ExternalActionOutbox,
+    kernel_push_key,
     reconcile_with_kaggle,
+    submission_key,
 )
 
 DEFAULT_HYPOTHESIS = "dry-run default: schema-valid 0.5 baseline then improve"
@@ -1811,8 +1813,16 @@ class Orchestrator:
                     if should_push:
                         push_action = self._outbox.enqueue(
                             action="kernel_push",
-                            idempotency_key=kernel_package_fingerprint(package.folder),
-                            payload={"kernel_ref": package.kernel_ref},
+                            idempotency_key=kernel_push_key(
+                                self.competition.slug,
+                                package.kernel_ref,
+                                kernel_package_fingerprint(package.folder),
+                            ),
+                            payload={
+                                "competition": self.competition.slug,
+                                "kernel_ref": package.kernel_ref,
+                                "package_fingerprint": kernel_package_fingerprint(package.folder),
+                            },
                         )
                         if push_action.status in {"sent", "unknown"}:
                             push_action = self._reconcile_outbox_action(push_action)
@@ -2389,7 +2399,7 @@ class Orchestrator:
             output_hash = submission_output_hash(Path(csv_path), self.competition.id_column)
             outbox_action = self._outbox.enqueue(
                 action="submit",
-                idempotency_key=f"{self.competition.slug}:{mode}:{output_hash}",
+                idempotency_key=submission_key(self.competition.slug, mode, output_hash),
                 payload={
                     "competition": self.competition.slug,
                     "message": msg,

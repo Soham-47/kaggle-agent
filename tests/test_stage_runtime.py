@@ -14,6 +14,7 @@ def test_executor_records_success_and_replays_same_idempotency_key(tmp_path):
         competition="demo",
         inputs={"contract": "abc"},
     )
+    assert request.stage_execution_key == request.idempotency_key
 
     def run(_: StageInput) -> StageResult:
         calls.append("run")
