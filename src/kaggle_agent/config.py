@@ -87,7 +87,7 @@ class Settings:
         return int(self.raw.get("submit", {}).get("max_proposals_per_day", 2))
 
     def llm_provider(self) -> str:
-        raw = str((self.raw.get("llm") or {}).get("provider") or "deepseek").lower()
+        """Return the only production provider currently supported."""
         return "deepseek"
 
     def zen_model(self, role: str) -> str:

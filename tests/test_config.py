@@ -29,6 +29,12 @@ def test_load_settings():
     assert s.zen_model("plan") == "deepseek-v4-flash"
 
 
+def test_env_example_documents_supported_llm_key():
+    example = (repo_root() / ".env.example").read_text(encoding="utf-8")
+    assert "DEEPSEEK_API_KEY=" in example
+    assert "OPENCODE_API_KEY" not in example
+
+
 def test_dotenv_sets_missing_key_only(tmp_path: Path, monkeypatch):
     from kaggle_agent.config import load_dotenv
 

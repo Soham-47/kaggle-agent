@@ -20,6 +20,7 @@ def test_router_models_from_settings():
 def test_from_env_none_without_key(monkeypatch):
     monkeypatch.delenv("OPENCODE_API_KEY", raising=False)
     monkeypatch.delenv("NVIDIA_API_KEY", raising=False)
+    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
     assert ZenClient.from_env() is None
 
 
@@ -72,12 +73,14 @@ def test_zen_free_rotates_after_deepseek_limit():
     assert seen == ["deepseek-v4-flash-free", "nemotron-3.5-lightning-free"]
 
 
-def test_from_env_prefers_nvidia_key(monkeypatch):
+def test_from_env_uses_deepseek_key(monkeypatch):
     monkeypatch.delenv("OPENCODE_API_KEY", raising=False)
     monkeypatch.setenv("NVIDIA_API_KEY", "nvapi-test")
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-ds")
     client = ZenClient.from_env()
     assert client is not None
-    assert client.base_url == "https://integrate.api.nvidia.com/v1"
+    assert client.api_key == "sk-ds"
+    assert client.base_url == "https://api.deepseek.com"
 
 
 def test_chat_parses_response(monkeypatch):

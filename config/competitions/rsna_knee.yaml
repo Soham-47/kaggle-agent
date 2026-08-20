@@ -47,7 +47,7 @@ workspace:
   relative: competitions/rsna_knee
 
 models:
-  # OpenCode Zen model ids — override when you know preferred multimodal ids
+  # DeepSeek model ids — override when the supported model pin changes.
   plan: null      # null → settings.zen.default_plan_model
   code: null
   distill: null

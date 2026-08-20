@@ -1,4 +1,9 @@
-"""Try LLM providers in order: NVIDIA, Zen, then Hetznez on timeout/limits."""
+"""Compatibility fallback client for explicitly supplied providers.
+
+Production construction is intentionally DeepSeek-only; this module remains
+available for tests and callers that explicitly provide an ordered provider
+list.
+"""
 
 from __future__ import annotations
 
@@ -41,7 +46,7 @@ class ProviderSpec:
 
 
 class FallbackClient:
-    """Same chat API as ZenClient; walks the provider chain on retryable errors."""
+    """Walk an explicitly supplied provider chain on retryable errors."""
 
     def __init__(self, providers: list[ProviderSpec]) -> None:
         if not providers:
