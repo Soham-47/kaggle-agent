@@ -13,6 +13,11 @@ uv.lock.bak
 dist/
 build/
 
+# Local agent-tool state and investigation scratch space
+.grok/
+.scratch/
+.superpowers/
+
 # runtime
 memory/run.lock
 memory/kernel_job.md
@@ -20,6 +25,11 @@ memory/pending_submit.md
 memory/daily/
 memory/research-deep/deep-*.md
 memory/experiments/
+memory/*.md
+!memory/templates/
+!memory/templates/*.md
+memory/research-deep/*
+!memory/research-deep/.gitkeep
 
 # contest artifacts (regenerated)
 competitions/*/notebooks/
@@ -30,6 +40,8 @@ competitions/*/data/
 competitions/*/pipeline/code_brief.md
 competitions/*/pipeline/methods_applied.md
 /data/
+.agent/
+.kaggle-agent-supervisor/
 
 # editor / OS
 .idea/
