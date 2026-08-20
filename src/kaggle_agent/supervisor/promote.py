@@ -47,26 +47,42 @@ class GenerationPromotion:
     def __init__(self, store: SupervisorStateStore) -> None:
         self.store = store
 
-    def activate(self, generation: RuntimeGeneration, acceptance: RepairAcceptance) -> None:
+    def activate(
+        self,
+        generation: RuntimeGeneration,
+        acceptance: RepairAcceptance,
+        *,
+        health: object | None = None,
+        resume_request_path: str | None = None,
+        replacement_worker_id: str | None = None,
+    ) -> None:
         if not acceptance.accepted:
             raise PromotionError("repair acceptance is incomplete")
+        if health is not None and not bool(getattr(health, "healthy", False)):
+            raise PromotionError("health check failed before promotion")
         current = self.store.read_json("active-generation.json")
+        transaction = {
+            "schema_version": 2,
+            "status": "PREPARED",
+            "old_generation": current.get("generation_id") if isinstance(current, dict) else None,
+            "new_generation": generation.generation_id,
+            "resume_request_path": resume_request_path,
+            "replacement_worker_id": replacement_worker_id,
+        }
+        if health is not None:
+            transaction["health"] = {
+                "healthy": bool(getattr(health, "healthy", False)),
+                "checks": list(getattr(health, "checks", ())),
+                "failures": list(getattr(health, "failures", ())),
+            }
         self.store.write_json(
             "promotion.json",
-            {
-                "status": "PREPARED",
-                "old_generation": current.get("generation_id") if isinstance(current, dict) else None,
-                "new_generation": generation.generation_id,
-            },
+            transaction,
         )
         self.store.write_json("active-generation.json", generation.to_dict())
         self.store.write_json(
             "promotion.json",
-            {
-                "status": "COMMITTED",
-                "old_generation": current.get("generation_id") if isinstance(current, dict) else None,
-                "new_generation": generation.generation_id,
-            },
+            {**transaction, "status": "PROMOTED"},
         )
 
     def rollback(self, generation: RuntimeGeneration) -> None:
@@ -75,14 +91,14 @@ class GenerationPromotion:
     def recover_interrupted(self, old: RuntimeGeneration | None, new: RuntimeGeneration) -> str:
         """Resolve a prepared promotion to exactly old or new."""
         transaction = self.store.read_json("promotion.json")
-        if not isinstance(transaction, dict) or transaction.get("status") == "COMMITTED":
+        if not isinstance(transaction, dict) or transaction.get("status") in {"COMMITTED", "PROMOTED"}:
             return "NOOP"
         if transaction.get("new_generation") != new.generation_id:
             raise PromotionError("promotion transaction candidate does not match recovery candidate")
         pointer = self.store.read_json("active-generation.json")
         pointer_id = pointer.get("generation_id") if isinstance(pointer, dict) else None
         if pointer_id == new.generation_id:
-            status = "COMMITTED"
+            status = "PROMOTED" if transaction.get("schema_version") == 2 else "COMMITTED"
         elif old is not None and pointer_id in {None, old.generation_id}:
             self.rollback(old)
             status = "ROLLED_BACK"
