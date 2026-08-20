@@ -314,7 +314,7 @@ class Supervisor:
             worker_id,
             generation.generation_id,
             competition,
-            resume_request.cycle_id if resume_request else None,
+            resume_request.cycle_id if resume_request else f"cycle-{uuid.uuid4().hex[:12]}",
             mode,
             resume_request.resume_from_stage if resume_request else None,
             incident_id,

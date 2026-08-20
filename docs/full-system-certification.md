@@ -2,186 +2,164 @@
 
 ## Baseline
 
-- Fresh worktree: `/home/soham/kaggle-agent-full-system-certification`
-- Starting `origin/main`: `973486c90aff2ca7e2ce811cec83a818f3dcf813`
-- Branch: `full-system-certification`
-- Working tree was clean at start.
-- Actual merged-main baseline: `678 passed, 1 deselected`.
+```text
+starting origin/main: 973486c90aff2ca7e2ce811cec83a818f3dcf813
+branch: full-system-certification
+working tree: clean at start
+baseline: 678 passed, 1 deselected
+final: 679 passed, 1 deselected
+```
 
-The previously reported `692 passed` count belongs to the later risk-validation
-branch and is not reproducible from this fresh `origin/main`. No baseline
-failure was found.
+The one additional passing test covers the worker cycle-ID regression found by
+the production-shaped harness.
+
+## Fixture architecture
+
+`scripts/run_full_system_harness.py` creates a disposable non-local Git clone,
+adds a synthetic competition and data fixture, injects one pure `CODE`-stage
+`NameError`, and runs the existing production components:
+
+```text
+Supervisor
+  -> WorkerLauncher subprocess
+  -> worker entrypoint
+  -> run_daily / Orchestrator / StageLedger
+  -> durable Incident
+  -> real DeepSeek supervisor roles
+  -> RepairCoordinator / worktree / verification / review
+  -> RuntimeGeneration / atomic promotion
+  -> replacement WorkerLauncher subprocess
+  -> ResumeRequest / replay epochs
+```
+
+The fixture hooks only replace external reads and worker-stage model calls with
+local deterministic behavior. The supervisor’s classifier, spec author, spec
+reviewer, implementer, and code reviewer use the real configured DeepSeek
+provider in separate production sessions. No Kaggle or Telegram mutation is
+reachable from the fixture.
+
+## Unattended self-healing result
+
+The real harness passed without source edits after fault injection:
+
+```text
+incident: b1f95916190585058cb3
+repair: repair-b1f959161905-a1
+initial generation: generation-0001
+candidate generation: generation-0002
+candidate revision: 1db75254d4d502ad69b25f18feeb8cda5fa91a02
+promotion: PREPARED -> PROMOTED -> RESUMED
+first worker PID: 4064879
+replacement worker PID: 4065521
+accepted repairs: 1
+new generations: 1
+promotions: 1
+```
+
+The exact durable stage evidence was:
+
+```text
+RESEARCH callable count: 1
+PLAN callable count: 1
+CODE callable count: 2
+preserved stages: RESEARCH, PLAN
+invalidated stages: CODE onward
+replacement worker result: SUCCESS
+Kaggle mutations: 0
+Telegram messages: 0
+```
+
+The initial worker’s `RESEARCH` and `PLAN` results were replayed from the
+original cycle. `CODE` reran under replay epoch 1 and the downstream synthetic
+stages completed successfully.
 
 ## DeepSeek roles
 
-Real provider smoke passed after installing the existing development extra in
-the clean worktree. All roles used independent sessions and typed artifacts:
+The live harness exercised these roles with the real provider and typed
+artifacts:
 
-```text
-classifier: CODE_DEFECT
-spec author: smoke-repair
-spec reviewer: APPROVE
-implementer: verified candidate is ready
-code reviewer: APPROVE
-```
-
-No key, authorization header, or environment dump was persisted.
-
-## REPAIR_ONLY
-
-The existing real disposable coordinator harness passed:
-
-```text
-classification: CODE_DEFECT (confidence 0.95)
-spec review: APPROVE
-candidate: CANDIDATE_ACCEPTED
-implementer attempts: 1
-focused verification: PASS
-code review: APPROVE
-candidate revision: 071245f504934be1c07d58360240c6fb33ce7680
-active generation before: generation-0001
-active generation after:  generation-0001
-```
-
-The active generation did not change. Evidence is recorded in
-`docs/repair-only-certification.json`.
-
-## Risk-adaptive cases
-
-The existing deterministic risk matrix and supervisor safety suites passed.
-
-| Case | Decision |
+| Role | Result |
 | --- | --- |
-| LOW deterministic parser repair | Candidate and promotion eligible |
-| MEDIUM four-file/400-line adapter repair | Stronger envelope; promotion eligible |
-| HIGH replay/generation repair | Candidate allowed; promotion blocked |
-| PROHIBITED outbox/external identity repair | Implementer not invoked; no candidate |
-| Ambiguous external state | Candidate and promotion blocked |
-| Test weakening/protected semantics/dependency change | Rejected fail-closed |
+| failure classifier | `CODE_DEFECT` |
+| RepairSpec author | valid bounded spec |
+| independent spec reviewer | `APPROVE` |
+| repair implementer | focused verification passed |
+| independent code reviewer | `APPROVE` |
 
-Focused risk, repair, replay, outbox, fault, and recovery tests: `73 passed`.
-Negative safety and acceptance tests: `40 passed`.
-
-The merged repository already contains the prior successful synthetic
-AUTO_SAFE promotion/resume certification. This run revalidated its component
-contracts and the risk decisions, but did not claim a new medium-risk
-promotion without an existing end-to-end medium-risk worker fixture.
-
-## Full clean agent cycle
-
-The real `run_daily` orchestrator ran five disposable dry cycles using the
-existing stage ledger, state handling, pipeline, validation, feedback, heal,
-and report paths. External services were isolated behind the repository’s
-existing test boundary fakes; no source or state from the developer checkout
-was used.
-
-One representative cycle completed:
-
-```text
-LOCK → RESEARCH → PLAN → CODE → LOCAL_SMOKE → KERNEL_TRAIN
-→ VALIDATE_SUB → TELEGRAM_APPROVE → SUBMIT → FEEDBACK → HEAL → REPORT
-```
-
-Results:
-
-```text
-cycles: 5
-successful cycles: 5
-hard errors: 0
-incidents: 0
-duplicate flags: 0
-promotions: 0
-final state: IDLE
-run lock held: false
-```
-
-This is a safe dry-run certification. It is not a live submission.
-
-## Self-healing lifecycle
-
-The prior merged certification documents a complete synthetic chain through
-incident, real DeepSeek repair, independent review, generation promotion,
-ResumeRequest consumption, preserved-stage replay, affected-stage rerun, and
-successful continuation. This fresh-main run revalidated the real DeepSeek
-REPAIR_ONLY path and the local promotion/replay/rollback components.
-
-The current repository does not provide a production-shaped, dependency-
-injected worker fixture that can run the entire real `run_daily` process with
-synthetic external boundaries while also exercising an unattended real
-worker-to-supervisor repair transition. Creating such a fixture would be new
-harness architecture, which was outside this certification scope. Therefore a
-new full unattended self-healing cycle is not claimed here.
+The separate implementer benchmark also passed `10/10` deterministic defects
+on bounded first attempts. No credentials, headers, or hidden model reasoning
+were persisted.
 
 ## Recovery and rollback
 
-The supervisor worker and recovery suites passed, including real subprocess
-SIGKILL handling for a worker, owned-heartbeat adoption rules, interrupted
-promotion resolution to exactly one old/new pointer, durable ResumeRequest
-recovery, replacement-worker launch blocking, and rollback after a fatal
-resumed worker.
+The harness ran fresh supervisor subprocesses from durable state:
 
-No duplicate workers, promotions, or active-generation pointers were observed
-in the exercised cases.
+| Scenario | Result |
+| --- | --- |
+| restart after `PROMOTED` with replacement result absent | fresh supervisor reused the same worker identity, launched one real replacement subprocess, and closed `RESUMED` |
+| unhealthy replacement with durable `FATAL` result | supervisor returned `ROLLED_BACK`, restored `generation-0001`, and did not retry the candidate |
 
-## Long-run metrics
+The focused recovery suite also passed real worker SIGKILL/zombie handling,
+owned-heartbeat adoption, interrupted-promotion resolution, replacement launch
+blocking, and rollback tests.
 
-The repeated disposable dry-run campaign recorded:
+## Full clean cycles
 
-```text
-successful cycles: 5
-incidents: 0
-repair attempts: 0
-promotions: 0
-rollbacks: 0
-duplicate workers: 0
-duplicate promotions: 0
-false CODE_DEFECT classifications: 0
-```
-
-The real DeepSeek implementer benchmark separately passed `10/10` local
-deterministic defects on the first bounded attempt, with no policy findings,
-no test weakening, and independent review approval for every case.
-
-## External integrations
-
-Kaggle read-only validation passed through the existing client:
+Five isolated full dry-run cycles passed through the real orchestrator and
+stage sequence:
 
 ```text
-authentication: PASS
-competition metadata read: PASS
-kernel history read: PASS
-submission history read: PASS
-Kaggle mutations: 0
+RESEARCH -> PLAN -> CODE -> LOCAL_SMOKE -> KERNEL_TRAIN
+-> VALIDATE_SUB -> TELEGRAM_APPROVE -> SUBMIT -> FEEDBACK -> HEAL -> REPORT
 ```
 
-Live exactly-once mutation behavior remains **NOT TESTED**. No submission or
-kernel mutation was performed for certification.
+Each cycle completed with no hard errors, no incidents, no promotion, and no
+external mutation. The tests used synthetic/fake external boundaries and did
+not touch developer state.
 
-Telegram credentials were unavailable. Live Telegram ownership tests are
-therefore **BLOCKED**; no Telegram message was sent.
+## Bugs found and fixed
 
-## Bugs found and fixes
+The production-shaped run found one real integration defect. Initial workers
+were created with `cycle_id=None`, while resumed workers used the persisted
+cycle ID. That could change durable stage identities and experiment identity
+across a repair/resume boundary. Initial worker requests now receive a durable
+`cycle-<token>` ID; resume requests continue to reuse the original ID.
 
-No production source integration defect was found, so no source fix was
-required. Validation-only issues were corrected without repository changes:
+Added regression test:
 
-- installed the existing `dev` extra so the disposable role verifier had
-  `pytest`;
-- used the repository’s `pythonpath = ["src", "tests"]` contract for the
-  direct orchestrator probe;
-- used the correct competition argument for Kaggle history methods.
+```text
+tests/test_supervisor_loop.py::test_initial_worker_request_gets_durable_cycle_id
+```
 
-## Final verification
+The harness also corrected its own acceptance-artifact accounting to read the
+supervisor’s durable `repairs/*/acceptance.json` records. No safety gate or
+production repair limit was weakened.
+
+## Verification
 
 ```text
 uv run python -m compileall -q src examples scripts  PASS
-uv run pytest -q -m "not integration"                 678 passed, 1 deselected
+uv run pytest -q -m "not integration"                 679 passed, 1 deselected
+uv run pytest -q tests/test_supervisor_loop.py tests/test_supervisor_recovery.py tests/test_supervisor_acceptance.py tests/test_supervisor_worker.py tests/test_replay_epoch.py tests/test_external_outbox.py
+                                                        49 passed
+uv run pytest -q tests/test_orchestrator.py::test_dry_run_cycle (x5)
+                                                        5 passed
+uv run python scripts/benchmark_implementer_reliability.py
+                                                        10/10 passed
 git diff --check                                       PASS
 ```
 
-The focused suites and five-cycle harness listed above also passed. No new
-dependencies or production defaults were added. `supervisor.enabled: false`
-and risk-adaptive AUTO_SAFE remain disabled by default.
+## External integrations
+
+```text
+Kaggle authenticated mutation/submission: 0
+Telegram messages: 0
+Telegram live certification: not required for this local harness
+```
+
+Read-only external reconciliation remains covered by the existing repository
+tests and prior certification. Live exactly-once mutation behavior remains
+**NOT TESTED**.
 
 ## Readiness
 
@@ -190,11 +168,13 @@ OBSERVE: READY
 REPAIR_ONLY: READY
 AUTO_SAFE_CANARY: READY
 RISK_ADAPTIVE_AUTO_SAFE: CONDITIONAL
-FULL_AGENT_HARNESS: NOT READY
+FULL_AGENT_HARNESS: READY
 UNRESTRICTED_AUTO_SAFE: NOT READY
 ```
 
-`RISK_ADAPTIVE_AUTO_SAFE` remains CONDITIONAL because live Telegram ownership,
-real worker shadow cycles, and a fresh unattended full worker-to-repair-to-
-resume run were not certified in this worktree. Unrestricted AUTO_SAFE remains
-disabled.
+`FULL_AGENT_HARNESS` is READY because the complete unattended worker -> repair
+-> promotion -> replacement -> replay -> success chain passed using real worker
+subprocesses and the real DeepSeek repair path. Risk-adaptive controlled
+rollout remains conditional on operational deployment evidence. Checked-in
+AUTO_SAFE defaults remain disabled, and unrestricted AUTO_SAFE remains out of
+scope.

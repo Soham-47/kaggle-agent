@@ -10,11 +10,11 @@
     "final_focused_pass": true,
     "findings": [],
     "first_focused_pass": true,
-    "llm_calls": 3,
+    "llm_calls": 4,
     "reason": "verified candidate is ready",
     "review_verdict": "APPROVE",
     "status": "PATCH_READY",
-    "tool_turns": 3
+    "tool_turns": 4
   },
   {
     "attempts": 1,
@@ -61,11 +61,11 @@
     "final_focused_pass": true,
     "findings": [],
     "first_focused_pass": true,
-    "llm_calls": 4,
+    "llm_calls": 3,
     "reason": "verified candidate is ready",
     "review_verdict": "APPROVE",
     "status": "PATCH_READY",
-    "tool_turns": 4
+    "tool_turns": 3
   },
   {
     "attempts": 1,
@@ -78,11 +78,11 @@
     "final_focused_pass": true,
     "findings": [],
     "first_focused_pass": true,
-    "llm_calls": 4,
+    "llm_calls": 3,
     "reason": "verified candidate is ready",
     "review_verdict": "APPROVE",
     "status": "PATCH_READY",
-    "tool_turns": 4
+    "tool_turns": 3
   },
   {
     "attempts": 1,
@@ -112,11 +112,11 @@
     "final_focused_pass": true,
     "findings": [],
     "first_focused_pass": true,
-    "llm_calls": 10,
+    "llm_calls": 5,
     "reason": "verified candidate is ready",
     "review_verdict": "APPROVE",
     "status": "PATCH_READY",
-    "tool_turns": 10
+    "tool_turns": 5
   },
   {
     "attempts": 1,
@@ -129,11 +129,11 @@
     "final_focused_pass": true,
     "findings": [],
     "first_focused_pass": true,
-    "llm_calls": 3,
+    "llm_calls": 5,
     "reason": "verified candidate is ready",
     "review_verdict": "APPROVE",
     "status": "PATCH_READY",
-    "tool_turns": 3
+    "tool_turns": 4
   },
   {
     "attempts": 1,
