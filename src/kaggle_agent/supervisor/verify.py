@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import subprocess
 import re
+import shlex
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -126,5 +127,5 @@ class VerificationHarness:
 
     def verify(self, root: Path, commands: tuple[str, ...] = ()) -> VerificationResult:
         selected = [["uv", "run", "python", "-m", "compileall", "src"]]
-        selected.extend([command.split() for command in commands])
+        selected.extend([shlex.split(command) for command in commands])
         return self.run_commands(root, selected)

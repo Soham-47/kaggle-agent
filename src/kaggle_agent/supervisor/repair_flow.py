@@ -16,7 +16,7 @@ from kaggle_agent.supervisor.incidents import Incident
 from kaggle_agent.supervisor.impact import StageImpactAnalyzer
 from kaggle_agent.supervisor.policy import DiffLimits, RepairPolicy
 from kaggle_agent.supervisor.promote import GenerationPromotion, RepairAcceptance
-from kaggle_agent.supervisor.resume import ResumeRequest, invalidated_stages
+from kaggle_agent.supervisor.resume import ResumeRequest, invalidated_stages, preserved_stages
 from kaggle_agent.supervisor.review import Review, ReviewVerdict
 from kaggle_agent.supervisor.spec import RepairSpec
 from kaggle_agent.supervisor.state import SupervisorStateStore
@@ -184,7 +184,7 @@ class RepairCoordinator:
             resume = ResumeRequest(
                 cycle_id or "", incident.incident_id, incident.generation_id,
                 generation.generation_id, incident.stage, spec.proposed_resume_stage,
-                tuple(s for s in invalidated if s != spec.proposed_resume_stage),
+                preserved_stages(spec.proposed_resume_stage),
                 invalidated, tuple(x for x in (incident.external_job, incident.kernel_ref) if x),
                 tuple((stage, 1) for stage in invalidated),
             )

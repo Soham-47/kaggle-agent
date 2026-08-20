@@ -333,6 +333,7 @@ class DeepSeekSupervisorAgents:
             "read_file requires {path}; write_file requires {path, content, expected_sha256}; apply_patch requires {patch} only. "
             "The apply_patch value must be a standard unified diff with --- a/path and +++ b/path lines; do not add a path field. "
             "After a successful read of an allowed file, never read that same file again: use its returned content and the approved spec to edit it, or stop with done if the required fix is not provable. "
+            "A done action is invalid while current_candidate_diff is empty; when the approved spec describes a repair, you must produce a non-empty scoped write before done. "
             "Prefer apply_patch for edits. Do not use write_file unless an expected_sha256 value is available from the tool context. "
             "Allowed tools are list_files, read_file, search_code, git_diff, write_file, apply_patch, "
             "run_reproduction, run_focused_test, run_compile_check, done. "
@@ -352,6 +353,7 @@ class DeepSeekSupervisorAgents:
                     else verification_feedback
                 ),
                 "current_candidate_diff": _git_diff(root),
+                "implementation_contract": "A non-empty scoped candidate diff is required before done; supervisor verification is authoritative.",
                 "relevant_files": list(spec.likely_files),
                 "required_read_paths": list(spec.likely_files),
                 "target_context": _target_context(root, spec),
@@ -375,12 +377,33 @@ class DeepSeekSupervisorAgents:
                 if kind == "done":
                     if tool != "done" or args:
                         raise AgentProtocolError("repair implementer done requires tool=done and empty args")
-                    return _candidate_result(root, spec, reason, turn, tuple(writes))
+                    candidate = _candidate_result(root, spec, reason, turn, tuple(writes))
+                    if candidate.status is ImplementerStatus.NO_CHANGE and turn < self.max_tool_turns:
+                        messages.append({
+                            "error": {
+                                "kind": "NO_CHANGE",
+                                "message": "done was returned before a candidate diff existed",
+                                "instruction": "The approved repair still requires a non-empty scoped edit. Read the approved context and apply the smallest fix, then return done.",
+                            }
+                        })
+                        continue
+                    return candidate
                 if tool == "done" or tool not in boundary.tools_allowed:
                     return RepairImplementerResult(
                         True, f"policy: tool is not available to repair agent: {tool}",
                         tuple(writes), ImplementerStatus.TOOL_POLICY_BLOCK, turn,
                     )
+                if tool == "read_file":
+                    path = _model_path(args)
+                    if path in read_paths:
+                        messages.append({
+                            "error": {
+                                "kind": "DUPLICATE_READ",
+                                "message": _bound(f"read_file already succeeded for {path}"),
+                                "instruction": "Use the earlier successful read result; do not request the same file again. Apply the smallest approved edit or stop if the fix is not provable.",
+                            }
+                        })
+                        continue
                 if tool in {"write_file", "apply_patch"}:
                     _require_read_before_write(tool, args, read_paths)
                     _require_spec_write_scope(tool, args, spec)

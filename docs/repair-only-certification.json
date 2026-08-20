@@ -6,8 +6,8 @@
     "src/bug.py",
     "tests/test_bug.py"
   ],
-  "candidate_path": "/tmp/kaggle-agent-repair-only-wsut3erk/state/worktrees/repair-only-name-error/a1",
-  "candidate_revision": "1a40ac3e623130b0cef7aa189d3dc470f89ef68b",
+  "candidate_path": "/tmp/kaggle-agent-repair-only-7gfi2qe8/state/worktrees/repair-only-name-error/a1",
+  "candidate_revision": "5dec874f2344e45fda8bd069fa8fb9020c86269f",
   "classification": "CODE_DEFECT",
   "confidence": 0.95,
   "findings": [],
@@ -23,7 +23,7 @@
   "status": "CANDIDATE_ACCEPTED",
   "verification_commands": [
     "uv run pytest tests/test_bug.py -x",
-    "uv run python -m compileall src/bug.py"
+    "uv run python -m py_compile src/bug.py"
   ],
   "verification_feedback": []
 }

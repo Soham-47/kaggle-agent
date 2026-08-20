@@ -1,4 +1,5 @@
 from pathlib import Path
+import subprocess
 
 import pytest
 
@@ -32,6 +33,23 @@ def test_verification_rejects_unallowlisted_commands(tmp_path: Path):
     result = harness.run_commands(tmp_path, [["bash", "-c", "echo nope"]])
     assert result.passed is False
     assert "allowlist" in result.failures[0]
+
+
+def test_verification_preserves_quoted_arguments(monkeypatch, tmp_path: Path):
+    calls = []
+
+    def fake_run(command, **kwargs):
+        calls.append(command)
+        return subprocess.CompletedProcess(command, 0, "ok", "")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    result = VerificationHarness().verify(
+        tmp_path,
+        ("uv run pytest tests/test_bug.py -k 'test_total' --no-header -q",),
+    )
+
+    assert result.passed is True
+    assert calls[1] == ["uv", "run", "pytest", "tests/test_bug.py", "-k", "test_total", "--no-header", "-q"]
 
 
 def test_promotion_pointer_is_atomic_and_rollback_is_supported(tmp_path: Path):

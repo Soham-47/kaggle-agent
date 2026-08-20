@@ -17,6 +17,14 @@ def invalidated_stages(from_stage: str) -> tuple[str, ...]:
     return _STAGES[index:]
 
 
+def preserved_stages(from_stage: str) -> tuple[str, ...]:
+    try:
+        index = _STAGES.index(from_stage)
+    except ValueError:
+        index = 0
+    return _STAGES[:index]
+
+
 @dataclass(frozen=True)
 class ResumeRequest:
     cycle_id: str

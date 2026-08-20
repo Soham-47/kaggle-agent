@@ -304,7 +304,10 @@ class Supervisor:
         )
         if not result or not result.get("status"):
             return ("WORKER_STARTED", worker_id)
-        return (str(result["status"]), str(result.get("exit_reason") or "resumed worker completed"))
+        settled = self._settle_promoted_result(
+            self.store.read_json("promotion.json", {}) or {}, worker_id, result
+        )
+        return (settled.status, settled.reason or str(result.get("exit_reason") or "resumed worker completed"))
 
     def _resume_promoted_if_needed(self, competition: str, mode: str, timeout_seconds: float) -> SupervisorRun | None:
         if mode != "auto_safe":
