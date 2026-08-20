@@ -124,6 +124,8 @@ from kaggle_agent.autonomy.outbox import (
     ExternalActionOutbox,
     kernel_push_key,
     reconcile_with_kaggle,
+    submission_description,
+    submission_marker,
     submission_key,
 )
 
@@ -2397,6 +2399,10 @@ class Orchestrator:
         outbox_action: ExternalAction | None = None
         if not dry:
             output_hash = submission_output_hash(Path(csv_path), self.competition.id_column)
+            marker = submission_marker(self.competition.slug, output_hash)
+            msg = submission_description(
+                self.competition.slug, output_hash, result.experiment_id or "unknown"
+            )
             outbox_action = self._outbox.enqueue(
                 action="submit",
                 idempotency_key=submission_key(self.competition.slug, mode, output_hash),
@@ -2404,6 +2410,7 @@ class Orchestrator:
                     "competition": self.competition.slug,
                     "message": msg,
                     "output_hash": output_hash,
+                    "reconciliation_marker": marker,
                 },
             )
             if outbox_action.status in {"sent", "unknown"}:
