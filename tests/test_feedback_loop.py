@@ -247,3 +247,27 @@ def test_catch_up_is_idempotent(tmp_path: Path):
         encoding="utf-8"
     )
     assert "- public_score: 0.526" in exp_text
+
+
+def test_catch_up_recovers_missing_experiment_for_scored_agent_submission(tmp_path: Path):
+    root = _setup(tmp_path)
+
+    class _Api(FakeKaggleApi):
+        def competition_submissions(self, competition, **kwargs):
+            return [
+                SimpleNamespace(
+                    ref="s1", fileName="sub.csv", status="complete",
+                    publicScore="0.700", date="2026-08-19",
+                    description="agent 20260819-160742",
+                )
+            ]
+
+    from types import SimpleNamespace
+
+    orch = _orch(root, _Api())
+    state = load_state(root)
+    orch._catch_up_scores(state)
+
+    recovered = root / "memory" / "experiments" / "20260819-160742.md"
+    assert "- public_score: 0.700" in recovered.read_text(encoding="utf-8")
+    assert state.public_best == "0.700"

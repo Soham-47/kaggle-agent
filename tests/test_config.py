@@ -22,7 +22,7 @@ def test_load_settings():
     assert agent.max_tool_turns == 40
     assert agent.max_minutes == 15.0
     assert agent.max_tokens == 2048
-    assert s.block_submit is False
+    assert s.block_submit is True
     assert s.plan_agent_config().max_tool_turns == 20
     assert s.code_agent_config().max_minutes == 10.0
     assert s.llm_provider() == "deepseek"

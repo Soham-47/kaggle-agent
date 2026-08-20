@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import time
 from pathlib import Path
@@ -9,6 +10,7 @@ from typing import Any, Callable
 
 from kaggle_agent.kaggle_api.models import SubmitResult
 from kaggle_agent.kaggle_api.sdk_get import get, get_str, http_detail
+from kaggle_agent.heal.submit_errors import classify_submit_failure
 
 _DONE = frozenset({"complete", "completed", "success"})
 _FAIL = frozenset({"error", "failed", "cancelled", "canceled"})
@@ -112,8 +114,56 @@ def _disable_internet(kernel_folder: Path) -> None:
         )
 
 
+def _artifact_sha256(folder: Path) -> str:
+    """Return a deterministic digest for the exact notebook package pushed."""
+    digest = hashlib.sha256()
+    for path in sorted(p for p in folder.rglob("*") if p.is_file()):
+        digest.update(path.relative_to(folder).as_posix().encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(path.read_bytes())
+        digest.update(b"\0")
+    return digest.hexdigest()
+
+
+def _retry_api(
+    operation: Callable[[], Any], *, attempts: int, seconds: float
+) -> Any:
+    """Retry only a bounded set of transient network failures."""
+    for attempt in range(max(1, attempts)):
+        try:
+            return operation()
+        except Exception as exc:  # noqa: BLE001
+            failure = classify_submit_failure(http_detail(exc) or str(exc))
+            if not failure.retryable or attempt >= max(1, attempts) - 1:
+                raise
+            time.sleep(max(0.0, seconds) * (2**attempt))
+    raise AssertionError("unreachable")
+
+
+def _failure_result(operation: str, exc: Exception) -> SubmitResult:
+    failure = classify_submit_failure(http_detail(exc) or str(exc))
+    return SubmitResult(
+        dry_run=False,
+        success=False,
+        message=f"{operation} failed category={failure.category}: {failure.detail}",
+        raw_status=json.dumps(
+            {
+                "operation": operation,
+                "category": failure.category,
+                "retryable": failure.retryable,
+            },
+            sort_keys=True,
+        ),
+    )
+
+
 def _submit_variant_folder(
-    api: Any, kernel_folder: Path, kernel_ref: str
+    api: Any,
+    kernel_folder: Path,
+    kernel_ref: str,
+    *,
+    retry_attempts: int,
+    retry_seconds: float,
 ) -> tuple[Path, str, str, int | None, str]:
     """Build + push an internet-off variant of the train kernel.
 
@@ -130,7 +180,11 @@ def _submit_variant_folder(
     _fix_metadata_owner(api, variant)
     _disable_internet(variant)
     try:
-        push = api.kernels_push(str(variant))
+        push = _retry_api(
+            lambda: api.kernels_push(str(variant)),
+            attempts=retry_attempts,
+            seconds=retry_seconds,
+        )
     except Exception as exc:  # noqa: BLE001
         from kaggle_agent.heal.pins import apply_pin_heal, is_pin_error
         from kaggle_agent.heal.submit_errors import is_409_title_conflict
@@ -140,13 +194,21 @@ def _submit_variant_folder(
         if is_pin_error(str(detail)) or is_pin_error(str(exc)):
             apply_pin_heal(variant.parent.parent, variant)
             try:
-                push = api.kernels_push(str(variant))
+                push = _retry_api(
+                    lambda: api.kernels_push(str(variant)),
+                    attempts=retry_attempts,
+                    seconds=retry_seconds,
+                )
             except Exception as exc2:  # noqa: BLE001
                 raise RuntimeError(f"kernels_push failed: {http_detail(exc2)}") from exc2
         elif is_409_title_conflict(detail_str):
             _fix_metadata_owner(api, variant)
             try:
-                push = api.kernels_push(str(variant))
+                push = _retry_api(
+                    lambda: api.kernels_push(str(variant)),
+                    attempts=retry_attempts,
+                    seconds=retry_seconds,
+                )
             except Exception as exc2:  # noqa: BLE001
                 raise RuntimeError(f"kernels_push failed: {http_detail(exc2)}") from exc2
         else:
@@ -172,6 +234,8 @@ def submit_notebook(
     status_fn: Callable[[str], str],
     poll_seconds: int = 45,
     poll_attempts: int = 60,
+    retry_attempts: int = 3,
+    retry_seconds: float = 2.0,
 ) -> SubmitResult:
     """Submit the output of a completed kernel via an internet-off variant.
 
@@ -196,12 +260,31 @@ def submit_notebook(
     if meta and meta.get("enable_internet") is False and kernel_version is not None:
         variant, ref, err, version = kernel_folder, effective_ref, "", kernel_version
     else:
-        variant, ref, err, version, _ = _submit_variant_folder(api, kernel_folder, effective_ref)
+        try:
+            variant, ref, err, version, _ = _submit_variant_folder(
+                api,
+                kernel_folder,
+                effective_ref,
+                retry_attempts=retry_attempts,
+                retry_seconds=retry_seconds,
+            )
+        except RuntimeError as exc:
+            return _failure_result("kernels_push", exc)
     if err and err not in {"none", "None", ""}:
         return SubmitResult(dry_run=False, message=f"kernels_push error: {err}", success=False)
     if not ref:
         return SubmitResult(
             dry_run=False, message="kernels_push returned no ref", success=False
+        )
+    if version is None:
+        return SubmitResult(
+            dry_run=False,
+            message="kernels_push returned no kernel version; refusing ambiguous submit_code",
+            success=False,
+            raw_status=json.dumps(
+                {"operation": "kernels_push", "category": "missing_kernel_version"},
+                sort_keys=True,
+            ),
         )
 
     last = "pushed"
@@ -238,15 +321,25 @@ def submit_notebook(
     }
     if version is not None:
         kwargs["kernel_version"] = int(version)
+    provenance = {
+        "artifact_sha256": _artifact_sha256(variant),
+        "kernel_ref": ref,
+        "kernel_version": version,
+        "output_file": output_file,
+    }
     try:
-        resp = api.competition_submit_code(**kwargs)
+        resp = _retry_api(
+            lambda: api.competition_submit_code(**kwargs),
+            attempts=retry_attempts,
+            seconds=retry_seconds,
+        )
     except Exception as exc:  # noqa: BLE001
-        raise RuntimeError(f"submit_code failed: {http_detail(exc)}") from exc
+        return _failure_result("submit_code", exc)
 
     status = get_str(resp, "message", "ref", "status", default=str(resp))
     return SubmitResult(
         dry_run=False,
         message=f"notebook submit ok ref={ref} v={version} status={status}",
         success=True,
-        raw_status=status,
+        raw_status=json.dumps({"status": status, "provenance": provenance}, sort_keys=True),
     )

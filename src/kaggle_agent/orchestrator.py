@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import json
 import re
 import threading
 import time
@@ -24,6 +25,7 @@ from kaggle_agent.judge import (
 from kaggle_agent.llm.router import ModelRouter
 from kaggle_agent.memory.ingest import build_context_pack
 from kaggle_agent.memory.write import (
+    append_daily_event,
     append_daily_log,
     patch_experiment,
     patch_memory_public_score,
@@ -32,6 +34,7 @@ from kaggle_agent.memory.write import (
 from kaggle_agent.notify.telegram import SupportsTelegram, TelegramClient
 from kaggle_agent.paths import memory_dir
 from kaggle_agent.pipeline.validate import validate_submission_csv
+from kaggle_agent.pipeline.image_template import validate_image_runtime_evidence
 from kaggle_agent.research.apply_snapshot import apply_kaggle_research
 from kaggle_agent.research.browser import (
     BrowserResearcher,
@@ -81,11 +84,6 @@ from kaggle_agent.research.deep import (
 from kaggle_agent.state_md import AgentState
 from kaggle_agent.kaggle_api.mcp_submit import submit_via_mcp
 from kaggle_agent.kaggle_api.submit_ops import normalize_kernel_ref
-from kaggle_agent.submit.browser_submit import (
-    BrowserSubmitFn,
-    BrowserSubmitRequest,
-    submit_via_browser,
-)
 from kaggle_agent.submit.pending import (
     mark_submitted,
     request_approval,
@@ -106,6 +104,8 @@ from kaggle_agent.loop import (
 )
 from kaggle_agent.experiment_fingerprint import submission_output_hash
 from kaggle_agent.train.kernel_history import record_output, seen_output
+from kaggle_agent.train.kernel_history import package_fingerprint as kernel_package_fingerprint
+from kaggle_agent.train.kernel_job import KernelJob, save_kernel_job
 from kaggle_agent.train.kernel_runner import (
     KernelRunResult,
     package_matches_existing,
@@ -115,6 +115,15 @@ from kaggle_agent.train.local_smoke import run_competition_smoke
 from kaggle_agent.train.notebook_builder import write_kernel_package
 from kaggle_agent.ops.evals import evaluate_cycle, persist_report
 from kaggle_agent.ops.tracing import Tracer
+from kaggle_agent.autonomy.approval import SubmissionAutonomy
+from kaggle_agent.autonomy.outcomes import OutcomeState, StageOutcome, failure_signature
+from kaggle_agent.autonomy.repair_tools import IncidentStore
+from kaggle_agent.autonomy.runtime import StageExecutor, StageInput, StageLedger
+from kaggle_agent.autonomy.outbox import (
+    ExternalAction,
+    ExternalActionOutbox,
+    reconcile_with_kaggle,
+)
 
 DEFAULT_HYPOTHESIS = "dry-run default: schema-valid 0.5 baseline then improve"
 
@@ -145,6 +154,7 @@ class CycleResult:
     smoke_ok: bool | None = None
     smoke_path: str | None = None
     kernel_ok: bool | None = None
+    kernel_pending: bool = False
     kernel_duplicate: bool = False
     output_duplicate: bool = False
     kernel_ref: str | None = None
@@ -158,6 +168,8 @@ class CycleResult:
     submit_message: str | None = None
     waiting_approve: bool = False  # live run OK, needs /yes (not a failure)
     feedback_score: str | None = None
+    feedback_pending: bool = False
+    submission_pending: bool = False
     heal_decision: str | None = None
     kernel_resumed: bool | None = None
     train_slices: int = 0
@@ -169,6 +181,7 @@ class CycleResult:
     code_verified: bool | None = None
     code_agent: str | None = None
     errors: list[str] = field(default_factory=list)
+    stage_outcomes: list[StageOutcome] = field(default_factory=list)
 
     @property
     def hard_errors(self) -> list[str]:
@@ -204,11 +217,12 @@ class Orchestrator:
         kaggle: KaggleClient | None = None,
         browser_fetch: FetchFn | None = None,
         telegram: SupportsTelegram | None = None,
-        browser_submit: BrowserSubmitFn | None = None,
+        browser_submit: Any | None = None,
         mcp_submit_fn: Any | None = None,
         router: Any | None = None,
         skip_phases: frozenset[str] | None = None,
         state_access: StateAccessor | None = None,
+        debug_runner: Any | None = None,
     ) -> None:
         self.settings = settings
         self.competition = competition
@@ -218,13 +232,58 @@ class Orchestrator:
         self._kaggle = kaggle
         self._browser_fetch = browser_fetch
         self._telegram = telegram
-        self._browser_submit = browser_submit
+        # Kept as an ignored compatibility argument for callers that previously
+        # injected a browser fallback. Submission is API-only by policy.
+        _ = browser_submit
         self._mcp_submit_fn = mcp_submit_fn  # tests inject call_tool
         self._assume_approved = False
         self._loop_n_used = 0
         self._tracer: Tracer | None = None
         self._skip_phases = skip_phases or frozenset()
         self._stages: dict[str, Stage] = build_stage_registry(self)
+        self._stage_executor = StageExecutor(StageLedger(self.root))
+        self._outbox = ExternalActionOutbox(self.root)
+        self._debug_runner = debug_runner
+        if self._debug_runner is None and self._llm_available():
+            from kaggle_agent.autonomy.debug_agent import CodingDebugAgent
+
+            self._debug_runner = CodingDebugAgent(
+                self.root,
+                self.router.client,
+                self.competition.model_for("code", self.settings),
+                self.settings.code_agent_config(),
+            ).run
+
+    def _submission_autonomy(self) -> SubmissionAutonomy | None:
+        if not isinstance(self.competition.raw.get("autonomy"), dict):
+            return None
+        return SubmissionAutonomy(self.competition.path)
+
+    def _auto_submit_allowed(self, state: AgentState) -> bool:
+        policy = self._submission_autonomy()
+        if policy is None:
+            return False
+        try:
+            used = int(state.proposals_used or "0")
+        except ValueError:
+            used = 0
+        return policy.can_submit_without_approval(proposals_used=used)
+
+    def _reconcile_outbox_action(self, item: ExternalAction) -> ExternalAction:
+        """Use only Kaggle's authoritative records to settle an external intent."""
+        try:
+            if self._kaggle is None:
+                self._kaggle = KaggleClient().connect()
+            return reconcile_with_kaggle(
+                self._outbox,
+                item,
+                kernel_status=self._kaggle.kernels_status,
+                submissions=lambda competition: self._kaggle.submissions(
+                    competition, top=20
+                ),
+            )
+        except Exception:  # noqa: BLE001
+            return self._outbox.get(item.action_id) or item
 
     def run_cycle(
         self, *, dry_run: bool | None = None, assume_approved: bool = False
@@ -261,7 +320,7 @@ class Orchestrator:
             state = self._run_named_phases(
                 self._enabled_phases(("RESEARCH",)), state, dry, result
             )
-            research_blocked = result.research_verified is False and self._llm_available()
+            research_blocked = not dry and result.research_verified is False
             if research_blocked:
                 result.errors.append(
                     "research verification failed; training blocked: "
@@ -270,20 +329,50 @@ class Orchestrator:
                 append_daily_log("research verification failed; training blocked", self.root)
             else:
                 state = self._run_train_slices(state, dry, result, started=now)
-            state = self._run_named_phases(
-                self._enabled_phases(SUBMIT_PHASES), state, dry, result
-            )
-            self._update_loop_after_feedback(result)
-            state = self._run_named_phases(
-                self._enabled_phases(TAIL_PHASES), state, dry, result
-            )
+            if not result.kernel_pending and not self._submission_blocked(result):
+                state = self._run_named_phases(
+                    self._enabled_phases(
+                        tuple(phase for phase in SUBMIT_PHASES if phase != "FEEDBACK")
+                    ), state, dry, result
+                )
+                if result.submission_pending:
+                    append_daily_log(
+                        "submission intent pending; feedback and HEAL deferred", self.root
+                    )
+                else:
+                    state = self._run_named_phases(
+                        self._enabled_phases(("FEEDBACK",)), state, dry, result
+                    )
+                    self._update_loop_after_feedback(result)
+                    state = self._run_named_phases(
+                        self._enabled_phases(TAIL_PHASES), state, dry, result
+                    )
 
             self._finish_ok(state, result)
         except Exception as exc:  # noqa: BLE001
             self._finish_error(result, exc)
+        except BaseException as exc:
+            # Interrupts and process-control exceptions still own a persisted
+            # lock.  Record and release it before propagating to the caller.
+            self._finish_error(result, exc)
+            raise
         finally:
             self._sa.release_lock()
         return result
+
+    @staticmethod
+    def _submission_blocked(result: CycleResult) -> bool:
+        blocking = {
+            OutcomeState.RECOVERABLE_FAILURE,
+            OutcomeState.NEEDS_AUTHORITY,
+            OutcomeState.EXHAUSTED,
+            OutcomeState.FATAL,
+        }
+        latest: dict[str, OutcomeState] = {}
+        for outcome in result.stage_outcomes:
+            if outcome.stage != "DEBUG":
+                latest[outcome.stage] = outcome.state
+        return any(state in blocking for state in latest.values())
 
     def _skip(self, result: CycleResult, reason: str, now: datetime) -> CycleResult:
         result.skipped = True
@@ -316,15 +405,16 @@ class Orchestrator:
         state.last_cycle_end = datetime.now(timezone.utc).isoformat()
         if result.hard_errors:
             state.last_result = "error"
+            state.last_error = result.hard_errors[0][:200]
         elif result.waiting_approve:
             state.last_result = "waiting_approve"
         else:
             state.last_result = "ok"
         if state.note in {"none", "running", "done", ""}:
             state.note = (
-                "waiting /yes"
-                if result.waiting_approve
-                else "done"
+                "kernel pending"
+                if result.kernel_pending
+                else ("waiting /yes" if result.waiting_approve else "done")
             )
         self._sa.save_state(state)
         if result.hard_errors:
@@ -375,10 +465,174 @@ class Orchestrator:
             state.phase = phase
             self._sa.save_state(state)
             append_daily_log(phase, self.root)
+            append_daily_event(
+                "phase_start",
+                {
+                    "phase": phase,
+                    "experiment_id": result.experiment_id or "",
+                    "competition": self.competition.id,
+                },
+                self.root,
+            )
             if self._tracer is not None:
                 self._tracer.emit("phase", phase=phase)
-            state = self._phase(phase, state=state, dry=dry, result=result)
+            errors_before = len(result.errors)
+            stage = self._stages.get(phase)
+            if stage is None:
+                # LOCK is intentionally a lifecycle marker rather than a handler.
+                result.phases_run.append(phase)
+                continue
+            request = self._stage_input(phase, dry, result)
+
+            def run_stage(_: StageInput) -> StageOutcome:
+                nonlocal state
+                result.phases_run.append(phase)
+                run = stage.run_typed(state, dry, result)
+                state = run.state
+                return run.outcome or self._stage_outcome(phase, result, errors_before)
+
+            execution = self._stage_executor.execute(request, run_stage)
+            outcome = execution.outcome
+            if execution.replayed:
+                append_daily_log(f"{phase} replayed from durable stage ledger", self.root)
+            result.stage_outcomes.append(outcome)
+            if self._tracer is not None:
+                # Keep the operational event compact and secret-free; the durable
+                # ledger retains the detailed evidence for incident diagnosis.
+                self._tracer.emit(
+                    "stage_outcome",
+                    stage=phase,
+                    state=outcome.state.value,
+                    attempt=execution.attempt,
+                    replayed=execution.replayed,
+                    idempotency_key=request.idempotency_key,
+                    failure_signature=outcome.failure_signature or "",
+                    external_job=outcome.external_job or "",
+                )
+            if (
+                outcome.state is OutcomeState.RECOVERABLE_FAILURE
+                and self._debug_runner is not None
+            ):
+                incident = IncidentStore(self.root).record(
+                    outcome,
+                    experiment_id=result.experiment_id or "unknown",
+                    package_fingerprint=self._package_fingerprint(result),
+                )
+                repaired = self._debug_runner(outcome, incident)
+                result.stage_outcomes.append(repaired)
+                if repaired.state is OutcomeState.SUCCESS:
+                    del result.errors[errors_before:]
+                    def retry_stage(_: StageInput) -> StageOutcome:
+                        nonlocal state
+                        result.phases_run.append(phase)
+                        retried = stage.run_typed(state, dry, result)
+                        state = retried.state
+                        return retried.outcome or self._stage_outcome(
+                            phase, result, errors_before
+                        )
+
+                    result.stage_outcomes.append(
+                        self._stage_executor.execute(request, retry_stage).outcome
+                    )
         return state
+
+    def _stage_input(self, phase: str, dry: bool, result: CycleResult) -> StageInput:
+        """Build a secret-free idempotency identity for one phase attempt."""
+        contract_hash = str(
+            self.competition.raw.get("contract_hash")
+            or self.competition.raw.get("compatibility_hash")
+            or "unversioned"
+        )
+        return StageInput.create(
+            stage=phase,
+            cycle_id=result.experiment_id or "unknown",
+            competition=self.competition.id,
+            inputs={
+                "contract_hash": contract_hash,
+                "dry_run": dry,
+                "kernel_ref": result.kernel_ref or "",
+                "package_fingerprint": self._package_fingerprint(result),
+            },
+        )
+
+    @staticmethod
+    def _package_fingerprint(result: CycleResult) -> str:
+        if result.kernel_path and Path(result.kernel_path).is_dir():
+            parts = []
+            for path in sorted(Path(result.kernel_path).glob("*")):
+                if path.is_file():
+                    parts.append(path.name + ":" + str(path.stat().st_size))
+            return failure_signature("|".join(parts))
+        return "none"
+
+    def _stage_outcome(
+        self, phase: str, result: CycleResult, errors_before: int
+    ) -> StageOutcome:
+        new_errors = tuple(result.errors[errors_before:])
+        if phase == "KERNEL_TRAIN" and result.kernel_pending:
+            return StageOutcome(
+                OutcomeState.PENDING_EXTERNAL,
+                phase,
+                "Kaggle kernel remains queued or running",
+                evidence=new_errors,
+                external_job=result.kernel_ref or "unknown",
+                retryable=True,
+            )
+        if phase == "FEEDBACK" and result.feedback_pending:
+            return StageOutcome(
+                OutcomeState.PENDING_EXTERNAL,
+                phase,
+                "leaderboard score remains pending",
+                external_job=result.experiment_id or "submission",
+                retryable=True,
+            )
+        if phase == "SUBMIT" and result.submission_pending:
+            return StageOutcome(
+                OutcomeState.PENDING_EXTERNAL,
+                phase,
+                "submission intent awaits authoritative Kaggle reconciliation",
+                external_job=result.experiment_id or "submission",
+                retryable=True,
+            )
+        if phase in {"RESEARCH", "PLAN"}:
+            verified = (
+                result.research_verified if phase == "RESEARCH" else result.plan_verified
+            )
+            if verified is False:
+                if result.dry_run:
+                    return StageOutcome.success(
+                        phase, f"{phase.lower()} is unverified (dry-run observation)"
+                    )
+                return StageOutcome(
+                    OutcomeState.NEEDS_AUTHORITY,
+                    phase,
+                    f"{phase.lower()} is unverified; an LLM-backed artifact is required",
+                )
+        if phase == "KERNEL_TRAIN" and result.kernel_duplicate:
+            return StageOutcome(
+                OutcomeState.NEEDS_AUTHORITY,
+                phase,
+                "kernel recipe is unchanged; a new training candidate is required",
+            )
+        failed = {
+            "RESEARCH": result.research_verified is False,
+            "PLAN": result.plan_verified is False,
+            "CODE": result.code_ok is False or result.code_verified is False,
+            "LOCAL_SMOKE": result.smoke_ok is False,
+            "KERNEL_TRAIN": result.kernel_ok is False,
+            "VALIDATE_SUB": result.validate_ok is False,
+            "SUBMIT": result.submit_ok is False and not result.waiting_approve,
+        }.get(phase, False)
+        if phase == "TELEGRAM_APPROVE" and result.waiting_approve:
+            return StageOutcome(
+                OutcomeState.NEEDS_AUTHORITY,
+                phase,
+                "first submission requires approval",
+            )
+        if failed:
+            summary = " | ".join(new_errors) or f"{phase} reported failure"
+            return StageOutcome.failure(phase, summary, evidence=new_errors)
+        return StageOutcome.success(phase, f"{phase} completed", evidence=new_errors)
 
     def _resolve_loop_n(self) -> int:
         n_min = self.settings.loop_n_min
@@ -409,6 +663,7 @@ class Orchestrator:
         result.smoke_ok = None
         result.smoke_path = None
         result.kernel_ok = None
+        result.kernel_pending = False
         result.kernel_duplicate = False
         result.output_duplicate = False
         result.kernel_ref = None
@@ -454,6 +709,9 @@ class Orchestrator:
             append_daily_log(f"train slice {i}/{n}", self.root)
             state = self._train_slice(state, dry, result)
             used = i
+            if result.kernel_pending:
+                append_daily_log("train loop stop: kernel remains pending", self.root)
+                break
             csv = result.candidate_csv
             if result.validate_ok and csv and Path(csv).is_file():
                 prior = [
@@ -488,7 +746,7 @@ class Orchestrator:
             result.validate_ok = True
             result.errors = list(best["errors"])
             state.active_experiment = result.experiment_id
-        else:
+        elif not result.kernel_pending:
             result.validate_ok = False
             result.candidate_csv = None
         return state
@@ -525,6 +783,9 @@ class Orchestrator:
                 break
             if phase == "KERNEL_TRAIN" and result.kernel_duplicate:
                 append_daily_log("train slice stopped: kernel identical to a previous run", self.root)
+                break
+            if phase == "KERNEL_TRAIN" and result.kernel_pending:
+                append_daily_log("train slice stopped: kernel polling remains pending", self.root)
                 break
             if phase == "VALIDATE_SUB" and result.output_duplicate:
                 append_daily_log("train slice stopped: output identical to a previous run", self.root)
@@ -744,7 +1005,12 @@ class Orchestrator:
                             "done only after write_card succeeded."
                         ),
                         stall_force=None,
-                        force_after_stall="write_card",
+                        # Notebook cards must be grounded in a pulled kernel.  When
+                        # the model keeps relisting, recover by pulling the first
+                        # listed source rather than forcing an ungrounded card.
+                        force_after_stall=(
+                            "pull_kernel" if name == "notebooks" else "write_card"
+                        ),
                         name="research",
                         agent_id=name,
                         tool_schemas=fleet_tool_schemas(spec),
@@ -1218,6 +1484,8 @@ class Orchestrator:
 
     def _code(self, state: AgentState, result: CycleResult) -> AgentState:
         workspace = self.root / self.competition.workspace_relative
+        zen = self.router.client if self.router is not None else None
+        model = self.competition.model_for("code", self.settings)
         check = ensure_pipeline_ready(workspace)
         if not check.ok:
             result.code_ok = False
@@ -1232,8 +1500,27 @@ class Orchestrator:
                     detail="pipeline missing",
                 )
             return state
-        zen = self.router.client if self.router is not None else None
-        model = self.competition.model_for("code", self.settings)
+        image_contract = workspace / "pipeline" / "image_contract.json"
+        image_manifest = workspace / "pipeline" / "artifact_manifest.json"
+        if image_contract.is_file() and image_manifest.is_file():
+            try:
+                contract = json.loads(image_contract.read_text(encoding="utf-8"))
+                manifest = json.loads(image_manifest.read_text(encoding="utf-8"))
+            except json.JSONDecodeError as exc:
+                result.code_ok = False
+                result.errors.append(f"code: image contract JSON invalid: {exc}")
+                return state
+            if (
+                contract.get("template") == "rsna-2d-dino-mil-v1"
+                and manifest.get("template_version") == "rsna-2d-dino-mil-v1"
+                and zen is None
+            ):
+                result.code_ok = True
+                result.wrote_recipe = True
+                result.wrote_methods = True
+                result.code_agent = "rsna-2d-dino-mil-template"
+                append_daily_log("code: using validated RSNA 2D DINO MIL template", self.root)
+                return state
         agent, code_state = make_code_agent(
             zen,
             model,
@@ -1285,6 +1572,13 @@ class Orchestrator:
             self.root,
         )
         if not (result.wrote_recipe or result.wrote_custom_infer):
+            from kaggle_agent.agents.code import _recipe_text
+
+            recipe = _recipe_text(workspace)
+            if result.dry_run and zen is None and "submission.csv" in recipe:
+                result.code_ok = True
+                append_daily_log("code dry-run: using existing static recipe", self.root)
+                return state
             result.code_ok = False
             result.errors.append("code: no recipe change was written")
             append_daily_log("code rejected: no recipe change was written", self.root)
@@ -1470,24 +1764,94 @@ class Orchestrator:
                         ],
                     )
                 else:
-                    run = run_kernel_phase(
-                        self._kaggle if should_push else None,
-                        package,
-                        push=should_push,
-                        pull_output_dir=out_dir if should_push else None,
-                        root=self.root,
-                        competition=self.competition.slug,
-                        exp_id=exp_id,
-                        poll_seconds=self.settings.kernel_poll_seconds,
-                        poll_attempts=self.settings.kernel_poll_attempts,
-                    )
+                    push_action: ExternalAction | None = None
+                    if should_push:
+                        push_action = self._outbox.enqueue(
+                            action="kernel_push",
+                            idempotency_key=kernel_package_fingerprint(package.folder),
+                            payload={"kernel_ref": package.kernel_ref},
+                        )
+                        if push_action.status in {"sent", "unknown"}:
+                            push_action = self._reconcile_outbox_action(push_action)
+                            if push_action.status != "accepted":
+                                result.kernel_pending = True
+                                result.kernel_ref = package.kernel_ref
+                                append_daily_log(
+                                    "kernel push intent awaits Kaggle reconciliation",
+                                    self.root,
+                                )
+                                return state
+                            # The remote kernel exists but a crash prevented the
+                            # normal runner from persisting its resume record.
+                            save_kernel_job(
+                                KernelJob(
+                                    kernel_ref=package.kernel_ref,
+                                    folder=str(package.folder),
+                                    status="pushed",
+                                    competition=self.competition.slug,
+                                    exp_id=exp_id,
+                                ),
+                                self.root,
+                            )
+                            run = run_kernel_phase(
+                                self._kaggle,
+                                None,
+                                push=True,
+                                pull_output_dir=out_dir,
+                                root=self.root,
+                                competition=self.competition.slug,
+                                exp_id=exp_id,
+                                poll_seconds=self.settings.kernel_poll_seconds,
+                                poll_attempts=self.settings.kernel_poll_attempts,
+                            )
+                        else:
+                            self._outbox.mark_sent(push_action.action_id)
+                            run = run_kernel_phase(
+                                self._kaggle,
+                                package,
+                                push=True,
+                                pull_output_dir=out_dir,
+                                root=self.root,
+                                competition=self.competition.slug,
+                                exp_id=exp_id,
+                                poll_seconds=self.settings.kernel_poll_seconds,
+                                poll_attempts=self.settings.kernel_poll_attempts,
+                            )
+                    else:
+                        run = run_kernel_phase(
+                            None,
+                            package,
+                            push=False,
+                            root=self.root,
+                            competition=self.competition.slug,
+                            exp_id=exp_id,
+                            poll_seconds=self.settings.kernel_poll_seconds,
+                            poll_attempts=self.settings.kernel_poll_attempts,
+                        )
+                    if push_action is not None:
+                        if run.pushed:
+                            self._outbox.reconcile(
+                                push_action.action_id,
+                                status="accepted",
+                                external_ref=package.kernel_ref,
+                            )
+                        elif not run.ok:
+                            # A transport failure may have reached Kaggle after
+                            # the request was sent, so recovery must reconcile.
+                            self._outbox.mark_unknown(push_action.action_id)
 
-            result.kernel_ok = run.ok
+            result.kernel_pending = run.pending
+            result.kernel_ok = None if run.pending else run.ok
             result.kernel_resumed = run.resumed
             result.kernel_version = run.kernel_version
             if run.kernel_ref and run.kernel_ref != "none":
                 result.kernel_ref = run.kernel_ref
-            if not run.ok:
+            if not run.ok and not run.pending:
+                result.kernel_duplicate = any(
+                    "duplicate recipe" in error.lower()
+                    or "duplicate kernel package" in error.lower()
+                    for error in run.errors
+                )
                 result.errors.extend(f"kernel:{e}" for e in run.errors)
             append_daily_log(
                 f"kernel ok={run.ok} push={run.pushed} resume={run.resumed} "
@@ -1550,6 +1914,8 @@ class Orchestrator:
         result.candidate_csv = str(path)
         if check.ok:
             append_daily_log(f"validate ok path={path} rows={check.n_rows}", self.root)
+            if kernel_output and not self._validate_image_semantic_evidence(path, result):
+                return state
             if kernel_output:
                 out_hash = submission_output_hash(path, self.competition.id_column)
                 prior_exp = seen_output(
@@ -1622,6 +1988,77 @@ class Orchestrator:
                 self.root,
             )
         return state
+
+    def _validate_image_semantic_evidence(self, submission_path: Path, result: CycleResult) -> bool:
+        if not result.kernel_path:
+            return True
+        manifest_path = Path(result.kernel_path) / "artifact_manifest.json"
+        if not manifest_path.is_file():
+            return True
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            result.validate_ok = False
+            result.errors.append("validate: image artifact manifest is invalid JSON")
+            append_daily_log("validate rejected: image artifact manifest invalid JSON", self.root)
+            return False
+        if manifest.get("template_version") != "rsna-2d-dino-mil-v1":
+            return True
+        evidence_path = submission_path.parent / "semantic_evidence.json"
+        if not evidence_path.is_file():
+            result.validate_ok = False
+            result.errors.append("validate: image semantic evidence missing")
+            append_daily_log("validate rejected: image semantic evidence missing", self.root)
+            return False
+        try:
+            evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            result.validate_ok = False
+            result.errors.append("validate: image semantic evidence is invalid JSON")
+            append_daily_log("validate rejected: image semantic evidence invalid JSON", self.root)
+            return False
+        semantic = validate_image_runtime_evidence(evidence)
+        if not semantic.ok:
+            result.validate_ok = False
+            result.errors.extend(f"validate:{e}" for e in semantic.errors[:5])
+            append_daily_log(
+                f"validate rejected: image semantic evidence failed {semantic.errors[:3]}",
+                self.root,
+            )
+            return False
+        runtime_manifest_path = submission_path.parent / "artifact_manifest.runtime.json"
+        if not runtime_manifest_path.is_file():
+            result.validate_ok = False
+            result.errors.append("validate: image runtime artifact manifest missing")
+            append_daily_log("validate rejected: image runtime artifact manifest missing", self.root)
+            return False
+        try:
+            runtime_manifest = json.loads(runtime_manifest_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            result.validate_ok = False
+            result.errors.append("validate: image runtime artifact manifest is invalid JSON")
+            append_daily_log("validate rejected: image runtime artifact manifest invalid JSON", self.root)
+            return False
+        if (
+            runtime_manifest.get("template_version") != "rsna-2d-dino-mil-v1"
+            or runtime_manifest.get("fold_outputs") != evidence.get("fold_outputs")
+            or runtime_manifest.get("prediction_hashes") != evidence.get("prediction_hashes")
+        ):
+            result.validate_ok = False
+            result.errors.append("validate: image runtime artifact manifest disagrees with evidence")
+            append_daily_log("validate rejected: image runtime artifact manifest disagrees", self.root)
+            return False
+        append_daily_event(
+            "image_semantic_evidence_ok",
+            {
+                "experiment_id": result.experiment_id or "",
+                "submission": str(submission_path),
+                "fold_outputs": evidence.get("fold_outputs") or [],
+                "prediction_hashes": evidence.get("prediction_hashes") or [],
+            },
+            self.root,
+        )
+        return True
 
     def _plan(self, state: AgentState, dry: bool, result: CycleResult) -> None:
         hypothesis, approach, notes = DEFAULT_HYPOTHESIS, "baseline", "plan agent"
@@ -1746,6 +2183,12 @@ class Orchestrator:
             append_daily_log("approve skipped: no validated candidate", self.root)
             return state
 
+        if not dry and self._auto_submit_allowed(state):
+            result.approve_ok = True
+            result.waiting_approve = False
+            append_daily_log(f"approve autonomous exp={exp_id}", self.root)
+            return state
+
         if self._assume_approved:
             request_approval(
                 exp_id=exp_id,
@@ -1823,7 +2266,12 @@ class Orchestrator:
             return state
 
         pending = self._sa.load_pending()
-        if not dry and self.settings.require_telegram_approve and not self._assume_approved:
+        if (
+            not dry
+            and self.settings.require_telegram_approve
+            and not self._assume_approved
+            and not self._auto_submit_allowed(state)
+        ):
             if (
                 pending.status == "approved"
                 and pending.csv_path not in {csv_path, "none"}
@@ -1868,13 +2316,18 @@ class Orchestrator:
             not dry
             and self.settings.block_submit
         ):
-            report = memory_dir(self.root) / "daily" / "eval_report.json"
             try:
-                import json
-
-                ev = json.loads(report.read_text(encoding="utf-8")) if report.is_file() else {}
-            except Exception:  # noqa: BLE001
-                ev = {}
+                # Evaluate the artifacts produced by this cycle. Reading the
+                # prior cycle's report allowed a passing stale report to bless
+                # a failed PLAN/CODE/VALIDATE run.
+                ev = evaluate_cycle(self.root)
+                persist_report(self.root, ev)
+            except Exception as exc:  # noqa: BLE001
+                result.submit_ok = False
+                result.submit_message = "eval gate unavailable"
+                result.errors.append(f"submit eval gate unavailable: {exc}")
+                append_daily_log(f"submit skipped: eval gate unavailable: {exc}", self.root)
+                return state
             if ev.get("passed") is False:
                 result.submit_ok = False
                 result.submit_message = "eval gate closed"
@@ -1888,9 +2341,35 @@ class Orchestrator:
         fails: list[str] = []
         result.submit_ok = False
         result.submit_message = ""
+        outbox_action: ExternalAction | None = None
+        if not dry:
+            output_hash = submission_output_hash(Path(csv_path), self.competition.id_column)
+            outbox_action = self._outbox.enqueue(
+                action="submit",
+                idempotency_key=f"{self.competition.slug}:{mode}:{output_hash}",
+                payload={
+                    "competition": self.competition.slug,
+                    "message": msg,
+                    "output_hash": output_hash,
+                },
+            )
+            if outbox_action.status in {"sent", "unknown"}:
+                outbox_action = self._reconcile_outbox_action(outbox_action)
+                if outbox_action.status == "accepted":
+                    result.submit_ok = True
+                    result.submit_message = (
+                        f"outbox: reconciled existing submission {outbox_action.external_ref}"
+                    )
+                else:
+                    result.submission_pending = True
+                    result.submit_message = "outbox: submission intent awaits reconciliation"
+                    append_daily_log(result.submit_message, self.root)
+                    return state
+            else:
+                outbox_action = self._outbox.mark_sent(outbox_action.action_id)
 
         # --- 1) Kaggle MCP ---
-        if self.settings.mcp_submit:
+        if not result.submit_ok and self.settings.mcp_submit:
             append_daily_log(f"submit mcp start mode={mode} kernel={kernel_ref}", self.root)
             if not dry:
                 self._notify(
@@ -1916,6 +2395,10 @@ class Orchestrator:
                 fails.append(f"mcp: {exc}")
                 result.submit_message = f"mcp: {exc}"
                 append_daily_log(f"submit mcp failed: {exc}", self.root)
+                if outbox_action is not None:
+                    self._outbox.mark_unknown(outbox_action.action_id)
+                    result.submission_pending = True
+                    return state
 
         # --- 2) Python API ---
         if not result.submit_ok and self.settings.api_submit:
@@ -1965,45 +2448,20 @@ class Orchestrator:
                 fails.append(f"api: {exc}")
                 result.submit_message = f"api: {exc}"
                 append_daily_log(f"submit api failed: {exc}", self.root)
-
-        # --- 3) Browser-harness ---
-        if (
-            not dry
-            and not result.submit_ok
-            and self.settings.browser_submit_fallback
-        ):
-            append_daily_log(
-                f"submit browser after mcp/api: {fails[-1] if fails else ''}",
-                self.root,
-            )
-            self._notify(
-                "MCP and API failed — trying browser-harness…\n\n"
-                f"Last error: {(fails[-1] if fails else 'unknown')[:300]}\n"
-                "Chrome must already be signed in to Kaggle."
-            )
-            try:
-                br = submit_via_browser(
-                    BrowserSubmitRequest(
-                        competition=self.competition.slug,
-                        message=msg,
-                        mode=mode,
-                        csv_path=Path(csv_path),
-                        kernel_ref=kernel_ref,
-                        dry_run=False,
-                    ),
-                    run_fn=self._browser_submit,
-                )
-                result.submit_ok = br.success
-                result.submit_message = f"browser: {br.message}"
-                if not br.success:
-                    fails.append(f"browser: {br.message}")
-            except Exception as exc:  # noqa: BLE001
-                fails.append(f"browser: {exc}")
-                result.submit_message = f"browser: {exc}"
-                append_daily_log(f"submit browser failed: {exc}", self.root)
+                if outbox_action is not None:
+                    self._outbox.mark_unknown(outbox_action.action_id)
+                    result.submission_pending = True
+                    return state
 
         if not dry and result.submit_ok:
+            if outbox_action is not None:
+                self._outbox.reconcile(outbox_action.action_id, status="accepted")
             mark_submitted(self.root)
+            policy = self._submission_autonomy()
+            if policy is not None and (
+                self._assume_approved or pending.status in {"approved", "submitted"}
+            ):
+                policy.record_approved_submission()
             try:
                 used = int(state.proposals_used or "0") + 1
             except ValueError:
@@ -2049,6 +2507,7 @@ class Orchestrator:
                 else self._wait_for_feedback_score()
             )
             if scored is None:
+                result.feedback_pending = True
                 append_daily_log("feedback: no scored submission yet", self.root)
                 return state
             result.feedback_score = scored.public_score
@@ -2117,7 +2576,15 @@ class Orchestrator:
             if not exp_id:
                 continue
             exp_file = memory_dir(self.root) / "experiments" / f"{exp_id}.md"
-            if not exp_file.is_file() or already_recorded(exp_file, row.public_score):
+            if not exp_file.is_file():
+                write_experiment(
+                    exp_id,
+                    hypothesis="recovered scored Kaggle submission",
+                    approach="external_reconciliation",
+                    notes=f"recovered from submission {row.ref}",
+                    root=self.root,
+                )
+            if already_recorded(exp_file, row.public_score):
                 continue
             patch_experiment(
                 exp_id,
@@ -2176,6 +2643,10 @@ class Orchestrator:
 
     def _heal(self, state: AgentState, result: CycleResult) -> AgentState:
         heal = load_heal(self.root)
+        if result.feedback_pending:
+            result.heal_decision = "pending_external"
+            append_daily_log("heal deferred: submission score pending", self.root)
+            return state
         score = result.feedback_score
         # Prefer public LB score; fall back to personal best already stored
         if not score or score in {"none", "n/a"}:
@@ -2324,7 +2795,7 @@ def run_daily(
     kaggle: KaggleClient | None = None,
     browser_fetch: FetchFn | None = None,
     telegram: SupportsTelegram | None = None,
-    browser_submit: BrowserSubmitFn | None = None,
+    browser_submit: Any | None = None,
     mcp_submit_fn: Any | None = None,
     skip_phases: frozenset[str] | None = None,
 ) -> CycleResult:

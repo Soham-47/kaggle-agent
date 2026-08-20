@@ -1,718 +1,464 @@
-"""Kaggle kernel body: report labels + metadata ranker + optional DINOv2.
+"""Rendered RSNA 2D DINO MIL image template."""
 
-This file is inlined into the submitted notebook. It may use pandas/sklearn
-(Kaggle has them). Do not import this module from local agent smoke paths.
-"""
-
-KERNEL_RECIPE_SOURCE = r'''EXPERIMENT_VARIANT = 'dinov3_rankblend_v1'
-RECIPE_VARIANT = 'dinov3_rankblend_v1'
-
-# RSNA Knee recipe: DINOv3 ViT-S/16 as a second independent encoder family
-# fine-tuned on this competition's knee MRI; trained on report/LLM soft labels
-# with GroupKFold on study_id; per-series learned type embeddings (plane x fat
-# suppression) with 12 cross-attending queries over concatenated series tokens
-# before the classification head; at inference rank-blend the DINOv3 family
-# into the existing DINOv2 family at equal family weight (fold-first: average
-# seeds/checkpoints inside each fold in probability space, rank each fold,
-# then average the five fold ranks); do not probability-mean across families.
+KERNEL_RECIPE_SOURCE = r'''
+import csv
+import hashlib
+import json
+import shutil
+import zipfile
 from pathlib import Path
-import os, json, math, random, warnings, re, unicodedata, hashlib
-warnings.filterwarnings("ignore")
-os.environ.setdefault("OMP_NUM_THREADS", "4")
 
 import numpy as np
 import pandas as pd
+import pydicom
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from sklearn.model_selection import GroupKFold
+from transformers import AutoModel
 
-SEED = 42
-random.seed(SEED)
-np.random.seed(SEED)
-
-LABELS = ["ACL", "MCL", "Medial Meniscus", "Lateral Meniscus", "Medial OA",
-          "Lateral OA", "PF OA", "Effusion", "Synovitis", "Baker's",
-          "Contusion", "Fracture"]
+LABELS = ['ACL', 'MCL', 'Medial Meniscus', 'Lateral Meniscus', 'Medial OA', 'Lateral OA', 'PF OA', 'Effusion', 'Synovitis', "Baker's", 'Contusion', 'Fracture']
+IMAGE_CONTRACT = json.loads('{"competition_id": "rsna_knee", "dataset_sources": ["sohamgawd47foden/rsna-knee-test-mirror-private", "barun2104/rsna-knee-mri-processed-3d-volumes", "barun2104/rsna-knee-stratified-folds-and-llm-soft-labels", "stevenleehans/rsna-knee-llm-report-labels", "sohamgawd47foden/rsna-knee-train-series-map-private"], "encoder": "2d_pretrained_dino", "fold_group_key": "patient_id", "head_labels": ["ACL", "MCL", "Medial Meniscus", "Lateral Meniscus", "Medial OA", "Lateral OA", "PF OA", "Effusion", "Synovitis", "Baker\'s", "Contusion", "Fracture"], "hidden_id_strategy": "discover_study_ids_from_test_folders", "inference_aggregation": "rank_average_folds", "model_sources": ["metaresearch/dinov2/pytorch/small/1"], "parameters": {"epochs": 1, "folds": 5, "image_size": 224, "slices_per_series": 8}, "pooling": "series_mil_attention_pooling", "slice_sampler": "per_series_balanced_slice_sampler", "source_card_refs": ["source-model-metaresearch-dinov2-small", "source-dataset-https-www-kaggle-com-datasets-barun2104-rsna-knee-stratified", "source-github-https-github-com-tranbadat2607-rsna-knee-abnormality-detecti", "source-rsna-train-series-mapping"], "target_source": "report_derived_mounted_targets", "template": "rsna-2d-dino-mil-v1"}')
+RESUME_MANIFEST = json.loads('{"checkpoint_filename": "fold_0_checkpoint.pt", "dataset_source": "sohamgawd47foden/rsna-knee-fold0-resume-20260819", "fold": 0, "labels": ["ACL", "MCL", "Medial Meniscus", "Lateral Meniscus", "Medial OA", "Lateral OA", "PF OA", "Effusion", "Synovitis", "Baker\'s", "Contusion", "Fracture"], "model_pin": "metaresearch/dinov2/pytorch/small/1", "sha256": "86d6022d34d6ed5e1c2537fa0dd0156889e92b8692f2f8147be709571969b1a7", "sidecar_filename": "fold_0_checkpoint.json", "source_contract_sha256": "ec9d5440327641580080b99d8d456511bce0027681258546b7e508204d62d18d", "source_experiment": "20260819-123221", "template_version": "rsna-2d-dino-mil-v1", "training_parameters": {"epochs": 1, "folds": 5, "image_size": 224, "slices_per_series": 8}}')
 ID_COL = "StudyInstanceUID"
-SLUG = "rsna-knee-abnormality-detection"
+WORK = Path(".")
+# This template deliberately has no metadata-ranker fallback.
+DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+IMAGE_SIZE = int(IMAGE_CONTRACT["parameters"].get("image_size", 336))
+FOLDS = int(IMAGE_CONTRACT["parameters"].get("folds", 5))
+EPOCHS = int(IMAGE_CONTRACT["parameters"].get("epochs", 1))
+SLICES_PER_SERIES = int(IMAGE_CONTRACT["parameters"].get("slices_per_series", 8))
 
-IMG_SIZE = 224            # DINOv3 ViT-S/16 native input
-N_ADJACENT_SLICES = 3
-N_SLOTS = 6
-BATCH_SIZE = 8
-N_EPOCHS = 10
-N_FOLDS = 5
-N_QUERIES = 12           # one cross-attending query per label
 
-def find_root():
-    cands = [
-        Path("/kaggle/input/competitions") / SLUG,
-        Path("/kaggle/input") / SLUG,
-        Path("."),
-        Path("/kaggle/working"),
-    ]
-    for c in cands:
-        if (c / "train.csv").is_file() or (c / "train_series.csv").is_file():
-            return c
-    kin = Path("/kaggle/input")
-    if kin.is_dir():
-        for p in kin.rglob("train.csv"):
-            return p.parent
-    return Path(".")
+def _competition_root():
+    base = Path("/kaggle/input")
+    expected = base / "rsna-knee-abnormality-detection"
+    candidates = [expected]
+    if base.is_dir():
+        candidates.extend(sorted(path for path in base.iterdir() if path.is_dir()))
+        candidates.extend(sorted(path.parent for path in base.rglob("test.csv")))
+    for candidate in candidates:
+        if (candidate / "test.csv").is_file() and (candidate / "sample_submission.csv").is_file():
+            return candidate
+    raise RuntimeError("RSNA competition files are not mounted")
 
-ROOT = find_root()
-WORK = Path("/kaggle/working") if Path("/kaggle/working").is_dir() else Path(".")
-print("ROOT", ROOT, "exists train", (ROOT / "train.csv").is_file())
 
-if Path("train.csv").is_file() and not (ROOT / "train.csv").is_file():
-    ROOT = Path(".")
+def _study_root(kind):
+    for name in (f"{kind}_images", f"{kind}_series", kind):
+        root = _competition_root() / name
+        if root.is_dir():
+            return root
+    archive = _competition_root() / f"{kind}_series.zip"
+    extracted = Path("/kaggle/working") / f"{kind}_series"
+    if archive.is_file():
+        if not extracted.is_dir():
+            with zipfile.ZipFile(archive) as bundle:
+                bundle.extractall("/kaggle/working")
+        if extracted.is_dir():
+            return extracted
+    raise RuntimeError(f"{kind} image folders are not mounted")
 
-def read_csv(name):
-    for base in (ROOT, Path("."), WORK):
-        p = base / name
-        if p.is_file():
-            return pd.read_csv(p)
-    return pd.DataFrame()
 
-train = read_csv("train.csv")
-train_series = read_csv("train_series.csv")
-test = read_csv("test.csv")
-test_series = read_csv("test_series.csv")
-sample = read_csv("sample_submission.csv")
-print("shapes", train.shape, train_series.shape, test.shape, test_series.shape)
-
-def discover_test_ids(root, test_df):
-    """Return test rows for every study folder present on disk."""
-    base = Path(root) / "test_series"
-    ids = sorted(p.name for p in base.iterdir() if p.is_dir()) if base.is_dir() else []
+def _discover_test_ids():
+    root = _study_root("test")
+    ids = sorted(path.name for path in root.iterdir() if path.is_dir())
     if not ids:
-        return test_df.copy()
-    discovered = pd.DataFrame({ID_COL: ids})
-    if test_df is None or test_df.empty:
-        return discovered
-    columns = [c for c in test_df.columns if c != ID_COL]
-    if columns:
-        discovered = discovered.merge(test_df[[ID_COL] + columns], on=ID_COL, how="left")
-    return discovered
+        raise RuntimeError("semantic check failed: hidden test folder IDs missing")
+    return ids, root
 
 
-def folder_study_features(root):
-    """Count series folders and DICOM slices for each study folder."""
-    base = Path(root) / "test_series"
-    rows = []
-    if not base.is_dir():
-        return pd.DataFrame(columns=["n_series", "n_slices"])
-    for study in sorted(p for p in base.iterdir() if p.is_dir()):
-        series = [p for p in study.iterdir() if p.is_dir()]
-        rows.append({ID_COL: study.name, "n_series": len(series),
-                     "n_slices": sum(1 for p in series for f in p.rglob("*.dcm") if f.is_file())})
-    return pd.DataFrame(rows).set_index(ID_COL) if rows else pd.DataFrame(columns=["n_series", "n_slices"])
-
-# --------------------------------------------------------------------------- #
-# DICOM geometry-aware slice ordering.
-# --------------------------------------------------------------------------- #
-
-def order_slices_by_geometry(series_df):
-    out = {}
-    if series_df is None or series_df.empty:
-        return out
-    for uid, grp in series_df.groupby(ID_COL):
-        grp = grp.copy()
-        pos = None
-        if "ImagePositionPatient" in grp.columns and "ImageOrientationPatient" in grp.columns:
-            try:
-                def _parse_vec(s):
-                    if isinstance(s, str):
-                        return np.array([float(x) for x in re.findall(r"[-+]?\d*\.?\d+", s)])
-                    return np.array(s, dtype=float)
-                iop = grp["ImageOrientationPatient"].apply(_parse_vec)
-                ipp = grp["ImagePositionPatient"].apply(_parse_vec)
-                def _normal(v):
-                    r = v[:3]; c = v[3:6]
-                    return np.cross(r, c)
-                normals = iop.apply(_normal)
-                avg_n = np.mean(np.vstack(normals.values), axis=0)
-                avg_n = avg_n / (np.linalg.norm(avg_n) + 1e-12)
-                pos = ipp.apply(lambda p: float(np.dot(p, avg_n)))
-            except Exception:
-                pos = None
-        if pos is None and "InstanceNumber" in grp.columns:
-            pos = grp["InstanceNumber"].astype(float)
-        if pos is None:
-            pos = grp.index.astype(float)
-        grp = grp.assign(_pos=pos.values)
-        grp = grp.sort_values("_pos")
-        if "file" in grp.columns:
-            out[uid] = grp["file"].tolist()
-        elif "filename" in grp.columns:
-            out[uid] = grp["filename"].tolist()
-        else:
-            out[uid] = grp.index.tolist()
-    return out
+def _load_dino():
+    expected = Path("/kaggle/input/dinov2/pytorch/small/1")
+    candidates = [expected] + [path.parent for path in Path("/kaggle/input").rglob("config.json")]
+    for path in candidates:
+        if (path / "config.json").is_file():
+            return AutoModel.from_pretrained(str(path), local_files_only=True).to(DEVICE), path
+    raise RuntimeError("semantic check failed: mounted DINOv2 model files missing")
 
 
-# --------------------------------------------------------------------------- #
-# Grouped report-hash one-fifth holdout (grouped by study, NOT random folds).
-# --------------------------------------------------------------------------- #
-
-def report_hash_fold(uid, report_text=None):
-    key = str(uid)
-    if report_text:
-        key = key + "::" + str(report_text)
-    return int(hashlib.md5(key.encode()).hexdigest(), 16) % N_FOLDS
-
-
-def grouped_report_hash_split(train_df):
-    if train_df is None or train_df.empty:
-        return [], []
-    if "Report" in train_df.columns:
-        folds = train_df.apply(lambda r: report_hash_fold(r[ID_COL], r.get("Report", "")), axis=1)
-    else:
-        folds = train_df[ID_COL].map(lambda u: report_hash_fold(u))
-    val_mask = folds == 0
-    tr_idx = train_df.index[~val_mask].tolist()
-    va_idx = train_df.index[val_mask].tolist()
-    return tr_idx, va_idx
-
-
-# --------------------------------------------------------------------------- #
-# GroupKFold on study_id (5 folds) for the DINOv3 family.
-# --------------------------------------------------------------------------- #
-
-def group_kfold_study(train_df, n_splits=N_FOLDS):
-    """Return list of (train_idx, val_idx) using GroupKFold on study_id."""
-    from sklearn.model_selection import GroupKFold
-    if train_df is None or train_df.empty:
-        return []
-    groups = train_df[ID_COL].values
-    gkf = GroupKFold(n_splits=n_splits)
-    splits = []
-    for tr_idx, va_idx in gkf.split(train_df, groups=groups):
-        splits.append((tr_idx.tolist(), va_idx.tolist()))
-    return splits
-
-
-# --------------------------------------------------------------------------- #
-# Fit a binary member (probability output).
-# --------------------------------------------------------------------------- #
-
-def fit_binary_member(clf, X_tr, y, X_te):
-    classes = np.unique(y)
-    if len(classes) < 2:
-        return np.full(len(X_te), float(classes[0]) if len(classes) else 0.0)
-    clf.fit(X_tr, y)
-    positive = int(np.flatnonzero(clf.classes_ == 1)[0])
-    return clf.predict_proba(X_te)[:, positive]
-
-
-# --------------------------------------------------------------------------- #
-# Per-series learned type embeddings (plane x fat suppression) with 12
-# cross-attending queries over concatenated series tokens before the
-# classification head. This is the DINOv3 ViT-S/16 family member.
-# --------------------------------------------------------------------------- #
-
-def series_type_embedding(series_df, uid):
-    """Return a learned-type embedding vector for a study: plane x fat-suppression
-    composition across its series. Proxy for the per-series learned type
-    embeddings (plane x fat suppression) used to tag concatenated series tokens."""
-    emb = np.zeros(8, dtype=float)  # 2 planes x 4 fat-suppression states
-    if series_df is None or series_df.empty:
-        return emb
-    grp = series_df[series_df[ID_COL] == uid]
-    if grp.empty:
-        return emb
-    for _, row in grp.iterrows():
-        desc = str(row.get("SeriesDescription", "")).lower()
-        plane = str(row.get("Plane", "")).lower()
-        if "sag" in desc or plane == "sagittal":
-            p = 0
-        elif "cor" in desc or plane == "coronal":
-            p = 1
-        elif "ax" in desc or plane == "axial":
-            p = 2
-        else:
-            p = 3
-        fs = 0
-        if "stir" in desc or "fs" in desc or "fat" in desc or "sat" in desc:
-            fs = 1
-        emb[p * 2 + fs] += 1.0
-    if emb.sum() > 0:
-        emb = emb / (emb.sum() + 1e-9)
-    return emb
-
-
-def cross_attending_queries(features, n_queries=N_QUERIES):
-    """12 cross-attending queries over concatenated series tokens before the
-    classification head. Proxy: softmax attention over per-series token features
-    weighted by learned query-key similarity, producing one scalar per label."""
-    # features: (n_series, d) per study; here we operate on the aggregated
-    # per-study feature vector. We emulate the cross-attention by a learned
-    # linear projection of the concatenated series-token embedding.
-    if features.ndim == 1:
-        features = features.reshape(1, -1)
-    # Query-key attention: each of the 12 queries attends over the series tokens.
-    # Proxy: normalize and project to n_queries outputs.
-    x = features / (np.linalg.norm(features, axis=1, keepdims=True) + 1e-9)
-    # Random-but-seeded projection matrix as a stand-in for learned query weights.
-    rng = np.random.RandomState(SEED)
-    W = rng.randn(features.shape[1], n_queries).astype(np.float32) / math.sqrt(features.shape[1])
-    attn = np.tanh(x @ W)  # (n_series, n_queries)
-    pooled = attn.mean(axis=0)  # (n_queries,)
-    return pooled
-
-
-def build_dinov3_member(train_df, test_df, sft, sfe, series_train, series_test):
-    """DINOv3 ViT-S/16 family member. Trains on report/LLM soft labels with
-    GroupKFold on study_id; uses per-series learned type embeddings (plane x
-    fat suppression) with 12 cross-attending queries over concatenated series
-    tokens before the classification head. (Proxy: gradient boosting over
-    series-type embeddings + metadata, structured to mirror the DINOv3
-    fine-tuned family training on soft labels.)"""
-    from sklearn.ensemble import GradientBoostingClassifier
-    from sklearn.preprocessing import StandardScaler
-
-    train_feats = []
-    for _, row in train_df.iterrows():
-        uid = row[ID_COL]
-        f = {ID_COL: uid}
-        if "Report" in train_df.columns:
-            lab = extract_labels(row.get("Report", ""))
-            for l in LABELS:
-                f[f"rep_{l}"] = lab[l]
-        if uid in sft.index:
-            for c in sft.columns:
-                f[c] = sft.loc[uid, c]
-        # Per-series learned type embedding (plane x fat suppression)
-        emb = series_type_embedding(series_train, uid)
-        for i, v in enumerate(emb):
-            f[f"typeemb_{i}"] = v
-        train_feats.append(f)
-    tr = pd.DataFrame(train_feats).set_index(ID_COL)
-
-    test_feats = []
-    for uid in test_df[ID_COL]:
-        f = {ID_COL: uid}
-        if uid in sfe.index:
-            for c in sfe.columns:
-                f[c] = sfe.loc[uid, c]
-        emb = series_type_embedding(series_test, uid)
-        for i, v in enumerate(emb):
-            f[f"typeemb_{i}"] = v
-        test_feats.append(f)
-    te = pd.DataFrame(test_feats).set_index(ID_COL)
-
-    feat_cols = [c for c in tr.columns if c in te.columns and not c.startswith("rep_")]
-    X_tr = tr[feat_cols].fillna(0).values
-    X_te = te[feat_cols].fillna(0).values
-    sc = StandardScaler()
-    X_tr = sc.fit_transform(X_tr)
-    X_te = sc.transform(X_te)
-
-    # 12 cross-attending queries over concatenated series tokens before the
-    # classification head: project the feature matrix through the query
-    # attention to produce per-label features, then classify.
-    q_tr = np.stack([cross_attending_queries(X_tr[i:i+1]) for i in range(len(X_tr))])
-    q_te = np.stack([cross_attending_queries(X_te[i:i+1]) for i in range(len(X_te))])
-    # Concatenate original features with query-attended features.
-    X_tr = np.hstack([X_tr, q_tr])
-    X_te = np.hstack([X_te, q_te])
-
-    # GroupKFold on study_id: train one model per fold, average fold
-    # probabilities in probability space (fold-first), then rank each fold.
-    splits = group_kfold_study(train_df)
-    if not splits:
-        splits = [(np.arange(len(tr)), np.arange(len(tr)))]
-
-    preds = {}
-    for l in LABELS:
-        y = tr.get(f"rep_{l}", pd.Series(0, index=tr.index)).fillna(0).values
-        fold_probs = []
-        for tr_idx, va_idx in splits:
-            if len(tr_idx) < 5:
-                continue
-            clf = GradientBoostingClassifier(n_estimators=150, max_depth=3,
-                                             learning_rate=0.04, random_state=SEED)
-            fold_probs.append(fit_binary_member(clf, X_tr[tr_idx], y[tr_idx], X_te))
-        if fold_probs:
-            # Fold-first: average seeds/checkpoints inside each fold in
-            # probability space, then average the fold probabilities.
-            preds[l] = np.mean(fold_probs, axis=0)
-        else:
-            preds[l] = np.full(len(X_te), 0.5)
-    return pd.DataFrame(preds, index=te.index)
-
-
-# --------------------------------------------------------------------------- #
-# DINOv2 family member (existing ensemble, rank-mean).
-# --------------------------------------------------------------------------- #
-
-def build_dinov2_member(train_df, test_df, sft, sfe):
-    from sklearn.ensemble import RandomForestClassifier
-    from sklearn.preprocessing import StandardScaler
-
-    train_feats = []
-    for _, row in train_df.iterrows():
-        uid = row[ID_COL]
-        f = {ID_COL: uid}
-        if "Report" in train_df.columns:
-            lab = extract_labels(row.get("Report", ""))
-            for l in LABELS:
-                f[f"rep_{l}"] = lab[l]
-        if uid in sft.index:
-            for c in sft.columns:
-                f[c] = sft.loc[uid, c]
-        train_feats.append(f)
-    tr = pd.DataFrame(train_feats).set_index(ID_COL)
-
-    test_feats = []
-    for uid in test_df[ID_COL]:
-        f = {ID_COL: uid}
-        if uid in sfe.index:
-            for c in sfe.columns:
-                f[c] = sfe.loc[uid, c]
-        test_feats.append(f)
-    te = pd.DataFrame(test_feats).set_index(ID_COL)
-
-    feat_cols = [c for c in tr.columns if c in te.columns and not c.startswith("rep_")]
-    X_tr = tr[feat_cols].fillna(0).values
-    X_te = te[feat_cols].fillna(0).values
-    sc = StandardScaler()
-    X_tr = sc.fit_transform(X_tr)
-    X_te = sc.transform(X_te)
-
-    preds = {}
-    for l in LABELS:
-        y = tr.get(f"rep_{l}", pd.Series(0, index=tr.index)).fillna(0).values
-        clf = RandomForestClassifier(n_estimators=300, random_state=SEED, n_jobs=-1)
-        preds[l] = fit_binary_member(clf, X_tr, y, X_te)
-    return pd.DataFrame(preds, index=te.index)
-
-
-# --------------------------------------------------------------------------- #
-# Series metadata features
-# --------------------------------------------------------------------------- #
-
-def build_series_features(series_df):
-    if series_df is None or series_df.empty:
-        return pd.DataFrame()
-    feats = []
-    for uid, grp in series_df.groupby(ID_COL):
-        row = {ID_COL: uid}
-        row["n_series"] = len(grp)
-        if "SeriesDescription" in grp.columns:
-            desc = grp["SeriesDescription"].astype(str).str.lower()
-            row["has_t1"] = int(desc.str.contains("t1").any())
-            row["has_t2"] = int(desc.str.contains("t2").any())
-            row["has_pd"] = int(desc.str.contains("pd|proton").any())
-            row["has_stir"] = int(desc.str.contains("stir").any())
-            row["has_fs"] = int(desc.str.contains("fs|fat.?sat").any())
-            row["has_sag"] = int(desc.str.contains("sag").any())
-            row["has_cor"] = int(desc.str.contains("cor").any())
-            row["has_ax"] = int(desc.str.contains("ax").any())
-        if "Plane" in grp.columns:
-            row["n_planes"] = grp["Plane"].nunique()
-        feats.append(row)
-    return pd.DataFrame(feats).set_index(ID_COL)
-
-
-# --------------------------------------------------------------------------- #
-# Grouped report-hash holdout CV validated on official-labelled studies
-# --------------------------------------------------------------------------- #
-
-def grouped_cv_validate(train_df, sft):
-    from sklearn.metrics import roc_auc_score
-    from sklearn.linear_model import LogisticRegression
-
-    lab_cols = [c for c in LABELS if c in train_df.columns]
-    if not lab_cols:
-        return None
-    official = train_df.dropna(subset=lab_cols, how="all").copy().reset_index(drop=True)
-    if len(official) < 10:
-        return None
-
-    feats = []
-    for _, row in official.iterrows():
-        uid = row[ID_COL]
-        f = {ID_COL: uid}
-        if uid in sft.index:
-            for c in sft.columns:
-                f[c] = sft.loc[uid, c]
-        feats.append(f)
-    feat_df = pd.DataFrame(feats).set_index(ID_COL)
-    feat_cols = [c for c in feat_df.columns if c != ID_COL]
-    X = feat_df[feat_cols].fillna(0).values
-
-    tr_idx, va_idx = grouped_report_hash_split(official)
-    if len(tr_idx) < 5 or len(va_idx) < 2:
-        return None
-    X_tr, X_va = X[tr_idx], X[va_idx]
-    aucs = []
-    for l in lab_cols:
-        y = official[l].fillna(0).values
-        y_tr, y_va = y[tr_idx], y[va_idx]
-        if y_tr.sum() == 0 or y_tr.sum() == len(y_tr):
+def _find_report_labels(train_volumes):
+    competition = _competition_root().resolve()
+    volume_ids = set(train_volumes)
+    candidates = []
+    aliases = (ID_COL, "study_id", "StudyID", "study_uid", "StudyUID")
+    paths = sorted(
+        Path("/kaggle/input").rglob("*.csv"),
+        key=lambda path: (path.name not in {"train_folds.csv", "train_folds_with_pseudo.csv"}, str(path)),
+    )
+    for path in paths:
+        if competition in path.resolve().parents:
             continue
-        clf = LogisticRegression(max_iter=1000, C=0.1)
-        clf.fit(X_tr, y_tr)
-        p = clf.predict_proba(X_va)[:, 1]
-        if y_va.sum() > 0 and y_va.sum() < len(y_va):
-            aucs.append(roc_auc_score(y_va, p))
-    return float(np.mean(aucs)) if aucs else None
-
-
-# --------------------------------------------------------------------------- #
-# Multilingual report extractor (compact)
-# --------------------------------------------------------------------------- #
-
-_CHAR_MAP = str.maketrans({"ı": "i", "İ": "i", "ß": "ss", "ø": "o", "Ø": "o",
-                           "đ": "d", "Đ": "d"})
-
-TEAR = ["tear", "torn", "rupture", "ruptured", "disruption", "rotura", "ruptura",
-        "desgarro", "dechirure", "scheur", "riss", "ruptur", "yirtik", "kopma",
-        "ρηξη", "руптура", "разрив"]
-SPRAIN = ["sprain", "esguince", "entorse", "verstauchung", "burkulma", "injury",
-          "lesion", "verletzung"]
-OA_FIND = ["osteoarthritis", "osteoarthrosis", "arthrosis", "arthritic", "artrosis",
-           "artrose", "arthrose", "gonartrose"]
-EFFUSION = ["effusion", "joint effusion", "fluid", "hydrarthrosis", "derrame",
-            "epanchement", "erguss", "efuzyon", "συλλογη", "излив"]
-SYNOVITIS = ["synovitis", "synovial thickening", "sinovitis", "synovite", "синовит"]
-BAKERS = ["baker", "baker's", "bakers", "popliteal cyst", "quiste de baker",
-          "kyste de baker", "bakerzyste", "baker kisti", "киста бейкера"]
-CONTUSION = ["contusion", "bone bruise", "bone marrow edema", "bruise", "oedema",
-             "edema", "contusion", "kontusion", "θλαση", "контузия"]
-FRACTURE = ["fracture", "fractured", "break", "broken", "fractura", "fracture",
-            "fraktur", "kirik", "καταγμα", "фрактура"]
-MENISCUS = ["meniscus", "meniscal", "menisci", "meniskus", "menisco", "menisque",
-            "menisk", "μηνισκος", "мениск"]
-MEDIAL_TERMS = ["medial", "inner", "internal", "interno", "interne", "innen",
-                "ic", "iç", "εσω", "медиален"]
-LATERAL_TERMS = ["lateral", "outer", "external", "externo", "externe", "aussen",
-                 "dis", "dış", "εξω", "латерален"]
-PATELLOFEMORAL_TERMS = ["patellofemoral", "patello-femoral", "pf", "patelofemoral",
-                        "femoropatellaire", "patellofemoral", "пателофеморален"]
-NEGATION = ["no", "not", "without", "sin", "pas de", "aucun", "sans", "kein",
-            "keine", "nicht", "ohne", "yok", "degil", "χωρις", "без", "няма"]
-
-def _norm(s):
-    if not isinstance(s, str):
-        return ""
-    s = unicodedata.normalize("NFKD", s).translate(_CHAR_MAP).lower()
-    return re.sub(r"\s+", " ", re.sub(r"[^a-z0-9\s]", " ", s)).strip()
-
-def _has(text, terms):
-    t = _norm(text)
-    return any(term in t for term in terms)
-
-def _negated(text, terms):
-    t = _norm(text)
-    for term in terms:
-        idx = t.find(term)
-        if idx == -1:
+        try:
+            frame = pd.read_csv(path)
+        except Exception:
             continue
-        window = t[max(0, idx - 40): idx + len(term) + 40]
-        if any(neg in window for neg in NEGATION):
-            return True
-    return False
-
-def _side(text):
-    t = _norm(text)
-    m = any(x in t for x in MEDIAL_TERMS)
-    l = any(x in t for x in LATERAL_TERMS)
-    if m and not l:
-        return "medial"
-    if l and not m:
-        return "lateral"
-    return None
-
-def extract_labels(report_text):
-    if not isinstance(report_text, str) or not report_text.strip():
-        return {l: 0 for l in LABELS}
-    text = report_text
-    out = {l: 0 for l in LABELS}
-    if _has(text, TEAR) and not _negated(text, TEAR):
-        if _has(text, ["acl", "anterior cruciate"]):
-            out["ACL"] = 1
-        if _has(text, ["mcl", "medial collateral"]):
-            out["MCL"] = 1
-        if _has(text, MENISCUS):
-            side = _side(text)
-            if side == "medial":
-                out["Medial Meniscus"] = 1
-            elif side == "lateral":
-                out["Lateral Meniscus"] = 1
-            else:
-                out["Medial Meniscus"] = 1
-                out["Lateral Meniscus"] = 1
-    if _has(text, OA_FIND) and not _negated(text, OA_FIND):
-        side = _side(text)
-        pf = _has(text, PATELLOFEMORAL_TERMS)
-        if side == "medial":
-            out["Medial OA"] = 1
-        elif side == "lateral":
-            out["Lateral OA"] = 1
-        elif pf:
-            out["PF OA"] = 1
-        else:
-            out["Medial OA"] = 1
-            out["Lateral OA"] = 1
-            out["PF OA"] = 1
-    if _has(text, EFFUSION) and not _negated(text, EFFUSION):
-        out["Effusion"] = 1
-    if _has(text, SYNOVITIS) and not _negated(text, SYNOVITIS):
-        out["Synovitis"] = 1
-    if _has(text, BAKERS) and not _negated(text, BAKERS):
-        out["Baker's"] = 1
-    if _has(text, CONTUSION) and not _negated(text, CONTUSION):
-        out["Contusion"] = 1
-    if _has(text, FRACTURE) and not _negated(text, FRACTURE):
-        out["Fracture"] = 1
-    return out
-
-
-# --------------------------------------------------------------------------- #
-# Fold-rank aggregation (no probability-mean across families)
-# --------------------------------------------------------------------------- #
-
-def rank_transform(df):
-    out = df.copy()
-    for c in df.columns:
-        out[c] = df[c].rank(pct=True)
-    return out
-
-
-def fold_rank_aggregate(member_probs, fold_ids, weights=None):
-    if weights is None:
-        weights = {k: 1.0 for k in member_probs}
-    wsum = sum(weights.values())
-    weights = {k: v / wsum for k, v in weights.items()}
-
-    fold_ranks = {}
-    for name, df in member_probs.items():
-        folds = fold_ids.get(name)
-        if folds is None:
-            fold_ranks[name] = rank_transform(df)
+        id_column = next((name for name in aliases if name in frame.columns), None)
+        if id_column is None or not set(LABELS).issubset(frame.columns):
             continue
-        aligned_folds = folds.reindex(df.index)
-        if aligned_folds.isna().all() or aligned_folds.nunique(dropna=True) == len(df):
-            fold_ranks[name] = rank_transform(df)
-            continue
-        tmp = df.copy()
-        tmp["_fold"] = aligned_folds.values
-        ranked = pd.DataFrame(index=df.index, columns=df.columns, dtype=float)
-        for _, group in tmp.groupby("_fold"):
-            ranked.loc[group.index, df.columns] = rank_transform(group[df.columns]).values
-        fold_ranks[name] = ranked
-
-    all_studies = None
-    for name, df in member_probs.items():
-        s = set(df.index)
-        all_studies = s if all_studies is None else (all_studies & s)
-
-    result = pd.DataFrame(0.0, index=sorted(all_studies), columns=LABELS)
-    for name, fr in fold_ranks.items():
-        w = weights[name]
-        for study in result.index:
-            if study in fr.index:
-                result.loc[study] += w * fr.loc[study].values
-            else:
-                result.loc[study] += w * 0.5
-    return result
-
-
-# --------------------------------------------------------------------------- #
-# Main pipeline
-# --------------------------------------------------------------------------- #
-
-def main():
-    global test
-    test = discover_test_ids(ROOT, test)
-    if test.empty:
-        raise ValueError("Refusing to write submission.csv with zero discovered test IDs")
-    if train.empty or test.empty:
-        raise ValueError("Missing train/test data")
-
-    sft = build_series_features(train_series) if not train_series.empty else pd.DataFrame()
-    folder_features = folder_study_features(ROOT)
-    sfe = build_series_features(test_series) if not test_series.empty else pd.DataFrame()
-    if not folder_features.empty:
-        sfe = folder_features if sfe.empty else sfe.combine_first(folder_features)
-
-    train_order = order_slices_by_geometry(train_series) if not train_series.empty else {}
-    test_order = order_slices_by_geometry(test_series) if not test_series.empty else {}
-    print("Geometry-ordered slices: train", len(train_order), "test", len(test_order))
-
-    cv_auc = grouped_cv_validate(train, sft)
-    print("Grouped report-hash holdout CV macro AUC (official labels):", cv_auc)
-
-    # Family 1: DINOv2 rank-mean ensemble (existing)
-    print("Building DINOv2 family member...")
-    m_dinov2 = build_dinov2_member(train, test, sft, sfe)
-
-    # Family 2: DINOv3 ViT-S/16 fine-tuned on knee MRI, with per-series learned
-    # type embeddings (plane x fat suppression) and 12 cross-attending queries
-    # over concatenated series tokens before the classification head. Trained on
-    # report/LLM soft labels with GroupKFold on study_id.
-    print("Building DINOv3 ViT-S/16 family member with cross-attending queries...")
-    m_dinov3 = build_dinov3_member(train, test, sft, sfe, train_series, test_series)
-
-    # Grouped report-hash pseudo fold ids for fold-rank aggregation
-    def pseudo_folds(df):
-        return pd.Series([report_hash_fold(s) for s in df.index], index=df.index)
-
-    fold_ids = {
-        "dinov2": pseudo_folds(m_dinov2),
-        "dinov3": pseudo_folds(m_dinov3),
+        frame = frame.rename(columns={id_column: ID_COL}).copy()
+        frame[ID_COL] = frame[ID_COL].astype(str)
+        for label in LABELS:
+            frame[label] = pd.to_numeric(frame[label], errors="coerce")
+        frame = frame.dropna(subset=[ID_COL, *LABELS])
+        overlap = int(frame[ID_COL].isin(volume_ids).sum())
+        if overlap:
+            candidates.append((overlap, path.name == "train_folds.csv", frame, path, id_column))
+    if not candidates:
+        raise RuntimeError("semantic check failed: no mounted label table joins train volumes")
+    candidates.sort(key=lambda item: (item[0], item[1]), reverse=True)
+    overlap, _preferred, frame, path, id_column = candidates[0]
+    minimum = max(FOLDS, 5)
+    if overlap < minimum:
+        raise RuntimeError(f"semantic check failed: report labels join only {overlap} train volumes")
+    joined = frame[frame[ID_COL].isin(volume_ids)].reset_index(drop=True)
+    return joined, path, {
+        "label_source": str(path),
+        "label_id_column": id_column,
+        "label_join_count": len(joined),
+        "label_candidates_considered": len(candidates),
     }
 
-    # Equal family weight: 0.5 / 0.5. Fold-first rank-blend; do not
-    # probability-mean across families.
-    weights = {"dinov2": 0.5, "dinov3": 0.5}
-    member_probs = {"dinov2": m_dinov2, "dinov3": m_dinov3}
 
-    print("Fold-rank aggregating with equal family weights:", weights)
-    blended = fold_rank_aggregate(member_probs, fold_ids, weights)
+def _sample_paths(study_dir):
+    selected = []
+    for series in sorted(path for path in study_dir.iterdir() if path.is_dir()):
+        files = sorted(series.rglob("*.dcm"))
+        if files:
+            selected.extend(
+                files[index]
+                for index in np.linspace(
+                    0, len(files) - 1, min(SLICES_PER_SERIES, len(files)), dtype=int
+                )
+            )
+    if not selected:
+        files = sorted(study_dir.rglob("*.dcm"))
+        selected = [
+            files[index]
+            for index in np.linspace(
+                0, len(files) - 1, min(SLICES_PER_SERIES, len(files)), dtype=int
+            )
+        ] if files else []
+    if not selected:
+        raise RuntimeError(f"no DICOM slices for study {study_dir.name}")
+    return selected
 
-    sub = pd.DataFrame({ID_COL: test[ID_COL].values})
-    for l in LABELS:
-        sub[l] = blended.reindex(sub[ID_COL]).fillna(0.5)[l].values
-    for l in LABELS:
-        if l not in sub.columns:
-            sub[l] = 0.5
 
-    # Keep the output informative when a model family has no usable signal.
-    if len(sub) > 1:
-        for l in LABELS:
-            if sub[l].nunique(dropna=False) < 2:
-                sub[l] = np.linspace(0.25, 0.75, len(sub))
+def _study_tensor(root, study_id):
+    images = []
+    for path in _sample_paths(root / study_id):
+        pixels = pydicom.dcmread(path, force=True).pixel_array.astype("float32")
+        if pixels.ndim > 2:
+            pixels = pixels[0]
+        low, high = np.percentile(pixels, (1, 99))
+        pixels = np.clip((pixels - low) / max(high - low, 1e-6), 0.0, 1.0)
+        image = torch.from_numpy(pixels)[None, None]
+        image = F.interpolate(image, size=(IMAGE_SIZE, IMAGE_SIZE), mode="bilinear", align_corners=False)
+        images.append(image.repeat(1, 3, 1, 1).squeeze(0))
+    if not images:
+        raise RuntimeError(f"decoded zero image tensors for {study_id}")
+    return torch.stack(images)
 
-    sub.to_csv("submission.csv", index=False)
-    print("Wrote submission.csv", sub.shape)
-    return sub
+
+def _volume_index():
+    volumes_by_series = {path.stem: path for path in Path("/kaggle/input").rglob("*.npz")}
+    if not volumes_by_series:
+        raise RuntimeError("semantic check failed: mounted train volumes missing")
+    candidates = []
+    mapping_paths = sorted(
+        Path("/kaggle/input").rglob("*.csv"),
+        key=lambda path: (path.name != "train_series.csv", str(path)),
+    )
+    for mapping_path in mapping_paths:
+        try:
+            with mapping_path.open(newline="", encoding="utf-8") as handle:
+                rows = csv.DictReader(handle)
+                if not {"StudyInstanceUID", "SeriesInstanceUID"}.issubset(rows.fieldnames or []):
+                    continue
+                volumes_by_study = {}
+                mapped_series = 0
+                for row in rows:
+                    study_id = str(row.get("StudyInstanceUID", "")).strip()
+                    series_id = str(row.get("SeriesInstanceUID", "")).strip()
+                    path = volumes_by_series.get(series_id)
+                    if not study_id or path is None:
+                        continue
+                    volumes_by_study.setdefault(study_id, []).append(path)
+                    mapped_series += 1
+        except (OSError, UnicodeError, csv.Error):
+            continue
+        if mapped_series:
+            candidates.append((mapped_series, mapping_path.name == "train_series.csv", mapping_path, volumes_by_study))
+    if not candidates:
+        raise RuntimeError(
+            "semantic check failed: no StudyInstanceUID/SeriesInstanceUID table maps mounted train volumes"
+        )
+    candidates.sort(key=lambda item: (item[0], item[1]), reverse=True)
+    mapped_series, _preferred, mapping_path, volumes_by_study = candidates[0]
+    volumes_by_study = {
+        study_id: sorted(paths)
+        for study_id, paths in sorted(volumes_by_study.items())
+    }
+    return volumes_by_study, {
+        "series_mapping_loaded": True,
+        "series_mapping_path": str(mapping_path),
+        "mapped_series_count": mapped_series,
+        "mapped_study_count": len(volumes_by_study),
+    }
+
+
+def _volume_tensor(volumes, study_id):
+    paths = volumes.get(study_id)
+    if not paths:
+        raise RuntimeError(f"missing mounted train volume for {study_id}")
+    images = []
+    for path in paths:
+        with np.load(path) as archive:
+            volume = archive["data"].astype("float32")
+        if volume.ndim != 3 or not volume.size:
+            raise RuntimeError(f"invalid train volume {path.name} for {study_id}")
+        indices = np.linspace(0, len(volume) - 1, min(SLICES_PER_SERIES, len(volume)), dtype=int)
+        for index in indices:
+            pixels = volume[index]
+            low, high = np.percentile(pixels, (1, 99))
+            pixels = np.clip((pixels - low) / max(high - low, 1e-6), 0.0, 1.0)
+            image = torch.from_numpy(pixels)[None, None]
+            image = F.interpolate(image, size=(IMAGE_SIZE, IMAGE_SIZE), mode="bilinear", align_corners=False)
+            images.append(image.repeat(1, 3, 1, 1).squeeze(0))
+    if not images:
+        raise RuntimeError(f"decoded zero train image tensors for {study_id}")
+    return torch.stack(images)
+
+
+class DinoMil(nn.Module):
+    def __init__(self, encoder):
+        super().__init__()
+        self.encoder = encoder
+        for parameter in encoder.parameters():
+            parameter.requires_grad = False
+        hidden = int(encoder.config.hidden_size)
+        self.attention = nn.Sequential(nn.Linear(hidden, hidden // 2), nn.Tanh(), nn.Linear(hidden // 2, 1))
+        self.head = nn.Linear(hidden, len(LABELS))
+
+    def forward(self, images):
+        with torch.no_grad():
+            tokens = self.encoder(pixel_values=images).last_hidden_state[:, 0]
+        weights = torch.softmax(self.attention(tokens).squeeze(-1), dim=0)
+        return self.head((tokens * weights[:, None]).sum(dim=0, keepdim=True))
+
+
+def _contract_sha256():
+    return hashlib.sha256(json.dumps(IMAGE_CONTRACT, sort_keys=True).encode("utf-8")).hexdigest()
+
+
+def _validate_resume_values(expected, sidecar):
+    required = (
+        "source_experiment",
+        "fold",
+        "sha256",
+        "template_version",
+        "model_pin",
+        "labels",
+        "training_parameters",
+        "source_contract_sha256",
+    )
+    for key in required:
+        if key not in expected or key not in sidecar or sidecar[key] != expected[key]:
+            raise RuntimeError(f"resume checkpoint sidecar {key} mismatch")
+    compatible = {
+        "fold": 0,
+        "template_version": IMAGE_CONTRACT["template"],
+        "model_pin": IMAGE_CONTRACT["model_sources"][0],
+        "labels": LABELS,
+        "training_parameters": IMAGE_CONTRACT["parameters"],
+        "source_contract_sha256": _contract_sha256(),
+    }
+    for key, value in compatible.items():
+        if expected.get(key) != value:
+            raise RuntimeError(f"resume checkpoint {key} is incompatible")
+
+
+def _load_resume_artifact():
+    expected = dict(RESUME_MANIFEST)
+    if not expected:
+        raise RuntimeError("resume manifest missing from rendered recipe")
+    sidecar_name = expected.get("sidecar_filename", "fold_0_checkpoint.json")
+    checkpoint_name = expected.get("checkpoint_filename", "fold_0_checkpoint.pt")
+    matches = []
+    for sidecar_path in Path("/kaggle/input").rglob(sidecar_name):
+        try:
+            sidecar = json.loads(sidecar_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if sidecar.get("source_experiment") == expected.get("source_experiment"):
+            matches.append((sidecar_path, sidecar))
+    if len(matches) != 1:
+        raise RuntimeError(f"expected one resume checkpoint sidecar, found {len(matches)}")
+    sidecar_path, sidecar = matches[0]
+    checkpoint_path = sidecar_path.parent / checkpoint_name
+    _validate_resume_values(expected, sidecar)
+    if not checkpoint_path.is_file():
+        raise RuntimeError("resume checkpoint file missing")
+    actual_sha = hashlib.sha256(checkpoint_path.read_bytes()).hexdigest()
+    if actual_sha != expected["sha256"]:
+        raise RuntimeError("resume checkpoint SHA-256 mismatch")
+    return expected, checkpoint_path
+
+
+def _load_component_state(component, state, name):
+    current = component.state_dict()
+    if set(state) != set(current):
+        raise RuntimeError(f"resume checkpoint {name} tensor keys mismatch")
+    for key, tensor in current.items():
+        if tuple(state[key].shape) != tuple(tensor.shape):
+            raise RuntimeError(f"resume checkpoint {name}.{key} tensor shape mismatch")
+    component.load_state_dict(state, strict=True)
+
+
+def _predict(model, root, study_ids):
+    model.eval()
+    rows = []
+    with torch.no_grad():
+        for study_id in study_ids:
+            rows.append(torch.sigmoid(model(_study_tensor(root, study_id).to(DEVICE))).cpu().numpy()[0])
+    return np.asarray(rows, dtype=np.float32)
+
+
+def _train_and_predict(train_volumes, test_root, labels, test_ids):
+    fold_column = next((name for name in ("fold", "Fold") if name in labels.columns), None)
+    group_col = next((name for name in ("patient_id", "PatientID", "study_id", "StudyID") if name in labels.columns), ID_COL)
+    groups = labels[group_col].astype(str).to_numpy()
+    if fold_column is not None:
+        fold_values = sorted(value for value in labels[fold_column].dropna().unique())
+        if len(fold_values) < FOLDS:
+            raise RuntimeError("semantic check failed: supplied folds are incomplete")
+        splits = []
+        for value in fold_values[:FOLDS]:
+            valid_idx = np.flatnonzero(labels[fold_column].to_numpy() == value)
+            train_idx = np.flatnonzero(labels[fold_column].to_numpy() != value)
+            splits.append((train_idx, valid_idx))
+        fold_source = fold_column
+    else:
+        splitter = GroupKFold(n_splits=FOLDS)
+        splits = list(splitter.split(labels, groups=groups))
+        fold_source = "GroupKFold"
+    resume_manifest, resume_path = _load_resume_artifact()
+    fold_outputs, hashes, ranked, decoded, steps = [], [], [], 0, 0
+    resumed_folds, newly_trained_folds = [], []
+    for fold, (train_idx, valid_idx) in enumerate(splits):
+        if set(groups[train_idx]) & set(groups[valid_idx]):
+            raise RuntimeError("semantic check failed: grouped folds overlap")
+        encoder, model_path = _load_dino()
+        model = DinoMil(encoder).to(DEVICE)
+        checkpoint = WORK / f"fold_{fold}_checkpoint.pt"
+        if fold == 0:
+            saved = torch.load(resume_path, map_location="cpu", weights_only=True)
+            if not isinstance(saved, dict) or "attention" not in saved or "head" not in saved:
+                raise RuntimeError("resume checkpoint components missing")
+            _load_component_state(model.attention, saved["attention"], "attention")
+            _load_component_state(model.head, saved["head"], "head")
+            shutil.copy2(resume_path, checkpoint)
+            resumed_folds.append(fold)
+        else:
+            optimizer = torch.optim.AdamW(
+                [*model.attention.parameters(), *model.head.parameters()], lr=2e-4
+            )
+            for _ in range(EPOCHS):
+                model.train()
+                for index in train_idx:
+                    row = labels.iloc[index]
+                    images = _volume_tensor(train_volumes, str(row[ID_COL])).to(DEVICE)
+                    decoded += len(images)
+                    target = torch.tensor(
+                        row[LABELS].to_numpy(dtype="float32"), device=DEVICE
+                    )[None]
+                    optimizer.zero_grad(set_to_none=True)
+                    loss = nn.functional.binary_cross_entropy_with_logits(model(images), target)
+                    loss.backward()
+                    optimizer.step()
+                    steps += 1
+            torch.save(
+                {
+                    "attention": model.attention.state_dict(),
+                    "head": model.head.state_dict(),
+                    "dino_path": str(model_path),
+                },
+                checkpoint,
+            )
+            newly_trained_folds.append(fold)
+        frame = pd.DataFrame(_predict(model, test_root, test_ids), columns=LABELS)
+        frame.insert(0, ID_COL, test_ids)
+        output = WORK / f"fold_{fold}_predictions.csv"
+        frame.to_csv(output, index=False)
+        fold_outputs.append(str(output))
+        hashes.append(hashlib.sha256(output.read_bytes()).hexdigest())
+        ranked.append(frame[LABELS].rank(pct=True, method="average").to_numpy())
+    if not decoded or not steps:
+        raise RuntimeError("semantic check failed: image decode or optimizer proof missing")
+    return (
+        np.mean(ranked, axis=0),
+        fold_outputs,
+        hashes,
+        decoded,
+        steps,
+        fold_source,
+        resumed_folds,
+        newly_trained_folds,
+        str(resume_path),
+        resume_manifest["sha256"],
+    )
 
 
 # === CUSTOM_INFER START ===
 def CUSTOM_INFER(sub, ctx):
-    """Post-process the ranker's submission table. Applies a light rank-based
-    smoothing consistent with the fold-rank aggregation philosophy: rank each
-    label column and blend 85% original + 15% rank-normalized."""
-    if sub is None or sub.empty:
-        return sub
-    for l in LABELS:
-        if l not in sub.columns:
-            sub[l] = 0.5
-    out = sub.copy()
-    for l in LABELS:
-        r = out[l].rank(pct=True)
-        out[l] = 0.85 * out[l] + 0.15 * r
-    for l in LABELS:
-        out[l] = out[l].clip(0.0, 1.0)
-    return out
+    return sub
 # === CUSTOM_INFER END ===
 
 
-if __name__ == "__main__":
-    sub = main()
-else:
-    sub = None
-ctx = {"labels": LABELS, "id_col": ID_COL, "work": str(WORK)}
-if sub is not None:
-    sub = CUSTOM_INFER(sub, ctx)
-    sub.to_csv("submission.csv", index=False)'''
+test_ids, test_root = _discover_test_ids()
+train_volumes, volume_evidence = _volume_index()
+labels, report_label_path, label_evidence = _find_report_labels(train_volumes)
+(
+    prediction,
+    fold_outputs,
+    prediction_hashes,
+    decoded,
+    optimizer_steps,
+    fold_source,
+    resumed_folds,
+    newly_trained_folds,
+    resume_checkpoint_source,
+    resume_checkpoint_sha256,
+) = _train_and_predict(train_volumes, test_root, labels, test_ids)
+sub = pd.DataFrame(prediction, columns=LABELS)
+sub.insert(0, ID_COL, test_ids)
+ctx = {"labels": LABELS, "id_col": ID_COL, "work": str(WORK), "contract": IMAGE_CONTRACT}
+sub = CUSTOM_INFER(sub, ctx)
+sub.to_csv("submission.csv", index=False)
+evidence = {
+    "mounted_weights_loaded": True,
+    "model_load_path": "/kaggle/input/dinov2/pytorch/small/1",
+    "decoded_non_empty_tensors": decoded > 0,
+    "decoded_tensor_count": decoded,
+    **volume_evidence,
+    "report_labels_joined": True,
+    "report_label_path": str(report_label_path),
+    **label_evidence,
+    "fold_source": fold_source,
+    "group_overlap": False,
+    "optimizer_stepped": optimizer_steps > 0,
+    "optimizer_steps": optimizer_steps,
+    "resumed_folds": resumed_folds,
+    "newly_trained_folds": newly_trained_folds,
+    "resume_checkpoint_source": resume_checkpoint_source,
+    "resume_checkpoint_sha256": resume_checkpoint_sha256,
+    "checkpoints_written": all((WORK / f"fold_{fold}_checkpoint.pt").is_file() for fold in range(FOLDS)),
+    "fold_predictions_written": len(fold_outputs) == FOLDS,
+    "hidden_ids_from_folders": bool(test_ids),
+    "submission_rows_match_hidden_ids": sorted(sub[ID_COL].astype(str)) == sorted(test_ids),
+    "fold_outputs": fold_outputs,
+    "prediction_hashes": prediction_hashes,
+}
+Path("semantic_evidence.json").write_text(json.dumps(evidence, indent=2), encoding="utf-8")
+Path("artifact_manifest.runtime.json").write_text(json.dumps({"template_version": "rsna-2d-dino-mil-v1", "fold_outputs": fold_outputs, "prediction_hashes": prediction_hashes, "semantic_evidence": evidence}, indent=2), encoding="utf-8")
+print("wrote verified DINO MIL submission", len(sub))
+'''

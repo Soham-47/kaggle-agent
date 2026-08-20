@@ -65,7 +65,7 @@ train:
 submit:
   # This competition is notebooks-only (isKernelsSubmissionsOnly).
   # CSV API upload returns 400; must push kernel then submit_code.
-  # browser_fallback (settings): UI path if API notebook submit fails.
+  # API-only: push the kernel, await completion, then use submit_code.
   mode: notebook
   output_file: submission.csv
 

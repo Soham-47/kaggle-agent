@@ -93,6 +93,45 @@ def test_dropped_submit_phase_is_skipped(tmp_path: Path):
     assert "REPORT" in result.phases_run
 
 
+def test_pending_kernel_stops_before_validation_submission_and_heal(monkeypatch, tmp_path: Path):
+    from kaggle_agent.train.kernel_job import KernelJob, load_kernel_job, save_kernel_job
+
+    root = tmp_path / "kaggle-agent"
+    real = Path(__file__).resolve().parents[1]
+    _copy_min(root, real)
+    folder = root / "competitions" / "rsna_knee" / "notebooks" / "active"
+    folder.mkdir(parents=True)
+    save_kernel_job(
+        KernelJob(
+            kernel_ref="tester/active",
+            folder=str(folder),
+            status="RUNNING",
+            competition="rsna-knee-abnormality-detection",
+            exp_id="active",
+        ),
+        root,
+    )
+    api = FakeKaggleApi(status_queue=["RUNNING"])
+    monkeypatch.setattr("kaggle_agent.train.kernel_runner.time.sleep", lambda _seconds: None)
+
+    result = run_daily(
+        "rsna_knee",
+        root=root,
+        dry_run=False,
+        kaggle=KaggleClient(api=api).connect(),
+        skip_phases=frozenset({"RESEARCH", "PLAN", "CODE", "LOCAL_SMOKE"}),
+    )
+
+    assert result.kernel_pending is True
+    assert result.kernel_ok is None
+    assert result.hard_errors == []
+    assert "VALIDATE_SUB" not in result.phases_run
+    assert "TELEGRAM_APPROVE" not in result.phases_run
+    assert "SUBMIT" not in result.phases_run
+    assert "HEAL" not in result.phases_run
+    assert load_kernel_job(root).kernel_ref == "tester/active"
+
+
 def _judge_orch(root: Path, zen=None):  # noqa: ANN001
     from kaggle_agent.config import load_competition, load_settings
     from kaggle_agent.orchestrator import Orchestrator
@@ -184,6 +223,95 @@ def test_validate_sub_kernel_judge_patches_experiment(tmp_path: Path):
     assert "judge kernel ready=True" in _daily_text(root)
     exp_text = (root / "memory" / "experiments" / f"{exp_id}.md").read_text(encoding="utf-8")
     assert "- judge: kernel True: " in exp_text
+
+
+def test_validate_sub_image_template_requires_semantic_evidence(tmp_path: Path):
+    from kaggle_agent.config import load_competition
+    from kaggle_agent.orchestrator import CycleResult
+
+    root = tmp_path / "kaggle-agent"
+    real = Path(__file__).resolve().parents[1]
+    _copy_min(root, real)
+    comp = load_competition("rsna_knee", root)
+    orch = _judge_orch(root)
+    exp_id = "20260815-image-missing"
+    kernel_dir = _write_kernel_output(root, comp, exp_id)
+    (kernel_dir / "artifact_manifest.json").write_text(
+        '{"template_version": "rsna-2d-dino-mil-v1"}',
+        encoding="utf-8",
+    )
+    result = CycleResult(
+        competition="rsna_knee", dry_run=True, kernel_path=str(kernel_dir), experiment_id=exp_id
+    )
+
+    orch._validate_sub(AgentState(), result)
+
+    assert result.validate_ok is False
+    assert "image semantic evidence missing" in result.errors[-1]
+
+
+def test_validate_sub_image_template_accepts_semantic_evidence(tmp_path: Path):
+    from kaggle_agent.config import load_competition
+    from kaggle_agent.orchestrator import CycleResult
+
+    root = tmp_path / "kaggle-agent"
+    real = Path(__file__).resolve().parents[1]
+    _copy_min(root, real)
+    comp = load_competition("rsna_knee", root)
+    orch = _judge_orch(root)
+    exp_id = "20260815-image-ok"
+    kernel_dir = _write_kernel_output(root, comp, exp_id)
+    (kernel_dir / "artifact_manifest.json").write_text(
+        '{"template_version": "rsna-2d-dino-mil-v1"}',
+        encoding="utf-8",
+    )
+    (kernel_dir / "output" / "semantic_evidence.json").write_text(
+        """
+{
+  "mounted_weights_loaded": true,
+  "series_mapping_loaded": true,
+  "mapped_series_count": 2,
+  "mapped_study_count": 1,
+  "decoded_non_empty_tensors": true,
+  "report_labels_joined": true,
+  "group_overlap": false,
+  "optimizer_stepped": true,
+  "checkpoints_written": true,
+  "fold_predictions_written": true,
+  "hidden_ids_from_folders": true,
+  "submission_rows_match_hidden_ids": true,
+  "resumed_folds": [0],
+  "newly_trained_folds": [1, 2, 3, 4],
+  "resume_checkpoint_source": "/kaggle/input/resume/fold_0_checkpoint.pt",
+  "resume_checkpoint_sha256": "abc",
+  "optimizer_steps": 4,
+  "fold_outputs": ["fold_0_predictions.csv", "fold_1_predictions.csv", "fold_2_predictions.csv", "fold_3_predictions.csv", "fold_4_predictions.csv"],
+  "prediction_hashes": ["h0", "h1", "h2", "h3", "h4"]
+}
+""",
+        encoding="utf-8",
+    )
+    (kernel_dir / "output" / "artifact_manifest.runtime.json").write_text(
+        '''
+{
+  "template_version": "rsna-2d-dino-mil-v1",
+  "fold_outputs": ["fold_0_predictions.csv", "fold_1_predictions.csv", "fold_2_predictions.csv", "fold_3_predictions.csv", "fold_4_predictions.csv"],
+  "prediction_hashes": ["h0", "h1", "h2", "h3", "h4"]
+}
+''',
+        encoding="utf-8",
+    )
+    result = CycleResult(
+        competition="rsna_knee", dry_run=True, kernel_path=str(kernel_dir), experiment_id=exp_id
+    )
+
+    orch._validate_sub(AgentState(), result)
+
+    assert result.validate_ok is True
+    events = "\n".join(
+        p.read_text(encoding="utf-8") for p in (root / "memory" / "daily").glob("*.events.jsonl")
+    )
+    assert "image_semantic_evidence_ok" in events
 
 
 def test_validate_sub_kernel_judge_rejects_failed_job(tmp_path: Path):

@@ -38,6 +38,25 @@ def _latest_daily_log(root: Path) -> str:
 def collect_events(root: Path, extra: list[dict[str, Any]] | None = None) -> list[dict[str, Any]]:
     events = list(extra or [])
     events.extend(read_jsonl(day_trace_path(root)))
+    # The stage ledger survives process interruption; project its completed
+    # records into the same event shape used by dashboards and deterministic
+    # evaluators.  This is operational state, not prompt memory.
+    ledger = root / ".agent" / "stage-ledger.jsonl"
+    for row in read_jsonl(ledger):
+        if row.get("event") != "stage_finished":
+            continue
+        events.append(
+            {
+                "type": "stage_outcome",
+                "ts": row.get("ts", ""),
+                "stage": row.get("stage", ""),
+                "cycle_id": row.get("cycle_id", ""),
+                "competition": row.get("competition", ""),
+                "state": row.get("state", ""),
+                "attempt": row.get("attempt", 0),
+                "failure_signature": row.get("failure_signature", ""),
+            }
+        )
     events.extend(parse_daily_log(_latest_daily_log(root)))
     return events
 

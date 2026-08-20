@@ -19,6 +19,8 @@ def main(argv: list[str] | None = None) -> int:
         return _dashboard(argv[1:])
     if argv and argv[0] == "evals":
         return _evals(argv[1:])
+    if argv and argv[0] == "onboard":
+        return _onboard(argv[1:])
     if argv and argv[0] in {"run", "/run"}:
         return _run(argv[1:])
 
@@ -118,6 +120,31 @@ def _evals(argv: list[str]) -> int:
         return 0
     print("GATE CLOSED", file=sys.stderr)
     return 1
+
+
+def _onboard_slug(root, slug):
+    from kaggle_agent.autonomy.onboard import CompetitionBootstrapper
+    from kaggle_agent.kaggle_api import KaggleClient
+
+    return CompetitionBootstrapper(root, KaggleClient().connect()).onboard(slug)
+
+
+def _onboard(argv: list[str]) -> int:
+    p = argparse.ArgumentParser(prog="kaggle-agent onboard")
+    p.add_argument("competition_slug")
+    args = p.parse_args(argv)
+    result = _onboard_slug(repo_root(), args.competition_slug)
+    if result.contract is None:
+        print(
+            f"onboard={result.outcome.state.value}: {result.outcome.summary}",
+            file=sys.stderr,
+        )
+        return 2 if result.outcome.state.value == "needs_authority" else 1
+    print(
+        f"onboard=success competition={result.contract.raw['id']} "
+        f"contract_hash={result.contract.compatibility_hash}"
+    )
+    return 0
 
 
 if __name__ == "__main__":

@@ -8,6 +8,7 @@ from pathlib import Path
 
 from kaggle_agent.heal.submit_errors import (
     classify_submit_error,
+    classify_submit_failure,
     is_409_title_conflict,
     is_403_submit,
     is_network_error,
@@ -47,6 +48,16 @@ def test_classify_submit_error_ordering():
     assert classify_submit_error("kernels_push failed: 409 title conflict") == "409"
     assert classify_submit_error("403 Permission denied") == "403"
     assert classify_submit_error("random other error") is None
+
+
+def test_structured_submit_failure_marks_only_network_errors_retryable():
+    network = classify_submit_failure("kernels_push: name or service not known")
+    assert network.category == "network"
+    assert network.retryable is True
+
+    permission = classify_submit_failure("403 Permission 'kernelSessions.get' denied")
+    assert permission.category == "permission"
+    assert permission.retryable is False
 
 
 # --- should_wait_approve: network error exemption ---

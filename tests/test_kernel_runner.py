@@ -1,5 +1,6 @@
 from kaggle_agent.train import kernel_runner
 from kaggle_agent.train.kernel_runner import KernelRunResult
+from kaggle_agent.train.kernel_job import KernelJob, load_kernel_job, save_kernel_job
 
 
 class ErrorClient:
@@ -48,3 +49,68 @@ def test_poll_error_appends_traceback_for_folderless_resume(monkeypatch, tmp_pat
 
     assert result.ok is False
     assert "worker failed\ntraceback:\nTraceback (most recent call last):\nboom" in result.errors[0]
+
+
+class RunningThenCompleteClient:
+    def __init__(self):
+        self.status = "RUNNING"
+        self.output_calls = 0
+
+    def kernels_status(self, kernel_ref):
+        return self.status
+
+    def kernels_output(self, kernel_ref, dest_dir):
+        self.output_calls += 1
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        output = dest_dir / "submission.csv"
+        output.write_text("id,prediction\n1,0.5\n", encoding="utf-8")
+        return [str(output)]
+
+
+def test_poll_exhaustion_is_pending_and_preserves_active_job(monkeypatch, tmp_path):
+    monkeypatch.setattr(kernel_runner.time, "sleep", lambda _seconds: None)
+    client = RunningThenCompleteClient()
+    folder = tmp_path / "kernel"
+    save_kernel_job(
+        KernelJob(kernel_ref="alice/demo", folder=str(folder), status="RUNNING"),
+        tmp_path,
+    )
+
+    result = kernel_runner.run_kernel_phase(
+        client,
+        None,
+        push=True,
+        pull_output_dir=folder / "output",
+        root=tmp_path,
+        poll_attempts=1,
+    )
+
+    assert result.pending is True
+    assert result.ok is False
+    assert load_kernel_job(tmp_path).kernel_ref == "alice/demo"
+    assert client.output_calls == 0
+
+
+def test_later_cycle_resumes_pending_job_and_pulls_after_completion(monkeypatch, tmp_path):
+    monkeypatch.setattr(kernel_runner.time, "sleep", lambda _seconds: None)
+    client = RunningThenCompleteClient()
+    folder = tmp_path / "kernel"
+    save_kernel_job(
+        KernelJob(kernel_ref="alice/demo", folder=str(folder), status="RUNNING"),
+        tmp_path,
+    )
+    first = kernel_runner.run_kernel_phase(
+        client, None, push=True, root=tmp_path, poll_attempts=1
+    )
+    client.status = "COMPLETE"
+
+    second = kernel_runner.run_kernel_phase(
+        client, None, push=True, root=tmp_path, poll_attempts=1
+    )
+
+    assert first.pending is True
+    assert second.resumed is True
+    assert second.pending is False
+    assert second.ok is True
+    assert client.output_calls == 1
+    assert load_kernel_job(tmp_path).kernel_ref == "none"

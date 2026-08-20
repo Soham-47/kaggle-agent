@@ -81,6 +81,9 @@ _COMMON_SYSTEM = (
     "Call one tool per turn. Search and read, then write at least one card "
     "via write_card before done. write_card takes ref (source url/ref) and "
     "markdown (the card body). Prefer harvest_cards or write_card before done. "
+    "Never repeat a normalized search query. Resolve every search before another "
+    "search: fetch one returned source, write a card, or call reject_source with "
+    "the source/ref and a concrete reason. "
     "Card body format:\n"
     "# title\n"
     "- ref: <url or ref>\n"
@@ -99,10 +102,17 @@ def subagent_system(name: str, slug: str, our_score: str) -> str:
     """Per-agent charter: role, allowed tools, card format, write-before-done."""
     spec = AGENT_SPECS[name]
     kinds = ", ".join(spec.search_kinds) if spec.search_kinds else "none"
+    notebook_rule = (
+        "For notebooks: list public kernels, then pull one listed kernel before "
+        "writing its card. A list alone is not source evidence.\n"
+        if name == "notebooks"
+        else ""
+    )
     return (
         f"You are the {name} research agent for the Kaggle contest '{slug}'.\n"
         f"Your job: {_ROLE_LINES[name]}\n"
         f"Your tools: {', '.join(spec.tools)}. search kind is restricted to: {kinds}.\n"
+        + notebook_rule
         + _COMMON_SYSTEM.format(our_score=our_score or "unknown")
     )
 
@@ -186,6 +196,15 @@ def fleet_tool_schemas(spec: SubagentSpec) -> dict[str, dict[str, Any]]:
             },
             "required": ["ref", "markdown"],
         }
+    if "search" in spec.tools:
+        schemas["reject_source"] = {
+            "description": "Record why the current search/source cannot produce a method card.",
+            "properties": {
+                "ref": {"type": "string", "description": "search or source reference"},
+                "reason": {"type": "string", "description": "specific rejection reason"},
+            },
+            "required": ["ref", "reason"],
+        }
     return schemas
 
 
@@ -202,12 +221,34 @@ def make_fleet_tools(
     """Tool dict for one subagent; every tool enforces the spec's restrictions."""
 
     search_calls = 0
+    seen_queries: set[str] = set()
+    pending_search: str | None = None
+    listed_kernel_refs: list[str] = []
+    pulled_kernel_ref = ""
+
+    def _normalized_query(query: str) -> str:
+        return " ".join(str(query).lower().split())
+
+    def _is_low_yield(result: str) -> bool:
+        return result.strip().lower().startswith(
+            ("no source", "no hits", "none", "empty", "0 results")
+        )
 
     def search(query: str = "", kind: str = "", limit: int = 5, **_a: Any) -> str:
-        nonlocal search_calls
+        nonlocal search_calls, pending_search
+        query = str(query)
+        normalized = _normalized_query(query)
+        if normalized in seen_queries:
+            return "rejected: duplicate query; fetch a source or use a materially different query"
+        if pending_search is not None:
+            return (
+                "rejected: resolve the previous search before another search; "
+                "fetch_url, write_card, or reject_source first"
+            )
         if search_calls >= max(1, int(max_searches)):
             return "search budget exhausted; fetch a returned source or write_card now"
         search_calls += 1
+        seen_queries.add(normalized)
         kind = str(kind).strip()
         # A single-source agent defaults to (and is coerced to) its one kind,
         # so a kind-less or mismatched call never wastes a turn on a refusal.
@@ -218,13 +259,41 @@ def make_fleet_tools(
         if kind not in spec.search_kinds:
             allowed = ", ".join(spec.search_kinds) or "none"
             return f"refuse: kind={kind} not allowed for {spec.name} (allowed: {allowed})"
-        return search_fn(str(query), str(kind), int(limit))
+        result = search_fn(query, str(kind), int(limit))
+        pending_search = f"search:{normalized or 'empty'}"
+        if _is_low_yield(result):
+            return (
+                "rejected: low-yield search; call reject_source with a concrete reason "
+                "before trying another query"
+            )
+        return result
 
     def fetch_url(url: str = "", **_a: Any) -> str:
-        return fetch_fn(str(url))
+        nonlocal pending_search
+        result = fetch_fn(str(url))
+        if result.strip() and not result.startswith(("rejected:", "tool error:", "no source", "none")):
+            pending_search = None
+        return result
 
     def write_card(ref: str = "", markdown: str = "", **_a: Any) -> str:
-        return write_fn(str(ref), str(markdown))
+        nonlocal pending_search
+        if spec.name == "notebooks" and not pulled_kernel_ref:
+            return "rejected: pull a notebook source before writing a card"
+        if spec.name == "notebooks" and ref and ref != pulled_kernel_ref:
+            return "rejected: card ref must match the pulled notebook source"
+        result = write_fn(str(ref), str(markdown))
+        if result.strip() and not result.startswith(("rejected:", "tool error:")):
+            pending_search = None
+        return result
+
+    def reject_source(ref: str = "", reason: str = "", **_a: Any) -> str:
+        nonlocal pending_search
+        if pending_search is None:
+            return "rejected: no unresolved search to reject"
+        if not str(reason).strip():
+            return "rejected: rejection reason is required"
+        pending_search = None
+        return f"rejected: source {str(ref).strip() or 'unknown'} recorded: {str(reason).strip()}"
 
     tools: dict[str, Callable[..., str]] = {}
     if "search" in spec.tools:
@@ -233,10 +302,34 @@ def make_fleet_tools(
         tools["fetch_url"] = fetch_url
     if "write_card" in spec.tools:
         tools["write_card"] = write_card
+    if "search" in spec.tools:
+        tools["reject_source"] = reject_source
     if "list_kernels" in spec.tools and kernel_list_fn is not None:
-        tools["list_kernels"] = kernel_list_fn
+        def list_kernels(query: str = "", limit: int = 6, **_a: Any) -> str:
+            nonlocal listed_kernel_refs
+            result = kernel_list_fn(query=query, limit=limit)
+            listed_kernel_refs = [
+                line.strip()
+                for line in str(result).splitlines()
+                if "/" in line and not line.lower().startswith(("none", "no source"))
+            ]
+            return str(result)
+
+        tools["list_kernels"] = list_kernels
     if "pull_kernel" in spec.tools and kernel_pull_fn is not None:
-        tools["pull_kernel"] = kernel_pull_fn
+        def pull_kernel(ref: str = "", **_a: Any) -> str:
+            nonlocal pulled_kernel_ref
+            selected = str(ref).strip() or (listed_kernel_refs[0] if listed_kernel_refs else "")
+            if not selected:
+                return "missing ref; list public kernels first"
+            result = str(kernel_pull_fn(ref=selected))
+            if result.strip() and not result.lower().startswith(
+                ("missing", "none", "no source", "tool error:", "rejected:")
+            ):
+                pulled_kernel_ref = selected
+            return result
+
+        tools["pull_kernel"] = pull_kernel
     return tools
 
 

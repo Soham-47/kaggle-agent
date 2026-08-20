@@ -6,7 +6,7 @@ import json
 from pathlib import Path
 
 from kaggle_agent.agents.loop import StageAgent, StageAgentConfig
-from kaggle_agent.ops.evals import evaluate_cycle
+from kaggle_agent.ops.evals import collect_events, evaluate_cycle
 from kaggle_agent.ops.log_parse import parse_daily_log
 from kaggle_agent.ops.snapshot import build_snapshot
 from kaggle_agent.ops.tracing import Tracer
@@ -47,6 +47,28 @@ def test_parse_daily_log_extracts_phases_and_tools(tmp_path: Path):
     assert tools[0]["tool"] == "invalid_json"
     assert tools[0]["stage"] == "research"
     assert any(e["tool"] == "write_plan" for e in tools)
+
+
+def test_collect_events_includes_durable_stage_ledger(tmp_path: Path):
+    ledger = tmp_path / ".agent"
+    ledger.mkdir()
+    (ledger / "stage-ledger.jsonl").write_text(
+        json.dumps(
+            {
+                "ts": "2026-08-20T00:00:00+00:00", "event": "stage_finished",
+                "stage": "CODE", "cycle_id": "c1", "competition": "demo",
+                "state": "success", "attempt": 1, "idempotency_key": "abc",
+            }
+        ) + "\n",
+        encoding="utf-8",
+    )
+
+    events = collect_events(tmp_path)
+
+    assert any(
+        event.get("type") == "stage_outcome" and event.get("stage") == "CODE"
+        for event in events
+    )
 
 
 def test_evaluate_cycle_fails_on_junk_and_invalid_json(tmp_path: Path):

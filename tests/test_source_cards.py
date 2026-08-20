@@ -184,6 +184,7 @@ def test_write_methods_sidecar_no_forced_dino(tmp_path: Path):
 
     data = json.loads(out.read_text(encoding="utf-8"))
     assert "dataset_sources" in data
+    assert data["source_card_refs"] == ["source-a"]
     assert data["model_sources"] == [] or isinstance(data["model_sources"], list)
     assert "metaresearch/dinov2" not in data.get("model_sources", [])
 

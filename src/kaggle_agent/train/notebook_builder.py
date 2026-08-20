@@ -126,6 +126,28 @@ def _load_methods(root: Path, competition: CompetitionConfig) -> dict:
     return data if isinstance(data, dict) else {}
 
 
+def _load_artifact_manifest(root: Path, competition: CompetitionConfig) -> dict:
+    path = root / competition.workspace_relative / "pipeline" / "artifact_manifest.json"
+    if not path.is_file():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _load_resume_manifest(root: Path, competition: CompetitionConfig) -> dict:
+    path = root / competition.workspace_relative / "pipeline" / "resume_manifest.json"
+    if not path.is_file():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
 @dataclass(frozen=True)
 class KernelPackage:
     folder: Path
@@ -162,7 +184,16 @@ def _bundle_recipe_files(
 ) -> None:
     """Ship train tables + extractor so the kernel can train without mounted CSVs."""
     pipe = root / competition.workspace_relative / "pipeline"
-    for name in ("reports.py", "schema.py", "ranker.py", "methods.json", "methods_applied.md"):
+    for name in (
+        "reports.py",
+        "schema.py",
+        "ranker.py",
+        "methods.json",
+        "methods_applied.md",
+        "image_contract.json",
+        "artifact_manifest.json",
+        "resume_manifest.json",
+    ):
         src = pipe / name
         if src.is_file():
             shutil.copy2(src, folder / name)
@@ -203,6 +234,8 @@ def write_kernel_package(
 
     methods = _load_methods(root, competition)
     recipe_source = _recipe_source(root, competition) or ""
+    artifact_manifest = _load_artifact_manifest(root, competition)
+    resume_manifest = _load_resume_manifest(root, competition)
     seed = 42
     if plan_text.strip():
         seed += int.from_bytes(hashlib.sha256(exp_id.encode("utf-8")).digest()[:2], "big") % 10000
@@ -221,6 +254,8 @@ def write_kernel_package(
         "seed": seed,
         "seed_sha256": canonical_hash(seed),
     }
+    if artifact_manifest:
+        manifest["artifact_manifest"] = artifact_manifest
     notebook = build_baseline_notebook(
         competition_slug=competition.slug,
         labels=competition.labels,
@@ -234,7 +269,21 @@ def write_kernel_package(
 
     from kaggle_agent.heal.pins import sanitize_datasets, sanitize_models
 
-    datasets = sanitize_datasets([str(x) for x in (methods.get("dataset_sources") or []) if x])[:6]
+    datasets = sanitize_datasets(
+        [str(x) for x in (methods.get("dataset_sources") or []) if x]
+    )
+    resume_dataset = str(resume_manifest.get("dataset_source") or "").strip()
+    if resume_dataset:
+        resume_sources = sanitize_datasets([resume_dataset])
+        if not resume_sources:
+            raise ValueError("resume manifest dataset_source is invalid")
+        # The resume artifact is required to reproduce the approved fold and
+        # always owns one of Kaggle's six attachment slots.  Research-card
+        # attachments are optional and are truncated deterministically.
+        resume_source = resume_sources[0]
+        datasets = [resume_source] + [x for x in datasets if x != resume_source][:5]
+    else:
+        datasets = datasets[:6]
     models = sanitize_models([str(x) for x in (methods.get("model_sources") or []) if x])[:3]
 
     # Official template fields from kernels_initialize (kaggle API).

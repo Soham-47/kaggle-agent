@@ -441,6 +441,10 @@ def test_fleet_agents_write_owned_namespaced_cards(tmp_path: Path, monkeypatch):
                     {"tool": "search", "args": {"kind": kind, "query": name}}
                 )
             if turn == 1:
+                if name == "notebooks":
+                    return json.dumps(
+                        {"tool": "pull_kernel", "args": {"ref": "owner/kernel"}}
+                    )
                 return json.dumps(
                     {
                         "tool": "write_card",
@@ -449,6 +453,20 @@ def test_fleet_agents_write_owned_namespaced_cards(tmp_path: Path, monkeypatch):
                             "markdown": (
                                 "# finding\n- ref: owner/"
                                 f"{name}\n- copyable next step: attach weights\n"
+                                "- do not copy: P100\n"
+                            ),
+                        },
+                    }
+                )
+            if name == "notebooks" and turn == 2:
+                return json.dumps(
+                    {
+                        "tool": "write_card",
+                        "args": {
+                            "ref": "owner/kernel",
+                            "markdown": (
+                                "# finding\n- ref: owner/kernel\n"
+                                "- copyable next step: attach weights\n"
                                 "- do not copy: P100\n"
                             ),
                         },
@@ -491,6 +509,9 @@ def test_stalled_fleet_agents_force_owned_cards(tmp_path: Path, monkeypatch):
     )
 
     class _StallingZen:
+        def __init__(self) -> None:
+            self.notebook_pulled = False
+
         def chat(self, model, messages, **kwargs):  # noqa: ANN001
             system = str(messages[0]["content"])
             name = next(
@@ -499,6 +520,12 @@ def test_stalled_fleet_agents_force_owned_cards(tmp_path: Path, monkeypatch):
                 if f"the {item} research agent" in system
             )
             if isinstance(kwargs.get("tool_choice"), dict):
+                forced = kwargs["tool_choice"]["function"]["name"]
+                if name == "notebooks" and forced == "pull_kernel":
+                    self.notebook_pulled = True
+                    return json.dumps(
+                        {"tool": "pull_kernel", "args": {"ref": "owner/kernel"}}
+                    )
                 return json.dumps(
                     {
                         "tool": "write_card",
@@ -513,6 +540,20 @@ def test_stalled_fleet_agents_force_owned_cards(tmp_path: Path, monkeypatch):
                     }
                 )
             if name == "notebooks":
+                if self.notebook_pulled:
+                    return json.dumps(
+                        {
+                            "tool": "write_card",
+                            "args": {
+                                "ref": "owner/kernel",
+                                "markdown": (
+                                    "# notebooks finding\n- ref: owner/kernel\n"
+                                    "- copyable next step: inspect source\n"
+                                    "- do not copy: unverified claims\n"
+                                ),
+                            },
+                        }
+                    )
                 return json.dumps({"tool": "list_kernels", "args": {}})
             kind = {
                 "papers": "arxiv",

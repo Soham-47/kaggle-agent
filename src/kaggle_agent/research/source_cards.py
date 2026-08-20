@@ -340,8 +340,10 @@ def write_methods_sidecar(cards: list[Path], workspace: Path) -> Path:
     models: list[str] = []
     hints: list[str] = []
     steps: list[str] = []
+    source_card_refs: list[str] = []
     for path in cards:
         text = path.read_text(encoding="utf-8")
+        source_card_refs.append(path.stem)
         for ref in extract_datasets(text):
             if valid_model_pin(ref):
                 if ref not in models:
@@ -369,6 +371,7 @@ def write_methods_sidecar(cards: list[Path], workspace: Path) -> Path:
             "model_sources": models[:3],
             "infer_hints": hints,
             "implement_steps": dedupe_steps(steps)[:6],
+            "source_card_refs": source_card_refs,
             "n_cards": len(cards),
         }
     )

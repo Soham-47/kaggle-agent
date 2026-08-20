@@ -34,6 +34,16 @@ class _ScriptedZen:
         return json.dumps(self.replies.pop(0))
 
 
+def _write_source_card(root: Path, step: str = "rank-average member predictions") -> None:
+    cards = root / "memory" / "research-deep"
+    cards.mkdir(parents=True, exist_ok=True)
+    (cards / "source-rank.md").write_text(
+        "# Rank source\n- ref: owner/rank-kernel (https://example.test/rank)\n"
+        f"- copyable next step: {step}.\n",
+        encoding="utf-8",
+    )
+
+
 def test_plan_write_then_done():
     stored: dict[str, str] = {}
 
@@ -95,6 +105,7 @@ def test_plan_ready_needs_hypothesis_and_approach():
     assert plan_is_ready("x", "maybe") is False
 
 
+
 def test_write_plan_text_has_three_lines():
     text = write_plan_text("use grouped folds", "tune", "copy winner step")
     assert "hypothesis:" in text
@@ -120,6 +131,163 @@ def test_methods_payload_accepts_valid():
     )
     assert ok is True
     assert err == ""
+
+
+def test_code_write_methods_requires_an_existing_grounding_card(tmp_path: Path):
+    from kaggle_agent.agents.code import build_code_tools
+
+    root = tmp_path / "ka"
+    ws = root / "competitions" / "rsna_knee"
+    (ws / "pipeline").mkdir(parents=True)
+    tools, _, _ = build_code_tools(root, ws)
+
+    result = tools["write_methods"](
+        implement_steps=["train ConvNeXt with DINOv2 backbone"],
+        source_card_refs=["missing-card"],
+    )
+
+    assert result == "rejected: unknown source card: missing-card"
+
+
+def test_code_write_methods_persists_grounding_card_reference(tmp_path: Path):
+    from kaggle_agent.agents.code import build_code_tools
+
+    root = tmp_path / "ka"
+    _write_source_card(root, "train ConvNeXt with DINOv2 backbone")
+    ws = root / "competitions" / "rsna_knee"
+    (ws / "pipeline").mkdir(parents=True)
+    tools, _, _ = build_code_tools(root, ws)
+
+    result = tools["write_methods"](
+        implement_steps=["train ConvNeXt with DINOv2 backbone"],
+        source_card_refs=["owner/rank-kernel"],
+    )
+
+    assert result.endswith("pipeline/methods.json")
+    assert json.loads(Path(result).read_text(encoding="utf-8"))["source_card_refs"] == [
+        "owner/rank-kernel"
+    ]
+
+
+def test_code_write_recipe_requires_card_grounding_not_just_plan_tokens(tmp_path: Path):
+    from kaggle_agent.agents.code import build_code_tools
+
+    root = tmp_path / "ka"
+    cards = root / "memory" / "research-deep"
+    cards.mkdir(parents=True)
+    (cards / "source-dino.md").write_text(
+        "# DINO source\n- ref: owner/dino-kernel (https://example.test/dino)\n"
+        "- copyable next step: attach dino weights with 336px inputs.\n",
+        encoding="utf-8",
+    )
+    ws = root / "competitions" / "rsna_knee"
+    pipe = ws / "pipeline"
+    pipe.mkdir(parents=True)
+    (pipe / "kernel_recipe.py").write_text(
+        "KERNEL_RECIPE_SOURCE = r'''\n"
+        "def CUSTOM_INFER(sub, ctx):\n    return sub\n"
+        "sub = CUSTOM_INFER(sub, ctx)\nsub.to_csv('submission.csv')\n'''\n",
+        encoding="utf-8",
+    )
+    tools, _, _ = build_code_tools(root, ws, plan_text="steps: fold rank aggregation")
+
+    result = tools["write_kernel_recipe"](
+        source=(
+            "def CUSTOM_INFER(sub, ctx):\n    return sub.rank()\n"
+            "sub = CUSTOM_INFER(sub, ctx)\nsub.to_csv('submission.csv')\n"
+        ),
+        source_card_refs=["source-dino"],
+    )
+
+    assert result == "rejected: recipe is not grounded in cited source cards"
+
+
+def test_code_write_recipe_accepts_existing_card_ref_with_evidence(tmp_path: Path):
+    from kaggle_agent.agents.code import build_code_tools
+
+    root = tmp_path / "ka"
+    cards = root / "memory" / "research-deep"
+    cards.mkdir(parents=True)
+    (cards / "source-dino.md").write_text(
+        "# DINO source\n- ref: owner/dino-kernel (https://example.test/dino)\n"
+        "- copyable next step: attach dino weights and rank-average members.\n",
+        encoding="utf-8",
+    )
+    ws = root / "competitions" / "rsna_knee"
+    pipe = ws / "pipeline"
+    pipe.mkdir(parents=True)
+    (pipe / "kernel_recipe.py").write_text(
+        "KERNEL_RECIPE_SOURCE = r'''\n"
+        "def CUSTOM_INFER(sub, ctx):\n    return sub\n"
+        "sub = CUSTOM_INFER(sub, ctx)\nsub.to_csv('submission.csv')\n'''\n",
+        encoding="utf-8",
+    )
+    tools, _, _ = build_code_tools(root, ws, plan_text="steps: rank-average members")
+
+    result = tools["write_kernel_recipe"](
+        source=(
+            "def CUSTOM_INFER(sub, ctx):\n    return sub.rank(method='average')\n"
+            "sub = CUSTOM_INFER(sub, ctx)\nsub.to_csv('submission.csv')\n"
+        ),
+        source_card_refs=["owner/dino-kernel"],
+    )
+
+    assert result == "recipe written"
+
+
+def test_code_write_image_contract_renders_supported_template(tmp_path: Path):
+    from kaggle_agent.agents.code import build_code_tools
+
+    root = tmp_path / "ka"
+    cards = root / "memory" / "research-deep"
+    cards.mkdir(parents=True)
+    (cards / "source-rsna-dino.md").write_text(
+        "# RSNA DINO source\n- ref: owner/rsna-dino (https://example.test/dino)\n"
+        "- copyable next step: use 2D DINO with series MIL attention, report labels, "
+        "grouped folds, and rank average folds.\n"
+        "datasets_mentioned: owner/rsna-report-labels\n"
+        "models_mentioned: owner/dinov2/PyTorch/base/1\n",
+        encoding="utf-8",
+    )
+    ws = root / "competitions" / "rsna_knee"
+    pipe = ws / "pipeline"
+    pipe.mkdir(parents=True)
+    (pipe / "schema.py").write_text(
+        "LABELS = [" + ",".join(repr(f"label_{i}") for i in range(12)) + "]\n",
+        encoding="utf-8",
+    )
+    (pipe / "kernel_recipe.py").write_text(
+        "KERNEL_RECIPE_SOURCE = r'''\n"
+        "# === CUSTOM_INFER START ===\n"
+        "def CUSTOM_INFER(sub, ctx):\n    return sub\n"
+        "# === CUSTOM_INFER END ===\n"
+        "sub = CUSTOM_INFER(sub, ctx)\n"
+        "sub.to_csv('submission.csv')\n"
+        "'''\n",
+        encoding="utf-8",
+    )
+    tools, _, state = build_code_tools(root, ws)
+
+    result = tools["write_image_contract"](
+        dataset_sources=["owner/rsna-report-labels"],
+        model_sources=["owner/dinov2/PyTorch/base/1"],
+        source_card_refs=["source-rsna-dino"],
+        parameters={"image_size": 999, "epochs": 0, "unsafe": "ignored"},
+    )
+
+    assert result == "image contract rendered"
+    assert state["wrote_recipe"] == "1"
+    assert state["wrote_methods"] == "1"
+    contract = json.loads((pipe / "image_contract.json").read_text(encoding="utf-8"))
+    assert contract["template"] == "rsna-2d-dino-mil-v1"
+    assert contract["parameters"] == {"image_size": 512, "epochs": 1}
+    manifest = json.loads((pipe / "artifact_manifest.json").read_text(encoding="utf-8"))
+    assert manifest["model_sources"] == ["owner/dinov2/PyTorch/base/1"]
+    methods = json.loads((pipe / "methods.json").read_text(encoding="utf-8"))
+    assert methods["model_sources"] == ["owner/dinov2/PyTorch/base/1"]
+    recipe = (pipe / "kernel_recipe.py").read_text(encoding="utf-8")
+    assert "KERNEL_RECIPE_SOURCE" in recipe
+    assert "semantic_evidence.json" in recipe
 
 
 def test_code_done_rejected_until_brief(tmp_path: Path):
@@ -209,6 +377,7 @@ def test_code_agent_stops_after_fallback_when_model_ignores_forced_write(tmp_pat
     root = tmp_path / "ka"
     (root / "memory").mkdir(parents=True)
     (root / "memory" / "state.md").write_text("# state\n- phase: IDLE\n")
+    _write_source_card(root)
     ws = root / "competitions" / "rsna_knee"
     pipe = ws / "pipeline"
     pipe.mkdir(parents=True)
@@ -235,7 +404,7 @@ def test_code_agent_stops_after_fallback_when_model_ignores_forced_write(tmp_pat
     from kaggle_agent.agents.loop import StageAgentConfig
 
     zen = _ScriptedZen(
-        [{"tool": "write_kernel_recipe", "args": {"source": new_recipe}}]
+        [{"tool": "write_kernel_recipe", "args": {"source": new_recipe, "source_card_refs": ["source-rank"]}}]
         + [{"tool": "read_file", "args": {"rel": "pipeline/kernel_recipe.py"}}] * 30
     )
     agent, state = make_code_agent(
@@ -254,7 +423,7 @@ def test_code_agent_stops_after_fallback_when_model_ignores_forced_write(tmp_pat
     assert "rank" in recipe
 
 
-def test_code_agent_forces_model_recipe_write_after_stall(tmp_path: Path):
+def test_code_agent_never_invents_a_recipe_after_stall(tmp_path: Path):
     root = tmp_path / "ka"
     (root / "memory").mkdir(parents=True)
     (root / "memory" / "state.md").write_text("# state\n- phase: IDLE\n")
@@ -300,10 +469,12 @@ def test_code_agent_forces_model_recipe_write_after_stall(tmp_path: Path):
         plan_text="steps: rank average predictions",
     )
 
-    agent.run("code")
+    out = agent.run("code")
 
-    assert state["wrote_recipe"] == "1"
-    assert any(isinstance(choice, dict) for choice in zen.choices)
+    assert out.stop_reason == "stalled"
+    assert state["wrote_recipe"] == ""
+    assert not any(isinstance(choice, dict) for choice in zen.choices)
+    assert "rank(method" not in (pipe / "kernel_recipe.py").read_text(encoding="utf-8")
 
 
 def test_replace_kernel_recipe_works():
@@ -384,7 +555,7 @@ def test_done_ok_rejects_when_wrote_methods_but_no_recipe_word(tmp_path: Path):
     assert out.stop_reason != "done"
 
 
-def test_code_agent_fallback_writes_distinct_recipe_variant(tmp_path: Path):
+def test_code_agent_fallback_stops_without_writing_a_synthetic_variant(tmp_path: Path):
     import json
 
     root = tmp_path / "ka"
@@ -425,9 +596,9 @@ def test_code_agent_fallback_writes_distinct_recipe_variant(tmp_path: Path):
         plan_text=plan,
     )
     out = agent.run("test")
-    assert out.stop_reason == "done"
+    assert out.stop_reason == "stalled"
     recipe = (pipe / "kernel_recipe.py").read_text(encoding="utf-8")
-    assert "T.Resize((336, 336))" in recipe
+    assert "T.Resize((224, 224))" in recipe
 
 
 def test_replace_kernel_recipe_auto_inserts_glue():
@@ -473,6 +644,7 @@ def test_code_write_recipe_rejects_missing_plan_tokens(tmp_path: Path):
     root = tmp_path / "ka"
     (root / "memory").mkdir(parents=True)
     (root / "memory" / "state.md").write_text("# state\n- phase: IDLE\n")
+    _write_source_card(root, "custom infer return a copied submission")
     ws = root / "competitions" / "rsna_knee"
     pipe = ws / "pipeline"
     pipe.mkdir(parents=True)
@@ -485,7 +657,7 @@ def test_code_write_recipe_rejects_missing_plan_tokens(tmp_path: Path):
     tools, _, _ = __import__(
         "kaggle_agent.agents.code", fromlist=["build_code_tools"]
     ).build_code_tools(
-        root, ws, plan_text="steps: add fold rank aggregation"
+        root, ws, plan_text="steps: temperature calibration"
     )
     out = tools["write_kernel_recipe"](
         source=(
@@ -493,7 +665,8 @@ def test_code_write_recipe_rejects_missing_plan_tokens(tmp_path: Path):
             "sub = None\n"
             "sub = CUSTOM_INFER(sub, ctx)\nsub = sub.copy()\n"
             "sub.to_csv('submission.csv')\n"
-        )
+        ),
+        source_card_refs=["source-rank"],
     )
 
     assert out.startswith("rejected: plan steps")
@@ -526,15 +699,16 @@ def test_validation_pipeline_rules():
     assert calls_custom_infer("sub = sub.copy()") == "recipe must call CUSTOM_INFER(sub, ctx)"
 
 
-def test_submitted_fold_rank_recipe_preserves_study_rows():
+def test_submitted_image_recipe_rank_averages_real_fold_predictions():
     from pathlib import Path
 
     wrapper = Path("competitions/rsna_knee/pipeline/kernel_recipe.py").read_text(
         encoding="utf-8"
     )
     recipe = extract_recipe_string(wrapper) or ""
-    assert "ranked.loc[group.index, df.columns]" in recipe
-    assert "fold_ranks[name] = rank_transform(df)" in recipe
+    assert "frame[LABELS].rank(pct=True, method=\"average\")" in recipe
+    assert "np.mean(ranked, axis=0)" in recipe
+    assert "metadata-ranker fallback" in recipe
 
 
 def test_validation_pipeline_min_length_rule():
@@ -578,6 +752,7 @@ def test_write_kernel_recipe_unlocks_done(tmp_path: Path):
     root = tmp_path / "ka"
     (root / "memory").mkdir(parents=True)
     (root / "memory" / "state.md").write_text("# state\n- phase: IDLE\n")
+    _write_source_card(root)
     ws = root / "competitions" / "rsna_knee"
     pipe = ws / "pipeline"
     pipe.mkdir(parents=True)
@@ -606,7 +781,7 @@ def test_write_kernel_recipe_unlocks_done(tmp_path: Path):
     from kaggle_agent.agents.loop import StageAgentConfig
 
     zen = _ScriptedZen([
-        {"tool": "write_kernel_recipe", "args": {"source": new_recipe}},
+        {"tool": "write_kernel_recipe", "args": {"source": new_recipe, "source_card_refs": ["owner/rank-kernel"]}},
         {"tool": "done", "args": {}},
     ])
     agent, state = make_code_agent(zen, "m", root, workspace=ws, config=StageAgentConfig(max_minutes=5, max_tool_turns=5), plan_text="steps: rank average predictions")
@@ -620,6 +795,7 @@ def test_write_kernel_recipe_rejects_identical_recipe(tmp_path: Path):
     root = tmp_path / "ka"
     (root / "memory").mkdir(parents=True)
     (root / "memory" / "state.md").write_text("# state\n- phase: IDLE\n")
+    _write_source_card(root, "custom infer returns the submission")
     ws = root / "competitions" / "rsna_knee"
     pipe = ws / "pipeline"
     pipe.mkdir(parents=True)
@@ -646,10 +822,11 @@ def test_write_kernel_recipe_rejects_identical_recipe(tmp_path: Path):
             "# === CUSTOM_INFER END ===\n"
             "sub = CUSTOM_INFER(sub, ctx)\n"
             "sub.to_csv('submission.csv')\n"
-        )
+        ),
+        source_card_refs=["source-rank"],
     )
 
-    assert result.startswith("rejected: recipe is identical")
+    assert result.startswith("rejected: recipe has no semantic logic change")
 
 
 def test_write_plan_judge_rejects_until_novel(tmp_path: Path):

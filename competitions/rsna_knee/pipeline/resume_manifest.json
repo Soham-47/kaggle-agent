@@ -1,0 +1,31 @@
+{
+  "dataset_source": "sohamgawd47foden/rsna-knee-fold0-resume-20260819",
+  "checkpoint_filename": "fold_0_checkpoint.pt",
+  "sidecar_filename": "fold_0_checkpoint.json",
+  "source_experiment": "20260819-123221",
+  "fold": 0,
+  "sha256": "86d6022d34d6ed5e1c2537fa0dd0156889e92b8692f2f8147be709571969b1a7",
+  "template_version": "rsna-2d-dino-mil-v1",
+  "model_pin": "metaresearch/dinov2/pytorch/small/1",
+  "labels": [
+    "ACL",
+    "MCL",
+    "Medial Meniscus",
+    "Lateral Meniscus",
+    "Medial OA",
+    "Lateral OA",
+    "PF OA",
+    "Effusion",
+    "Synovitis",
+    "Baker's",
+    "Contusion",
+    "Fracture"
+  ],
+  "training_parameters": {
+    "image_size": 224,
+    "folds": 5,
+    "epochs": 1,
+    "slices_per_series": 8
+  },
+  "source_contract_sha256": "ec9d5440327641580080b99d8d456511bce0027681258546b7e508204d62d18d"
+}

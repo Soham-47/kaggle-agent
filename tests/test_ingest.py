@@ -1,4 +1,4 @@
-from kaggle_agent.memory.ingest import CORE, build_context_pack
+from kaggle_agent.memory.ingest import CORE, build_context_pack, retrieve
 from kaggle_agent.paths import repo_root
 
 
@@ -85,3 +85,25 @@ def test_competition_memory_records_ground_truth():
     assert "58" in text
     assert "reports" in text
     assert "metadata ranker" in text
+
+
+def test_retrieve_ranks_token_overlap_when_phrase_order_differs(tmp_path):
+    mem = tmp_path / "memory"
+    mem.mkdir()
+    for name in CORE:
+        (mem / name).write_text(name, encoding="utf-8")
+    experiments = mem / "experiments"
+    experiments.mkdir()
+    (experiments / "relevant.md").write_text(
+        "- result: DINO weights were not mounted, so the image model scored as a ranker.\n",
+        encoding="utf-8",
+    )
+    (experiments / "noise.md").write_text(
+        "- result: a different baseline completed.\n",
+        encoding="utf-8",
+    )
+
+    found = retrieve(tmp_path, "ranker image weights mounted", scope="experiments")
+
+    assert "relevant.md" in found
+    assert "not mounted" in found

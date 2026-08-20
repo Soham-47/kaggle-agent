@@ -381,7 +381,11 @@ def retrieve(
             files = [folder]
         else:
             files = sorted(folder.glob(pattern or "*"), key=lambda p: p.stat().st_mtime, reverse=True)
-    hits: list[str] = []
+    # Rank by meaningful query-token overlap instead of requiring an exact
+    # substring. Agents often query the same failed experiment with a different
+    # word order (for example "ranker image weights mounted").
+    tokens = set(re.findall(r"[a-z0-9][a-z0-9_-]{2,}", q))
+    scored: list[tuple[int, float, Path, str, int]] = []
     for path in files:
         if not path.is_file():
             continue
@@ -391,13 +395,21 @@ def retrieve(
         text = path.read_text(encoding="utf-8")
         if _note_is_stale(text):
             continue
-        idx = text.lower().find(q)
-        if idx < 0:
+        low = text.lower()
+        phrase_idx = low.find(q)
+        token_positions = [low.find(token) for token in tokens if token in low]
+        overlap = len(token_positions)
+        if phrase_idx < 0 and overlap == 0:
             continue
+        idx = phrase_idx if phrase_idx >= 0 else min(token_positions)
+        # Exact phrases win; otherwise favor documents matching more of the
+        # query and use recency only as a deterministic tie-breaker.
+        score = overlap * 10 + (100 if phrase_idx >= 0 else 0)
+        scored.append((score, path.stat().st_mtime, path, text, idx))
+    scored.sort(key=lambda item: (-item[0], -item[1], item[2].name))
+    hits: list[str] = []
+    for _score, _mtime, path, text, idx in scored[:max_hits]:
         start = max(0, idx - window // 4)
         chunk = text[start : start + window]
-        rel = path.relative_to(base)
-        hits.append(f"## {rel}\n{chunk.strip()}")
-        if len(hits) >= max_hits:
-            break
+        hits.append(f"## {path.relative_to(base)}\n{chunk.strip()}")
     return "\n\n".join(hits) if hits else "no hits"

@@ -11,9 +11,18 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Callable
 
+from kaggle_agent.autonomy.outcomes import StageOutcome
 from kaggle_agent.state_md import AgentState
 
 PhaseFn = Callable[..., AgentState]
+
+
+@dataclass(frozen=True)
+class StageRun:
+    """Typed stage result; ``outcome=None`` denotes a legacy handler."""
+
+    state: AgentState
+    outcome: StageOutcome | None = None
 
 
 @dataclass(frozen=True)
@@ -25,9 +34,20 @@ class Stage:
     uses_dry: bool = False
 
     def run(self, state: AgentState, dry: bool, result: Any) -> AgentState:
+        return self.run_typed(state, dry, result).state
+
+    def run_typed(self, state: AgentState, dry: bool, result: Any) -> StageRun:
         if self.uses_dry:
-            return self.fn(state, dry, result)
-        return self.fn(state, result)
+            returned = self.fn(state, dry, result)
+        else:
+            returned = self.fn(state, result)
+        if isinstance(returned, StageRun):
+            if returned.outcome is not None and returned.outcome.stage != self.name:
+                raise ValueError(
+                    f"stage outcome mismatch: expected {self.name}, got {returned.outcome.stage}"
+                )
+            return returned
+        return StageRun(returned or state)
 
 
 _PHASE_ATTRS: dict[str, tuple[str, bool]] = {

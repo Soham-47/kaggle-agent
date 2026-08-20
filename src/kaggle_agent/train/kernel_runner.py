@@ -48,6 +48,7 @@ def _browser_traceback(kernel_ref: str) -> str:
 class KernelRunResult:
     ok: bool
     package: KernelPackage | None
+    pending: bool = False
     pushed: bool = False
     resumed: bool = False
     status: str = "local_only"
@@ -335,12 +336,25 @@ def _poll_and_maybe_pull(
                 "cancel_requested",
             }:
                 break
-            time.sleep(max(5, poll_seconds))
+            if attempt < max(1, poll_attempts) - 1:
+                time.sleep(max(5, poll_seconds))
     except Exception as exc:  # noqa: BLE001
         result.errors.append(f"status: {exc}")
         return result
 
     st_norm = str(result.status or "").split(".")[-1].lower().replace(" ", "")
+    if st_norm in {
+        "running",
+        "queued",
+        "pending",
+        "pushed",
+        "cancelrequested",
+        "cancel_requested",
+    }:
+        result.ok = False
+        result.pending = True
+        result.message = f"pending status={result.status}"
+        return result
     if st_norm in {"error", "failed"}:
         fail = ""
         try:

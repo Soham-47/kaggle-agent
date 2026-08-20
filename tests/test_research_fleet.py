@@ -111,6 +111,7 @@ def test_fleet_search_schema_advertises_kind_enum():
     props = schema["search"]["properties"]
     assert props["kind"]["enum"] == ["arxiv"]
     assert "query" in props
+    assert schema["reject_source"]["required"] == ["ref", "reason"]
 
 
 def test_fleet_search_has_small_call_budget():
@@ -123,8 +124,45 @@ def test_fleet_search_has_small_call_budget():
     )
 
     assert "hit web" in tools["search"](query="one")
+    assert "recorded" in tools["reject_source"](ref="search:one", reason="not actionable")
     assert "hit web" in tools["search"](query="two")
+    assert "recorded" in tools["reject_source"](ref="search:two", reason="not actionable")
     assert "budget exhausted" in tools["search"](query="three")
+
+
+def test_fleet_rejects_duplicate_query_without_spending_search_budget():
+    calls = {"n": 0}
+    tools = _tools("web", search_calls=calls)
+
+    assert "hit web" in tools["search"](query="  MRI   leaderboard ")
+    assert "duplicate query" in tools["search"](query="mri leaderboard")
+    assert calls["n"] == 1
+
+
+def test_fleet_requires_each_search_to_be_resolved_before_another_search():
+    tools = _tools("web")
+
+    assert "hit web" in tools["search"](query="first")
+    assert "resolve the previous search" in tools["search"](query="second")
+    assert tools["reject_source"](ref="search:first", reason="results were generic") == (
+        "rejected: source search:first recorded: results were generic"
+    )
+    assert "hit web" in tools["search"](query="second")
+
+
+def test_fleet_stops_after_a_low_yield_search_until_it_is_explicitly_rejected():
+    tools = make_fleet_tools(
+        AGENT_SPECS["web"],
+        search_fn=lambda q, k, l: "no source found",
+        fetch_fn=lambda u: "body",
+        write_fn=lambda ref, md: "/tmp/card.md",
+    )
+
+    assert "low-yield search" in tools["search"](query="obscure query")
+    assert "resolve the previous search" in tools["search"](query="different query")
+    assert "recorded" in tools["reject_source"](
+        ref="search:obscure query", reason="no primary source"
+    )
 
 
 def test_notebooks_agent_gets_kernel_tools_only():
@@ -133,6 +171,27 @@ def test_notebooks_agent_gets_kernel_tools_only():
     assert tools["pull_kernel"]() == "notebook text"
     assert "search" not in tools
     assert "fetch_url" not in tools
+
+
+def test_notebook_card_requires_a_pulled_kernel_source():
+    writes: list[tuple[str, str]] = []
+    tools = make_fleet_tools(
+        AGENT_SPECS["notebooks"],
+        search_fn=lambda *_a: "unused",
+        fetch_fn=lambda _u: "unused",
+        write_fn=lambda ref, markdown: writes.append((ref, markdown)) or "/tmp/card.md",
+        kernel_list_fn=lambda **_a: "owner/kernel-a\nowner/kernel-b",
+        kernel_pull_fn=lambda ref="", **_a: f"source for {ref}",
+    )
+
+    assert "rejected: pull a notebook" in tools["write_card"](
+        ref="owner/kernel-a", markdown="card"
+    )
+    assert tools["list_kernels"]() == "owner/kernel-a\nowner/kernel-b"
+    # A forced recovery pull uses the first real result when the model omitted ref.
+    assert tools["pull_kernel"]() == "source for owner/kernel-a"
+    assert tools["write_card"](ref="owner/kernel-a", markdown="card") == "/tmp/card.md"
+    assert writes == [("owner/kernel-a", "card")]
 
 
 def test_write_card_namespaces_by_kind(tmp_path: Path):

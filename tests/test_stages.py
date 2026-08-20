@@ -1,6 +1,7 @@
 """Stage registry: uniform phase dispatch for the orchestrator."""
 
-from kaggle_agent.stages import Stage, build_stage_registry
+from kaggle_agent.autonomy.outcomes import OutcomeState, StageOutcome
+from kaggle_agent.stages import Stage, StageRun, build_stage_registry
 from kaggle_agent.state_md import AgentState
 
 
@@ -65,6 +66,24 @@ def test_stage_run_omits_dry_when_not_flagged():
     out = stage.run(st, False, "res")
     assert out is st
     assert seen == [(st, "res")]
+
+
+def test_typed_stage_return_preserves_state_and_outcome():
+    st = AgentState()
+    expected = StageOutcome.success("RESEARCH", "verified")
+    stage = Stage("RESEARCH", lambda state, result: StageRun(state, expected))
+
+    run = stage.run_typed(st, False, "res")
+
+    assert run.state is st
+    assert run.outcome is expected
+
+
+def test_legacy_stage_return_has_no_direct_outcome():
+    st = AgentState()
+    run = Stage("RESEARCH", lambda state, result: state).run_typed(st, False, "res")
+    assert run.state is st
+    assert run.outcome is None
 
 
 def test_registry_binds_all_eleven_phases():

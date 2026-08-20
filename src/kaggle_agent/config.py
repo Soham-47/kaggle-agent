@@ -211,8 +211,8 @@ class Settings:
 
     @property
     def browser_submit_fallback(self) -> bool:
-        """If MCP+API submit fail, try browser-harness UI (needs logged-in Chrome)."""
-        return bool(self.raw.get("submit", {}).get("browser_fallback", True))
+        """Deprecated: browser submission is forbidden; always disabled."""
+        return False
 
     @property
     def mcp_submit(self) -> bool:

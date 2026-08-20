@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 from datetime import datetime, timezone
 from pathlib import Path
@@ -20,6 +21,26 @@ def append_daily_log(line: str, root: Path | None = None, when: datetime | None 
         path.write_text(f"# daily {when.strftime('%Y-%m-%d')}\n\n", encoding="utf-8")
     with path.open("a", encoding="utf-8") as f:
         f.write(f"- {when.strftime('%H:%M:%S UTC')}: {line}\n")
+    return path
+
+
+def append_daily_event(
+    event: str,
+    payload: dict[str, object] | None = None,
+    root: Path | None = None,
+    when: datetime | None = None,
+) -> Path:
+    """Append a machine-readable daily event without creating a second memory store."""
+    when = when or datetime.now(timezone.utc)
+    path = memory_dir(root) / "daily" / f"{when.strftime('%Y-%m-%d')}.events.jsonl"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    record = {
+        "ts": when.isoformat(),
+        "event": event,
+        "payload": payload or {},
+    }
+    with path.open("a", encoding="utf-8") as fh:
+        fh.write(json.dumps(record, sort_keys=True) + "\n")
     return path
 
 

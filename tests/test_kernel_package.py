@@ -108,6 +108,81 @@ def test_write_kernel_package_uses_methods_json(tmp_path: Path):
     assert pkg.notebook_path.name == "agent_baseline.ipynb"
 
 
+def test_write_kernel_package_carries_image_artifact_manifest(tmp_path: Path):
+    root = _root_with_data(tmp_path)
+    pipe = root / "competitions" / "rsna_knee" / "pipeline"
+    pipe.mkdir(parents=True)
+    (pipe / "artifact_manifest.json").write_text(
+        json.dumps(
+            {
+                "template_version": "rsna-2d-dino-mil-v1",
+                "source_card_refs": ["source-dino"],
+                "model_sources": ["owner/dinov2/PyTorch/base/1"],
+                "prediction_hashes": ["abc"],
+            }
+        ),
+        encoding="utf-8",
+    )
+    (pipe / "image_contract.json").write_text('{"template": "rsna-2d-dino-mil-v1"}', encoding="utf-8")
+
+    comp = load_competition("rsna_knee", root)
+    pkg = write_kernel_package(comp, root=root, username="tester", exp_id="image-manifest")
+
+    meta = json.loads(pkg.metadata_path.read_text(encoding="utf-8"))
+    artifact = meta["experiment_manifest"]["artifact_manifest"]
+    assert artifact["template_version"] == "rsna-2d-dino-mil-v1"
+    assert (pkg.folder / "artifact_manifest.json").is_file()
+    assert (pkg.folder / "image_contract.json").is_file()
+
+
+def test_write_kernel_package_attaches_resume_dataset_outside_image_contract(tmp_path: Path):
+    root = _root_with_data(tmp_path)
+    pipe = root / "competitions" / "rsna_knee" / "pipeline"
+    pipe.mkdir(parents=True)
+    contract = '{"template": "rsna-2d-dino-mil-v1", "dataset_sources": ["owner/base"]}'
+    (pipe / "image_contract.json").write_text(contract, encoding="utf-8")
+    (pipe / "methods.json").write_text(
+        '{"dataset_sources": ["owner/base"], "model_sources": []}', encoding="utf-8"
+    )
+    (pipe / "resume_manifest.json").write_text(
+        json.dumps(
+            {
+                "dataset_source": "owner/private-fold-zero",
+                "checkpoint_filename": "fold_0_checkpoint.pt",
+                "sidecar_filename": "fold_0_checkpoint.json",
+            }
+        ),
+        encoding="utf-8",
+    )
+    comp = load_competition("rsna_knee", root)
+
+    pkg = write_kernel_package(comp, root=root, username="tester", exp_id="resume")
+
+    meta = json.loads(pkg.metadata_path.read_text(encoding="utf-8"))
+    assert meta["dataset_sources"] == ["owner/private-fold-zero", "owner/base"]
+    assert (pkg.folder / "resume_manifest.json").is_file()
+    assert (pipe / "image_contract.json").read_text(encoding="utf-8") == contract
+
+
+def test_resume_dataset_keeps_a_reserved_slot_when_cards_list_six_sources(tmp_path: Path):
+    root = _root_with_data(tmp_path)
+    pipe = root / "competitions" / "rsna_knee" / "pipeline"
+    pipe.mkdir(parents=True)
+    sources = [f"owner/data-{i}" for i in range(6)]
+    (pipe / "methods.json").write_text(
+        json.dumps({"dataset_sources": sources, "model_sources": []}), encoding="utf-8"
+    )
+    (pipe / "resume_manifest.json").write_text(
+        json.dumps({"dataset_source": "owner/private-fold-zero"}), encoding="utf-8"
+    )
+    comp = load_competition("rsna_knee", root)
+
+    pkg = write_kernel_package(comp, root=root, username="tester", exp_id="resume-slots")
+
+    datasets = json.loads(pkg.metadata_path.read_text(encoding="utf-8"))["dataset_sources"]
+    assert datasets == ["owner/private-fold-zero", *sources[:5]]
+
+
 def test_write_kernel_package_requires_study_ids(tmp_path: Path):
     root = tmp_path / "ka"
     import shutil

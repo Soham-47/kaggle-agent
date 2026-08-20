@@ -83,7 +83,8 @@ submit:
   # MCP notebook submit cannot push a kernel you do not already own.
   mcp: false
   api: true
-  browser_fallback: true
+  # Submission is API-only. Browser access is research-only.
+  browser_fallback: false
 judges:
   # LLM-judge TRAIN/SUBMIT output (mechanical kernel judge always runs).
   train: false
@@ -141,7 +142,8 @@ code:
     max_tokens: 16384
 
 eval:
-  block_submit: false
+  # Live submissions require the current cycle's mechanical eval report to pass.
+  block_submit: true
 
 kernel:
   # Build package always; push only if push=true AND orchestrator.dry_run=false
@@ -158,7 +160,7 @@ kernel:
 orchestrator:
   dry_run: true
   # research: Kaggle API first, then browser read-only pages
-  # submit: API (notebook push + submit_code) → browser_fallback
+  # submit: API only (notebook push + submit_code)
   phases:
     - LOCK
     - RESEARCH
