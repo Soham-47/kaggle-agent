@@ -12,8 +12,10 @@ Result: 478 passed, 38 failed, 1 deselected, 2 warnings in 23.04s
 Compile: uv run python -m compileall -q src (passed)
 ```
 
-The same test-name set was compared with the stabilization worktree. The
-stabilization worktree had `543 passed, 38 failed, 1 deselected, 2 warnings`;
+The same test-name set was compared with the stabilization worktree. Before
+the validation-only tests were added, the stabilization worktree had
+`543 passed, 38 failed, 1 deselected, 2 warnings`; after those tests it had
+`565 passed, 38 failed, 1 deselected, 2 warnings`.
 there were no supervisor-only failures.
 
 ## Classification
