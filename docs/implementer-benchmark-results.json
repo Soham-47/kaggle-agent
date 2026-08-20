@@ -1,0 +1,172 @@
+[
+  {
+    "attempts": 1,
+    "candidate_diff": "diff --git a/src/name_error.py b/src/name_error.py\nindex a7b6fea..5dcb752 100644\n--- a/src/name_error.py\n+++ b/src/name_error.py\n@@ -1,2 +1,2 @@\n def total(values):\n-    return sum(resultz)\n+    return sum(values)\n",
+    "case": "name_error",
+    "changed_lines": 2,
+    "files_changed": [
+      "src/name_error.py"
+    ],
+    "final_focused_pass": true,
+    "findings": [],
+    "first_focused_pass": true,
+    "llm_calls": 3,
+    "reason": "verified candidate is ready",
+    "review_verdict": "APPROVE",
+    "status": "PATCH_READY",
+    "tool_turns": 3
+  },
+  {
+    "attempts": 1,
+    "candidate_diff": "diff --git a/src/constant.py b/src/constant.py\nindex 42eaa62..f3a906d 100644\n--- a/src/constant.py\n+++ b/src/constant.py\n@@ -1,2 +1,2 @@\n def answer():\n-    return 2\n+    return 3\n",
+    "case": "wrong_constant",
+    "changed_lines": 2,
+    "files_changed": [
+      "src/constant.py"
+    ],
+    "final_focused_pass": true,
+    "findings": [],
+    "first_focused_pass": true,
+    "llm_calls": 3,
+    "reason": "verified candidate is ready",
+    "review_verdict": "APPROVE",
+    "status": "PATCH_READY",
+    "tool_turns": 3
+  },
+  {
+    "attempts": 1,
+    "candidate_diff": "diff --git a/src/slice_helper.py b/src/slice_helper.py\nindex b2f8800..4e2a0e3 100644\n--- a/src/slice_helper.py\n+++ b/src/slice_helper.py\n@@ -1,2 +1,2 @@\n def keep_items(items):\n-    return items[1:]\n+    return items[:]\n",
+    "case": "off_by_one",
+    "changed_lines": 2,
+    "files_changed": [
+      "src/slice_helper.py"
+    ],
+    "final_focused_pass": true,
+    "findings": [],
+    "first_focused_pass": true,
+    "llm_calls": 3,
+    "reason": "verified candidate is ready",
+    "review_verdict": "APPROVE",
+    "status": "PATCH_READY",
+    "tool_turns": 3
+  },
+  {
+    "attempts": 1,
+    "candidate_diff": "diff --git a/src/threshold.py b/src/threshold.py\nindex 312343d..9442de3 100644\n--- a/src/threshold.py\n+++ b/src/threshold.py\n@@ -1,2 +1,2 @@\n def meets(score, threshold):\n-    return score < threshold\n+    return score >= threshold\n",
+    "case": "wrong_conditional",
+    "changed_lines": 2,
+    "files_changed": [
+      "src/threshold.py"
+    ],
+    "final_focused_pass": true,
+    "findings": [],
+    "first_focused_pass": true,
+    "llm_calls": 4,
+    "reason": "verified candidate is ready",
+    "review_verdict": "APPROVE",
+    "status": "PATCH_READY",
+    "tool_turns": 4
+  },
+  {
+    "attempts": 1,
+    "candidate_diff": "diff --git a/src/mapping.py b/src/mapping.py\nindex 0e309e0..17b7d6e 100644\n--- a/src/mapping.py\n+++ b/src/mapping.py\n@@ -1,2 +1,2 @@\n def identifier(record):\n-    return record['name']\n+    return record['id']\n",
+    "case": "wrong_mapping_key",
+    "changed_lines": 2,
+    "files_changed": [
+      "src/mapping.py"
+    ],
+    "final_focused_pass": true,
+    "findings": [],
+    "first_focused_pass": true,
+    "llm_calls": 4,
+    "reason": "verified candidate is ready",
+    "review_verdict": "APPROVE",
+    "status": "PATCH_READY",
+    "tool_turns": 4
+  },
+  {
+    "attempts": 1,
+    "candidate_diff": "diff --git a/src/math_helper.py b/src/math_helper.py\nindex cafd8bd..415a90c 100644\n--- a/src/math_helper.py\n+++ b/src/math_helper.py\n@@ -1,4 +1,4 @@\n-from math import floor\n+from math import sqrt\n \n def distance(value):\n     return sqrt(value)\n",
+    "case": "missing_import",
+    "changed_lines": 2,
+    "files_changed": [
+      "src/math_helper.py"
+    ],
+    "final_focused_pass": true,
+    "findings": [],
+    "first_focused_pass": true,
+    "llm_calls": 3,
+    "reason": "verified candidate is ready",
+    "review_verdict": "APPROVE",
+    "status": "PATCH_READY",
+    "tool_turns": 3
+  },
+  {
+    "attempts": 1,
+    "candidate_diff": "diff --git a/src/forwarding.py b/src/forwarding.py\nindex 0692c99..b72c582 100644\n--- a/src/forwarding.py\n+++ b/src/forwarding.py\n@@ -2,4 +2,4 @@ def combine(left, right):\n     return left + right\n \n def join_pair(left, right):\n-    return combine(left)\n+    return combine(left, right)\n",
+    "case": "argument_forwarding",
+    "changed_lines": 2,
+    "files_changed": [
+      "src/forwarding.py"
+    ],
+    "final_focused_pass": true,
+    "findings": [],
+    "first_focused_pass": true,
+    "llm_calls": 3,
+    "reason": "verified candidate is ready",
+    "review_verdict": "APPROVE",
+    "status": "PATCH_READY",
+    "tool_turns": 3
+  },
+  {
+    "attempts": 1,
+    "candidate_diff": "diff --git a/src/parser.py b/src/parser.py\nindex 4d8ef31..b30eaa8 100644\n--- a/src/parser.py\n+++ b/src/parser.py\n@@ -1,2 +1,2 @@\n def parse_pair(text):\n-    return text.split(',')\n+    return [item.strip() for item in text.split(',')]\n",
+    "case": "parser_edge",
+    "changed_lines": 2,
+    "files_changed": [
+      "src/parser.py"
+    ],
+    "final_focused_pass": true,
+    "findings": [],
+    "first_focused_pass": true,
+    "llm_calls": 3,
+    "reason": "verified candidate is ready",
+    "review_verdict": "APPROVE",
+    "status": "PATCH_READY",
+    "tool_turns": 3
+  },
+  {
+    "attempts": 2,
+    "candidate_diff": "diff --git a/src/enum_helper.py b/src/enum_helper.py\nindex 989fa4b..3c8d776 100644\n--- a/src/enum_helper.py\n+++ b/src/enum_helper.py\n@@ -4,4 +4,4 @@ class Status(Enum):\n     READY = 'ready'\n \n def parse_status(value):\n-    return Status(value.upper())\n+    return Status(value.lower())\n",
+    "case": "enum_conversion",
+    "changed_lines": 2,
+    "files_changed": [
+      "src/enum_helper.py"
+    ],
+    "final_focused_pass": true,
+    "findings": [],
+    "first_focused_pass": false,
+    "llm_calls": 8,
+    "reason": "verified candidate is ready",
+    "review_verdict": "APPROVE",
+    "status": "PATCH_READY",
+    "tool_turns": 5
+  },
+  {
+    "attempts": 1,
+    "candidate_diff": "diff --git a/src/state_machine.py b/src/state_machine.py\nindex 065ff9c..e87227b 100644\n--- a/src/state_machine.py\n+++ b/src/state_machine.py\n@@ -1,4 +1,4 @@\n def transition(state, event):\n     if event == 'finish':\n-        return 'running'\n+        return 'done'\n     return state\n",
+    "case": "state_transition",
+    "changed_lines": 2,
+    "files_changed": [
+      "src/state_machine.py"
+    ],
+    "final_focused_pass": true,
+    "findings": [],
+    "first_focused_pass": true,
+    "llm_calls": 3,
+    "reason": "verified candidate is ready",
+    "review_verdict": "APPROVE",
+    "status": "PATCH_READY",
+    "tool_turns": 3
+  }
+]
