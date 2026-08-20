@@ -11,7 +11,7 @@ from kaggle_agent.paths import repo_root
 from kaggle_agent.state_md import load_state, save_state
 from kaggle_agent.submit.pending import load_pending, set_decision
 from kaggle_agent.supervisor.commands import SupervisorCommandQueue
-from kaggle_agent.supervisor.state import RuntimeLayout
+from kaggle_agent.supervisor.state import RuntimeLayout, SupervisorStateStore
 
 HELP = """Kaggle agent — what you can do
 
@@ -230,9 +230,16 @@ def _status_text(root: Path | None) -> str:
     pending = load_pending(root)
     loop = load_loop(root)
     supervisor = _supervisor_queue(root)
+    risk_latest = None
+    if supervisor is not None:
+        try:
+            risk_latest = SupervisorStateStore(
+                RuntimeLayout.for_repo((root or repo_root()).resolve())
+            ).read_json("risk-latest.json")
+        except (OSError, ValueError):
+            risk_latest = None
     pause = "yes — send /resume" if state.paused else "no"
-    return "\n".join(
-        [
+    lines = [
             "Agent status",
             "",
             f"Phase: {state.phase}",
@@ -260,10 +267,20 @@ def _status_text(root: Path | None) -> str:
             f"  Enabled: {'yes' if supervisor is not None else 'no'}",
             f"  Queued commands: {len(supervisor.pending()) if supervisor is not None else 0}",
             f"  Control paused: {'yes' if supervisor is not None and supervisor.paused() else 'no'}",
-            "",
-            "Tips: /run · /run dry · /yes · /no · /help",
         ]
-    )
+    if isinstance(risk_latest, dict):
+        decision = risk_latest.get("decision") or {}
+        lines.extend((
+            "",
+            "Latest repair risk",
+            f"  Incident: {risk_latest.get('incident_id') or 'none'}",
+            f"  Tier: {decision.get('tier', 'unknown')}",
+            f"  Candidate: {'allowed' if decision.get('candidate_generation_allowed') else 'blocked'}",
+            f"  Automatic promotion: {'allowed' if decision.get('automatic_promotion_allowed') else 'blocked'}",
+            f"  External state: {decision.get('external_state', 'unknown')}",
+        ))
+    lines.extend(("", "Tips: /run · /run dry · /yes · /no · /help"))
+    return "\n".join(lines)
 
 
 def _supervisor_queue(root: Path | None) -> SupervisorCommandQueue | None:

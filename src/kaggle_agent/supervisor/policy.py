@@ -13,8 +13,11 @@ class SafetyViolation(RuntimeError):
 
 
 PROTECTED_PATHS = frozenset({
-    "src/kaggle_agent/supervisor/policy.py", "src/kaggle_agent/supervisor/verify.py",
+    "src/kaggle_agent/supervisor/policy.py", "src/kaggle_agent/supervisor/risk.py",
+    "src/kaggle_agent/supervisor/config.py", "src/kaggle_agent/supervisor/verify.py",
     "src/kaggle_agent/supervisor/promote.py", "src/kaggle_agent/supervisor/rollback.py",
+    "src/kaggle_agent/config.py",
+    "config/settings.yaml", "config/profiles",
     "src/kaggle_agent/autonomy/runtime.py", "src/kaggle_agent/autonomy/outbox.py",
     "src/kaggle_agent/autonomy/stage_outputs.py", "src/kaggle_agent/autonomy/approval.py",
     "src/kaggle_agent/state_md.py", ".env", ".git",
@@ -88,9 +91,12 @@ class RepairPolicy:
     def semantic_violations(self, diff: str) -> tuple[str, ...]:
         markers = {
             "approval_bypass": ("first_submission_approved = true", "require_telegram_approve = false", "assume_approved=True"),
-            "submission_reconciliation": ("reconcile_with_kaggle", "submission_marker"),
+            "submission_reconciliation": ("reconcile_with_kaggle", "submission_marker", "external_action_key", "kernel_push_key", "submission_key"),
             "target_semantics": ("metric.direction", "target_columns", "competition target"),
             "browser_submission": ("browser_submit", "submit via browser"),
+            "approval_policy": ("first_submission_approved", "approval_required", "telegram_approve"),
+            "credential_policy": ("deepseek_api_key", "telegram_bot_token", "kaggle.json", "credential_loader"),
+            "promotion_policy": ("automatic_promotion", "repairacceptance", "protected_paths"),
         }
         return tuple(name for name, values in markers.items() if any(value.lower() in diff.lower() for value in values))
 
@@ -104,6 +110,9 @@ class RepairPolicy:
             violations.append("test_file_limit")
         if changed_lines > self.limits.max_changed_lines:
             violations.append("changed_line_limit")
-        if not self.limits.allow_dependency_changes and any(p in {"pyproject.toml", "uv.lock"} for p in paths):
+        if not self.limits.allow_dependency_changes and any(
+            p in {"pyproject.toml", "uv.lock"} or p == "requirements.txt" or p.startswith("requirements-")
+            for p in paths
+        ):
             violations.append("dependency_change")
         return tuple(dict.fromkeys(violations))

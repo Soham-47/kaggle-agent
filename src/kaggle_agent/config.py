@@ -216,6 +216,50 @@ def _validate_settings(raw: dict[str, Any], path: Path) -> None:
                                   "require_code_review": True, "require_full_tests": True}[key])
     _bool(_section(supervisor, "promotion", path), "automatic", path, False)
     _bool(_section(supervisor, "protected", path), "strict", path, True)
+    auto_safe = _section(supervisor, "auto_safe", path)
+    _bool(auto_safe, "enabled", path, False)
+    policy = _str(auto_safe, "policy", path, "risk_adaptive").lower()
+    if policy not in {"risk_adaptive", "conservative"}:
+        raise _config_error(path, "supervisor.auto_safe.policy", "must be risk_adaptive or conservative", policy)
+    ceiling = _section(auto_safe, "global_hard_ceiling", path)
+    ceilings = {
+        "max_source_files": _int(ceiling, "max_source_files", path, 12, minimum=1),
+        "max_test_files": _int(ceiling, "max_test_files", path, 6, minimum=1),
+        "max_changed_lines": _int(ceiling, "max_changed_lines", path, 1000, minimum=1),
+    }
+    profiles = _section(auto_safe, "profiles", path)
+    profile_defaults = {
+        "low": (True, True, 4, 2, 250, 2, "STATIC_REPRO", False),
+        "medium": (True, True, 8, 4, 600, 2, "STATIC_REPRO", True),
+        "high": (False, True, 12, 6, 1000, 2, "EXISTING_DETERMINISTIC_TEST", True),
+        "prohibited": (False, False, 0, 0, 0, 0, "EXISTING_DETERMINISTIC_TEST", False),
+    }
+    valid_reproductions = {"EXISTING_DETERMINISTIC_TEST", "NEW_REGRESSION_TEST", "DETERMINISTIC_COMMAND_REPRO", "STATIC_REPRO", "LOG_ONLY", "NO_REPRO"}
+    for name, defaults in profile_defaults.items():
+        profile = _section(profiles, name, path)
+        automatic, candidate, source_default, test_default, lines_default, attempts_default, repro_default, full_default = defaults
+        _bool(profile, "automatic_promotion", path, automatic)
+        _bool(profile, "allow_candidate_generation", path, candidate)
+        source = _int(profile, "max_source_files", path, source_default, minimum=0 if name == "prohibited" else 1)
+        tests = _int(profile, "max_test_files", path, test_default, minimum=0)
+        lines = _int(profile, "max_changed_lines", path, lines_default, minimum=0 if name == "prohibited" else 1)
+        _int(profile, "max_attempts", path, attempts_default, minimum=0 if name == "prohibited" else 1)
+        reproduction = _str(profile, "required_reproduction_strength", path, repro_default)
+        if reproduction not in valid_reproductions:
+            raise _config_error(path, f"supervisor.auto_safe.profiles.{name}.required_reproduction_strength", "is not a supported reproduction strength", reproduction)
+        for key, default in (("require_focused_tests", True), ("require_adjacent_tests", True),
+                             ("require_full_tests", full_default), ("require_static_safety", True),
+                             ("require_spec_review", True), ("require_code_review", True)):
+            _bool(profile, key, path, default)
+        if source > ceilings["max_source_files"] or tests > ceilings["max_test_files"] or lines > ceilings["max_changed_lines"]:
+            raise _config_error(path, f"supervisor.auto_safe.profiles.{name}", "exceeds global_hard_ceiling", {"source": source, "tests": tests, "lines": lines})
+        if name == "high" and _bool(profile, "automatic_promotion", path, automatic):
+            raise _config_error(path, "supervisor.auto_safe.profiles.high.automatic_promotion", "must be false", True)
+        if name == "prohibited" and _bool(profile, "allow_candidate_generation", path, candidate):
+            raise _config_error(path, "supervisor.auto_safe.profiles.prohibited.allow_candidate_generation", "must be false", True)
+        if name in {"low", "medium", "high"}:
+            if not _bool(profile, "require_spec_review", path, True) or not _bool(profile, "require_code_review", path, True):
+                raise _config_error(path, f"supervisor.auto_safe.profiles.{name}", "must require independent spec and code review", profile)
 
 
 def _validate_competition(raw: dict[str, Any], path: Path) -> None:

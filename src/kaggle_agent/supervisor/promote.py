@@ -27,6 +27,7 @@ class RepairAcceptance:
     external_state_safe: bool = False
     repair_budget_available: bool = False
     resume_plan_valid: bool = False
+    risk_policy_pass: bool = False
 
     @property
     def accepted(self) -> bool:

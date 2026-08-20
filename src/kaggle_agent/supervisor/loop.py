@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import uuid
+import inspect
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -17,6 +18,13 @@ from kaggle_agent.supervisor.spec import SpecReviewVerdict
 from kaggle_agent.autonomy.outbox import ExternalActionOutbox
 from kaggle_agent.supervisor.lock import SupervisorLock
 from kaggle_agent.supervisor.policy import RepairPolicy, SafetyViolation
+from kaggle_agent.supervisor.risk import (
+    ExternalStateCertainty,
+    RepairRiskTier,
+    evaluate_repair_risk,
+    external_state_for_incident,
+    record_risk_decision,
+)
 from kaggle_agent.supervisor.protocol import WorkerRequest
 from kaggle_agent.supervisor.recovery import SupervisorRecovery
 from kaggle_agent.supervisor.resume import ResumeRequest
@@ -146,13 +154,40 @@ class Supervisor:
         supervisor_config = self.settings.supervisor_config()
         if not supervisor_config.repair.enabled:
             return ("NEEDS_AUTHORITY", "supervisor repair is disabled")
+        if mode == "auto_safe" and not supervisor_config.promotion_automatic:
+            return ("NEEDS_AUTHORITY", "automatic promotion is disabled unless supervisor.promotion.automatic is true")
+        if mode == "auto_safe" and not supervisor_config.auto_safe.enabled:
+            return ("NEEDS_AUTHORITY", "risk-adaptive AUTO_SAFE is disabled unless supervisor.auto_safe.enabled is true")
         if classification.confidence < supervisor_config.repair.classification_min_confidence:
             return ("NEEDS_AUTHORITY", "classification confidence is below repair threshold")
         if sessions is None:
             return ("NEEDS_AUTHORITY", "DEEPSEEK_API_KEY is unavailable for repair roles")
+        external_state = external_state_for_incident(incident, outbox)
+        provisional_risk = evaluate_repair_risk(
+            incident, classification, None, external_state=external_state,
+            settings=supervisor_config.auto_safe,
+        )
+        self.store.write_json(
+            f"incidents/{incident.incident_id}/risk-pre-spec.json",
+            provisional_risk.to_dict(),
+        )
+        record_risk_decision(
+            self.store, provisional_risk, phase="pre-spec",
+            failure_class=classification.failure_class.value, incident_id=incident.incident_id,
+        )
+        if provisional_risk.tier is RepairRiskTier.PROHIBITED or external_state in {ExternalStateCertainty.PENDING, ExternalStateCertainty.AMBIGUOUS, ExternalStateCertainty.UNKNOWN}:
+            return ("NEEDS_AUTHORITY", "risk policy does not permit autonomous candidate generation")
         repair_id = f"repair-{incident.incident_id[:12]}-a1"
         try:
-            spec = sessions.author_spec(incident, classification, repair_id=repair_id)
+            author_spec = sessions.author_spec
+            parameters = inspect.signature(author_spec).parameters
+            if "limits" in parameters or any(parameter.kind is inspect.Parameter.VAR_KEYWORD for parameter in parameters.values()):
+                spec = author_spec(
+                    incident, classification, repair_id=repair_id,
+                    limits=(provisional_risk.max_source_files, provisional_risk.max_test_files, provisional_risk.max_changed_lines),
+                )
+            else:
+                spec = author_spec(incident, classification, repair_id=repair_id)
             spec.save(self.layout.state_root)
             spec_review = sessions.review_spec(incident, classification, spec)
             self.store.write_json(
@@ -167,18 +202,27 @@ class Supervisor:
         except (AgentProtocolError, OSError, ValueError) as exc:
             return ("NEEDS_AUTHORITY", str(exc))
         limits = supervisor_config.repair
-        if (
-            spec.max_changed_source_files > limits.max_changed_source_files
-            or spec.max_changed_test_files > limits.max_changed_test_files
-            or spec.max_changed_lines > limits.max_changed_lines
+        if mode != "observe" and (
+            spec.max_changed_source_files > provisional_risk.max_source_files
+            or spec.max_changed_test_files > provisional_risk.max_test_files
+            or spec.max_changed_lines > provisional_risk.max_changed_lines
         ):
             return ("REJECTED", "RepairSpec exceeds configured repair limits")
+        spec_risk = evaluate_repair_risk(
+            incident, classification, spec, external_state=external_state,
+            settings=supervisor_config.auto_safe,
+        )
+        self.store.write_json(f"repairs/{repair_id}/risk-spec.json", spec_risk.to_dict())
+        record_risk_decision(
+            self.store, spec_risk, phase="post-spec",
+            failure_class=classification.failure_class.value, incident_id=incident.incident_id,
+        )
+        if not spec_risk.candidate_generation_allowed:
+            return ("NEEDS_AUTHORITY", "risk policy does not permit this RepairSpec")
         if mode == "observe":
             return ("SPEC_READY", repair_id)
         if spec_review.verdict is not SpecReviewVerdict.APPROVE:
             return ("REJECTED", "independent spec review did not approve")
-        if mode == "auto_safe" and not supervisor_config.promotion_automatic:
-            return ("NEEDS_AUTHORITY", "automatic promotion is disabled unless supervisor.promotion.automatic is true")
         if mode not in {"repair_only", "auto_safe"}:
             return ("NEEDS_AUTHORITY", "automatic activation is disabled for this supervisor mode")
         coordinator = RepairCoordinator(
@@ -187,6 +231,7 @@ class Supervisor:
             max_attempts_per_incident=limits.max_attempts_per_incident,
             max_repairs_per_cycle=limits.max_repairs_per_cycle,
             max_repairs_per_day=limits.max_repairs_per_day,
+            risk_settings=supervisor_config.auto_safe,
         )
         try:
             outcome = coordinator.execute(
@@ -195,11 +240,22 @@ class Supervisor:
                 reviewer=lambda inc, approved, diff, verification: sessions.review_code(inc, approved, diff, verification),
                 cycle_id=incident.cycle_id,
                 mode=mode,
-                max_implementation_attempts=limits.max_attempts_per_incident,
+                max_implementation_attempts=min(limits.max_attempts_per_incident, spec_risk.max_implementation_attempts),
+                risk_decision=spec_risk,
             )
         except (AgentProtocolError, OSError, RuntimeError, ValueError) as exc:
             return ("REJECTED", str(exc))
         if mode == "auto_safe" and outcome.status == "ACCEPTED":
+            if outcome.risk_decision is None or not outcome.risk_decision.automatic_promotion_allowed:
+                self.store.write_json(
+                    "promotion.json",
+                    {
+                        "status": "BLOCKED",
+                        "reason": "risk policy requires authority before automatic promotion",
+                        "risk_decision": outcome.risk_decision.to_dict() if outcome.risk_decision else None,
+                    },
+                )
+                return ("NEEDS_AUTHORITY", "risk policy requires authority before automatic promotion")
             return self._promote_and_resume(outcome, incident, selected_competition=competition)
         return (outcome.status, outcome.candidate_revision or "candidate stored")
 
@@ -249,6 +305,13 @@ class Supervisor:
         resume = outcome.resume_request
         if generation is None or resume is None or not outcome.acceptance.accepted:
             return ("NEEDS_AUTHORITY", "accepted repair did not produce a promotable generation and resume request")
+        risk_decision = getattr(outcome, "risk_decision", None)
+        if risk_decision is not None and not risk_decision.automatic_promotion_allowed:
+            self.store.write_json(
+                "promotion.json",
+                {"status": "BLOCKED", "reason": "risk policy requires authority before promotion", "risk_decision": risk_decision.to_dict()},
+            )
+            return ("NEEDS_AUTHORITY", "risk policy requires authority before promotion")
         try:
             if read_git_revision(Path(generation.path)) != generation.revision.git_sha:
                 return ("REJECTED", "candidate generation revision does not match its recorded commit")
