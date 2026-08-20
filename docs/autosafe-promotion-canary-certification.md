@@ -4,7 +4,7 @@
 
 - Starting merged-main SHA: `b11ddefd4fd40cc0daebd13dea3b6570f8133a68`
 - Branch: `supervisor-autosafe-canary-current`
-- Final local revision: `9f6aada`
+- Final local revision: `c29a513`
 - The original dirty checkout was preserved outside this worktree.
 
 Baseline verification before the change:
