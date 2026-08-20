@@ -36,11 +36,11 @@ class RepairAgentBoundary:
         if name not in REPAIR_AGENT_TOOLS:
             raise ToolPolicyError(f"tool is not available to repair agent: {name}")
         if name == "read_file":
-            return self.tools.read_file(str(args.get("path", "")))
+            return self.tools.read_file(str(args.get("path") or args.get("file_path") or ""))
         if name == "search_code":
             return self.tools.search_code(str(args.get("query", "")))
         if name == "write_file":
-            return self.tools.write_file(str(args.get("path", "")), str(args.get("content", "")), expected_sha256=str(args.get("expected_sha256", "")))
+            return self.tools.write_file(str(args.get("path") or args.get("file_path") or ""), str(args.get("content", "")), expected_sha256=str(args.get("expected_sha256", "")))
         if name == "apply_patch":
             return self.tools.apply_patch(str(args.get("patch", "")))
         if name == "run_reproduction":
