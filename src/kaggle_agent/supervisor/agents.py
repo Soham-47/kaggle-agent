@@ -9,7 +9,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
-from kaggle_agent.llm.zen_client import ZenClient
+from kaggle_agent.llm.zen_client import ZenClient, ZenError
 from kaggle_agent.supervisor.classifier import FailureClass, FailureClassification
 from kaggle_agent.supervisor.incidents import Incident
 from kaggle_agent.supervisor.review import Review, ReviewFinding, ReviewVerdict
@@ -110,9 +110,10 @@ _CODE_REVIEW_FIELDS = {
 class DeepSeekSupervisorAgents:
     """Classifier/spec/reviewer/implementer roles backed by fresh sessions."""
 
-    def __init__(self, router: Any, *, max_tool_turns: int = 30) -> None:
+    def __init__(self, router: Any, *, max_tool_turns: int = 30, max_attempts: int = 2) -> None:
         self.router = router
         self.max_tool_turns = max_tool_turns
+        self.max_attempts = max(1, max_attempts)
 
     @classmethod
     def from_env(cls, *, model: str = "deepseek-chat") -> "DeepSeekSupervisorAgents | None":
@@ -135,6 +136,33 @@ class DeepSeekSupervisorAgents:
         client = self.router.client
         return client.chat_text(self.router.model(role), system, user, temperature=0, max_tokens=4096)
 
+    def _request(
+        self,
+        role: str,
+        system: str,
+        artifact: Mapping[str, Any],
+        parse: Callable[[str], Any],
+    ) -> Any:
+        """Call a role with bounded fresh-session retries and strict parsing."""
+        last_error: AgentProtocolError | None = None
+        for attempt in range(self.max_attempts):
+            retry_hint = ""
+            if attempt:
+                retry_hint = (
+                    " The previous response was invalid. Return only a JSON object that "
+                    "matches the exact schema and enum constraints in this instruction."
+                )
+            try:
+                return parse(self._chat(role, system + retry_hint, artifact))
+            except AgentProtocolError as exc:
+                last_error = exc
+            except ZenError:
+                last_error = AgentProtocolError(
+                    f"{role} provider failure after bounded retry"
+                )
+        assert last_error is not None
+        raise last_error
+
     @staticmethod
     def _incident(incident: Incident) -> dict[str, Any]:
         value = incident.to_dict()
@@ -143,79 +171,154 @@ class DeepSeekSupervisorAgents:
         return value
 
     def classify(self, incident: Incident) -> FailureClassification:
-        raw = _object(
-            self._chat("supervisor_classifier", "Classify this sanitized incident. Return only the required JSON object.", {"incident": self._incident(incident)}),
-            "classifier", _CLASSIFIER_FIELDS,
-        )
-        try:
-            failure_class = FailureClass(_str(raw["failure_class"], "classifier", "failure_class"))
-        except ValueError as exc:
-            raise AgentProtocolError("classifier.failure_class is invalid") from exc
-        return FailureClassification(
-            failure_class, _confidence(raw["confidence"], "classifier"),
-            _bool(raw["repairable"], "classifier", "repairable"),
-            _list(raw["likely_files"], "classifier", "likely_files"),
-            _str(raw["reason"], "classifier", "reason"),
+        allowed = ", ".join(item.value for item in FailureClass)
+
+        def parse(raw_text: str) -> FailureClassification:
+            raw = _object(raw_text, "classifier", _CLASSIFIER_FIELDS)
+            try:
+                failure_class = FailureClass(_str(raw["failure_class"], "classifier", "failure_class"))
+            except ValueError as exc:
+                raise AgentProtocolError("classifier.failure_class is invalid") from exc
+            return FailureClassification(
+                failure_class, _confidence(raw["confidence"], "classifier"),
+                _bool(raw["repairable"], "classifier", "repairable"),
+                _list(raw["likely_files"], "classifier", "likely_files"),
+                _str(raw["reason"], "classifier", "reason"),
+            )
+
+        return self._request(
+            "supervisor_classifier",
+            f"You are a strict JSON classifier. Classify this sanitized incident. Return exactly one JSON object and nothing else, with exactly these five keys: failure_class, confidence, repairable, likely_files, reason. "
+            f"failure_class MUST be one of [{allowed}]. For a deterministic Python NameError in project code, use CODE_DEFECT, never NameError. "
+            "confidence must be a number from 0 to 1. repairable must be true or false. "
+            "likely_files must be a JSON array of strings. reason must be a JSON string. "
+            "Do not include session_id, markdown, or any extra key.",
+            {"incident": self._incident(incident)},
+            parse,
         )
 
     def author_spec(self, incident: Incident, classification: FailureClassification, *, repair_id: str) -> RepairSpec:
-        raw = _object(
-            self._chat("repair_spec_author", "Inspect the explicit incident and classification, then author one minimal RepairSpec. Return only the spec fields.", {"incident": self._incident(incident), "classification": {"failure_class": classification.failure_class.value, "confidence": classification.confidence, "repairable": classification.repairable, "likely_files": list(classification.likely_files), "reason": classification.reason}}),
-            "spec author", _SPEC_FIELDS,
+        def parse(raw_text: str) -> RepairSpec:
+            raw = _object(raw_text, "spec author", _SPEC_FIELDS)
+            for field in (
+                "title", "failed_stage", "observed_failure", "root_cause",
+                "current_behavior", "expected_behavior", "reproduction_mode",
+                "risk_level", "proposed_resume_stage",
+            ):
+                _str(raw[field], "spec author", field)
+            for field in (
+                "likely_files", "reproduction_commands", "invariants",
+                "forbidden_changes", "required_tests", "verification_commands",
+                "allowed_paths", "acceptance_criteria",
+            ):
+                _list(raw[field], "spec author", field)
+            if raw["reproduction_mode"] not in {
+                "NEW_REGRESSION_TEST", "EXISTING_TEST_REPRO", "STATIC_REPRO", "NO_CODE_REPAIR",
+            }:
+                raise AgentProtocolError("spec author.reproduction_mode is invalid")
+            if any(
+                not path.strip() or "*" in path or path in {".", "/"}
+                for path in raw["allowed_paths"]
+            ):
+                raise AgentProtocolError("spec author.allowed_paths must be narrow")
+            limits = (raw["max_changed_source_files"], raw["max_changed_test_files"], raw["max_changed_lines"])
+            if not all(isinstance(item, int) and not isinstance(item, bool) for item in limits):
+                raise AgentProtocolError("spec author change limits must be integers")
+            if limits[0] < 1 or limits[0] > 8 or limits[1] < 0 or limits[1] > 5 or limits[2] < 1 or limits[2] > 500:
+                raise AgentProtocolError("spec author change limits exceed supervisor policy")
+            value = dict(raw)
+            value.update({
+                "repair_id": repair_id,
+                "incident_id": incident.incident_id,
+                "base_generation": incident.generation_id,
+                "base_revision": asdict(incident.revision),
+            })
+            try:
+                return RepairSpec.from_dict(value)
+            except (KeyError, TypeError, ValueError) as exc:
+                raise AgentProtocolError(f"spec author returned invalid RepairSpec: {exc}") from exc
+
+        return self._request(
+            "repair_spec_author",
+            "Inspect the explicit incident and classification, then author one minimal RepairSpec. "
+            "Return only one JSON object containing exactly these fields: "
+            + ", ".join(sorted(_SPEC_FIELDS))
+            + ". Every field ending in _files, _commands, _changes, _criteria, invariants, "
+            "forbidden_changes, required_tests, verification_commands, likely_files, or allowed_paths "
+            "must be a JSON array where applicable; acceptance_criteria must be an array of strings. "
+            "reproduction_mode must be NEW_REGRESSION_TEST, EXISTING_TEST_REPRO, STATIC_REPRO, or NO_CODE_REPAIR. "
+            "Use integer limits of 1..8 source files, 0..5 test files, and 1..500 changed lines. "
+            "Keep allowed_paths narrow with no wildcards or repository-wide paths.",
+            {"incident": self._incident(incident), "classification": {"failure_class": classification.failure_class.value, "confidence": classification.confidence, "repairable": classification.repairable, "likely_files": list(classification.likely_files), "reason": classification.reason}},
+            parse,
         )
-        limits = (raw["max_changed_source_files"], raw["max_changed_test_files"], raw["max_changed_lines"])
-        if not all(isinstance(item, int) and not isinstance(item, bool) for item in limits):
-            raise AgentProtocolError("spec author change limits must be integers")
-        if limits[0] < 1 or limits[0] > 8 or limits[1] < 1 or limits[1] > 5 or limits[2] < 1 or limits[2] > 500:
-            raise AgentProtocolError("spec author change limits exceed supervisor policy")
-        value = dict(raw)
-        value.update({
-            "repair_id": repair_id,
-            "incident_id": incident.incident_id,
-            "base_generation": incident.generation_id,
-            "base_revision": asdict(incident.revision),
-        })
-        try:
-            return RepairSpec.from_dict(value)
-        except (KeyError, TypeError, ValueError) as exc:
-            raise AgentProtocolError(f"spec author returned invalid RepairSpec: {exc}") from exc
 
     def review_spec(self, incident: Incident, classification: FailureClassification, spec: RepairSpec) -> SpecReview:
-        raw = _object(
-            self._chat("spec_reviewer", "Independently review the incident, classification, and RepairSpec. Return only the required JSON object.", {"incident": self._incident(incident), "classification": classification.failure_class.value, "spec": spec.to_dict()}),
-            "spec reviewer", _SPEC_REVIEW_FIELDS,
-        )
-        try:
-            verdict = SpecReviewVerdict(_str(raw["verdict"], "spec reviewer", "verdict").upper())
-        except ValueError as exc:
-            raise AgentProtocolError("spec reviewer verdict is invalid") from exc
-        return SpecReview(
-            verdict,
-            _finding_text_list(raw["blocking_findings"], "spec reviewer", "blocking_findings"),
-            _finding_text_list(raw["non_blocking_findings"], "spec reviewer", "non_blocking_findings"),
-            _str(raw["rationale"], "spec reviewer", "rationale"),
+        def parse(raw_text: str) -> SpecReview:
+            raw = _object(raw_text, "spec reviewer", _SPEC_REVIEW_FIELDS)
+            try:
+                verdict = SpecReviewVerdict(_str(raw["verdict"], "spec reviewer", "verdict").upper())
+            except ValueError as exc:
+                raise AgentProtocolError("spec reviewer verdict is invalid") from exc
+            return SpecReview(
+                verdict,
+                _finding_text_list(raw["blocking_findings"], "spec reviewer", "blocking_findings"),
+                _finding_text_list(raw["non_blocking_findings"], "spec reviewer", "non_blocking_findings"),
+                _str(raw["rationale"], "spec reviewer", "rationale"),
+            )
+
+        return self._request(
+            "spec_reviewer",
+            "Independently review the incident, classification, and RepairSpec. "
+            "Return exactly one JSON object with fields verdict, blocking_findings, "
+            "non_blocking_findings, rationale. verdict must be APPROVE, REVISE, "
+            "NOT_CODE_DEFECT, or NEEDS_AUTHORITY.",
+            {"incident": self._incident(incident), "classification": classification.failure_class.value, "spec": spec.to_dict()},
+            parse,
         )
 
     def review_code(self, incident: Incident, spec: RepairSpec, diff: str, verification: Any) -> Review:
-        raw = _object(
-            self._chat("code_reviewer", "Independently review the candidate diff and verification. Return only the required JSON object.", {"incident": self._incident(incident), "spec": spec.to_dict(), "diff": diff, "verification": verification.to_dict() if hasattr(verification, "to_dict") else str(verification)}),
-            "code reviewer", _CODE_REVIEW_FIELDS,
+        return self._request(
+            "code_reviewer",
+            "Independently review the candidate diff and verification. Return exactly one JSON object with "
+            "the required typed fields: verdict, root_cause_fixed, tests_sufficient, idempotency_safe, "
+            "checkpoint_safe, policy_safe, blocking_findings, non_blocking_findings. "
+            "verdict must be APPROVE, REJECT, REVISE, NOT_CODE_DEFECT, or NEEDS_AUTHORITY. "
+            "Each finding must contain severity, file, issue, and required_fix.",
+            {"incident": self._incident(incident), "spec": spec.to_dict(), "diff": diff, "verification": verification.to_dict() if hasattr(verification, "to_dict") else str(verification)},
+            lambda raw: _parse_review(_object(raw, "code reviewer", _CODE_REVIEW_FIELDS)),
         )
-        return _parse_review(raw)
 
     def implement(self, root: Path, spec: RepairSpec) -> "RepairImplementerResult":
         boundary = RepairAgentBoundary(root)
-        system = "Implement exactly this approved RepairSpec. Read before writing. Use only the provided tools. Return a JSON action object."
+        system = (
+            "Implement exactly this approved RepairSpec. Read before writing. Use only the provided tools. "
+            "Return exactly one JSON action object with action, tool, args, reason. "
+            'action must be exactly "tool" or "done"; when invoking a tool, use action "tool" '
+            'and put the tool name in the separate tool field. Do not use action "read_file" or any other tool name. '
+            "Successful tool results are in messages as {tool, result}; use those results, do not repeat a successful read, "
+            "and apply the smallest patch or write after inspecting the source. Use args.path (not file_path) for file tools. "
+            "After a successful read of an allowed file, never read that same file again: use its returned content and the approved spec to edit it, or stop with done if the required fix is not provable. "
+            "Prefer apply_patch for edits. Do not use write_file unless an expected_sha256 value is available from the tool context. "
+            "Allowed tools are list_files, read_file, search_code, git_diff, write_file, apply_patch, "
+            "run_reproduction, run_focused_test, run_compile_check, done. "
+            "Do not use shell, network, credentials, Git mutation, dependencies, or protected files."
+        )
         messages: list[dict[str, Any]] = []
         for _ in range(self.max_tool_turns):
-            raw = self._chat("repair_implementer", system, {"spec": spec.to_dict(), "messages": messages})
-            action = _object(raw, "repair implementer", {"action", "tool", "args", "reason"})
+            action = self._request(
+                "repair_implementer",
+                system,
+                {"spec": spec.to_dict(), "messages": messages},
+                lambda raw: _object(raw, "repair implementer", {"action", "tool", "args", "reason"}),
+            )
             kind = _str(action["action"], "repair implementer", "action")
             reason = _str(action["reason"], "repair implementer", "reason")
             if kind == "done":
                 return RepairImplementerResult(True, reason)
             if kind != "tool":
-                return RepairImplementerResult(True, f"policy: unsupported action {kind}")
+                messages.append({"error": f"unsupported action {kind}; use action tool or done"})
+                continue
             tool = _str(action["tool"], "repair implementer", "tool")
             args = action["args"]
             if not isinstance(args, dict):

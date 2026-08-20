@@ -5,7 +5,9 @@ from pathlib import Path
 import pytest
 
 from kaggle_agent.autonomy.outcomes import StageOutcome
+from kaggle_agent.llm.zen_client import ZenError
 from kaggle_agent.supervisor.agents import AgentProtocolError, DeepSeekSupervisorAgents
+from kaggle_agent.supervisor.repair_agent import RepairAgentBoundary
 from kaggle_agent.supervisor.classifier import FailureClass
 from kaggle_agent.supervisor.generation import RuntimeRevision
 from kaggle_agent.supervisor.incidents import Incident
@@ -18,6 +20,7 @@ class _FakeRouter:
     def __init__(self, responses):
         self.client = self
         self.responses = list(responses)
+        self.last_response = None
         self.calls = []
 
     def model(self, role):
@@ -25,7 +28,11 @@ class _FakeRouter:
 
     def chat_text(self, model, system, user, **kwargs):
         self.calls.append((model, system, user, kwargs))
-        return self.responses.pop(0)
+        if self.responses:
+            self.last_response = self.responses.pop(0)
+        if self.last_response is None:
+            raise AssertionError("fake router has no response")
+        return self.last_response
 
 
 def _incident() -> Incident:
@@ -143,6 +150,64 @@ def test_production_roles_use_fresh_sessions_and_explicit_typed_artifacts():
     assert "previous_response" not in json.loads(router.calls[2][2])
 
 
+def test_classifier_prompt_enumerates_allowed_failure_classes():
+    router = _FakeRouter([_classification_response()])
+    agents = DeepSeekSupervisorAgents(router)
+
+    agents.classify(_incident())
+
+    prompt = router.calls[0][1]
+    assert "CODE_DEFECT" in prompt
+    assert "TRANSIENT_EXTERNAL" in prompt
+    assert "PENDING_EXTERNAL" in prompt
+    assert "use CODE_DEFECT, never NameError" in prompt
+
+
+def test_malformed_role_output_gets_one_bounded_fresh_session_retry():
+    router = _FakeRouter(["{\"failure_class\": \"NameError\"}", _classification_response()])
+    agents = DeepSeekSupervisorAgents(router)
+
+    classification = agents.classify(_incident())
+
+    assert classification.failure_class is FailureClass.CODE_DEFECT
+    assert len(router.calls) == 2
+    assert json.loads(router.calls[0][2])["session_id"] != json.loads(router.calls[1][2])["session_id"]
+
+
+def test_provider_failure_retries_once_then_fails_closed():
+    class FailingRouter(_FakeRouter):
+        def chat_text(self, model, system, user, **kwargs):
+            self.calls.append((model, system, user, kwargs))
+            raise ZenError("provider unavailable")
+
+    router = FailingRouter([])
+    agents = DeepSeekSupervisorAgents(router)
+
+    with pytest.raises(AgentProtocolError, match="provider failure after bounded retry"):
+        agents.classify(_incident())
+
+    assert len(router.calls) == 2
+
+
+def test_implementer_prompt_requires_tool_action_envelope():
+    router = _FakeRouter([
+        _classification_response(),
+        _spec_response(),
+        json.dumps({"action": "done", "tool": "done", "args": {}, "reason": "complete"}),
+    ])
+    agents = DeepSeekSupervisorAgents(router)
+
+    incident = _incident()
+    spec = agents.author_spec(incident, agents.classify(incident), repair_id="repair-1")
+    agents.implement(Path("."), spec)
+
+    prompt = next(call[1] for call in router.calls if call[0] == "model-for-repair_implementer")
+    assert 'action must be exactly "tool" or "done"' in prompt
+    assert 'action "tool"' in prompt
+    assert 'Successful tool results are in messages' in prompt
+    assert 'never read that same file again' in prompt
+
+
 @pytest.mark.parametrize(
     "response, message",
     [
@@ -162,6 +227,27 @@ def test_spec_author_rejects_unbounded_or_malformed_model_output():
     agents = DeepSeekSupervisorAgents(_FakeRouter([_classification_response(), response]))
     incident = _incident()
     classification = agents.classify(incident)
+    with pytest.raises(AgentProtocolError, match="spec author"):
+        agents.author_spec(incident, classification, repair_id="repair-1")
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"acceptance_criteria": "one string, not an array"},
+        {"reproduction_mode": "command"},
+        {"max_changed_test_files": -1},
+        {"allowed_paths": ["src/**"]},
+    ],
+)
+def test_spec_author_rejects_loosely_typed_or_broad_specs(overrides):
+    agents = DeepSeekSupervisorAgents(_FakeRouter([
+        _classification_response(),
+        _spec_response(**overrides),
+    ]))
+    incident = _incident()
+    classification = agents.classify(incident)
+
     with pytest.raises(AgentProtocolError, match="spec author"):
         agents.author_spec(incident, classification, repair_id="repair-1")
 
@@ -211,6 +297,14 @@ def test_repair_implementer_uses_only_restricted_tools(tmp_path: Path):
     assert all("DEEPSEEK_API_KEY" not in call[2] for call in router.calls)
 
 
+def test_repair_boundary_accepts_model_file_path_alias(tmp_path: Path):
+    source = tmp_path / "src" / "x.py"
+    source.parent.mkdir()
+    source.write_text("x = 1\n", encoding="utf-8")
+
+    assert RepairAgentBoundary(tmp_path).call("read_file", file_path="src/x.py") == "x = 1\n"
+
+
 def test_repair_implementer_stops_on_unavailable_shell_tool(tmp_path: Path):
     router = _FakeRouter([
         _classification_response(),
@@ -229,3 +323,19 @@ def test_repair_implementer_stops_on_unavailable_shell_tool(tmp_path: Path):
 
     assert result.stopped is True
     assert "policy" in result.reason
+
+
+def test_repair_implementer_recovers_from_invalid_action_envelope(tmp_path: Path):
+    router = _FakeRouter([
+        _classification_response(),
+        _spec_response(),
+        json.dumps({"action": "read_file", "tool": "read_file", "args": {"path": "src/x.py"}, "reason": "inspect"}),
+        json.dumps({"action": "done", "tool": "done", "args": {}, "reason": "complete"}),
+    ])
+    agents = DeepSeekSupervisorAgents(router)
+    incident = _incident()
+    spec = agents.author_spec(incident, agents.classify(incident), repair_id="repair-1")
+
+    result = agents.implement(tmp_path, spec)
+
+    assert result.reason == "complete"
