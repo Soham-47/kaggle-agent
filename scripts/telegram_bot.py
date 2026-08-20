@@ -14,18 +14,12 @@ src = ROOT / "src"
 if str(src) not in sys.path:
     sys.path.insert(0, str(src))
 
-_env = ROOT / ".env"
-if _env.is_file():
-    for line in _env.read_text(encoding="utf-8").splitlines():
-        line = line.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        k, v = line.split("=", 1)
-        os.environ.setdefault(k.strip(), v.strip().strip("'\""))
-
+from kaggle_agent.config import load_dotenv  # noqa: E402
 from kaggle_agent.notify.commands import process_updates  # noqa: E402
 from kaggle_agent.notify.run_agent import start_agent_cycle_async  # noqa: E402
 from kaggle_agent.notify.telegram import TelegramClient, TelegramError  # noqa: E402
+
+load_dotenv(ROOT)
 
 
 def _persist_chat_id(chat_id: str) -> None:
