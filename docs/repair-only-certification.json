@@ -3,11 +3,10 @@
   "active_before": "generation-0001",
   "active_generation_unchanged": true,
   "allowed_paths": [
-    "src/bug.py",
-    "tests/test_bug.py"
+    "src/bug.py"
   ],
-  "candidate_path": "/tmp/kaggle-agent-repair-only-7gfi2qe8/state/worktrees/repair-only-name-error/a1",
-  "candidate_revision": "5dec874f2344e45fda8bd069fa8fb9020c86269f",
+  "candidate_path": "/tmp/kaggle-agent-repair-only-8i0km02k/state/worktrees/repair-only-name-error/a1",
+  "candidate_revision": "dcdf4cb4a8091d31b276d3b7e66f5e0f96fca72f",
   "classification": "CODE_DEFECT",
   "confidence": 0.95,
   "findings": [],
@@ -23,7 +22,7 @@
   "status": "CANDIDATE_ACCEPTED",
   "verification_commands": [
     "uv run pytest tests/test_bug.py -x",
-    "uv run python -m py_compile src/bug.py"
+    "uv run python -m compileall src/bug.py"
   ],
   "verification_feedback": []
 }

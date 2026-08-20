@@ -15,13 +15,13 @@ was not used for rollout validation.
 
 ## Security precondition
 
-The previously exposed DeepSeek credential was not used. Replacement-key
-rotation could not be verified through the normal repository configuration in
-this run, so the provider-dependent rollout is blocked:
+The previously exposed DeepSeek credential was not used. The replacement
+credential was loaded through the normal dotenv path and validated by the
+existing synthetic role smoke; its value is not recorded here:
 
 ```text
-DeepSeek credential: UNAVAILABLE (replacement unverified)
-Provider calls: 0
+DeepSeek credential: AVAILABLE
+Provider calls: synthetic smoke and one disposable REPAIR_ONLY attempt
 ```
 
 No authorization header, environment dump, or credential value was persisted.
@@ -54,17 +54,17 @@ It is selected only with:
 kaggle-agent supervisor --profile controlled-auto-safe --competition <id>
 ```
 
-The profile sets:
+The profile currently sets:
 
 ```text
 mode: auto_safe
 automatic promotion: true
-max repairs/cycle: 1
-max repairs/day: 2
-max attempts/incident: 2
-max changed source files: 2
+max repairs/cycle: 5
+max repairs/day: 20
+max attempts/incident: 3
+max changed source files: 8
 max changed test files: 1
-max changed lines: 120
+max changed lines: 500
 dependency changes: disabled
 spec review: required
 code review: required
@@ -109,12 +109,29 @@ Telegram messages sent: 0
 
 The existing command and ownership tests passed without contacting Telegram.
 
+## DeepSeek provider smoke
+
+The existing five-role synthetic smoke was run with independent production
+sessions. It returned:
+
+```text
+classifier: CODE_DEFECT
+spec review: APPROVE
+implementer: verified candidate is ready
+code review: APPROVE
+```
+
+The reviewer reported only an informational disposable-environment note; no
+blocking finding was returned.
+
 ## REPAIR_ONLY
 
-No new real provider-backed REPAIR_ONLY candidate was attempted because the
-DeepSeek replacement credential was unverified. The previously merged
-REPAIR_ONLY certification remains in the main history; this branch does not
-claim a fresh provider recertification.
+Two real disposable provider-backed REPAIR_ONLY attempts were run. The first
+rejected an implementer candidate that exceeded its approved
+`max_changed_lines: 4` limit. The second produced a one-file, two-line patch,
+passed focused verification, received an independent `APPROVE`, and produced
+a candidate commit. Both attempts kept the active generation unchanged. The
+sanitized successful result is retained in `docs/repair-only-certification.json`.
 
 The provider-independent supervisor, recovery, safety, command, and acceptance
 tests passed. No active generation was changed by this validation work.
@@ -228,15 +245,13 @@ or protected-path semantics were redesigned. Checked-in defaults remain safe.
 
 ```text
 OBSERVE: READY (prior certification retained; fresh live shadow CONDITIONAL)
-REPAIR_ONLY: READY (prior certification retained; fresh provider run CONDITIONAL)
+REPAIR_ONLY: READY (fresh disposable provider-backed candidate accepted; no promotion)
 AUTO_SAFE_CANARY: READY (prior merged synthetic certification retained)
 RESTRICTED_PRODUCTION_AUTO_SAFE: NOT READY
 UNRESTRICTED_AUTO_SAFE: NOT READY
 ```
 
-Restricted production AUTO_SAFE is not ready because the replacement DeepSeek
-credential was not verified and the required fresh real OBSERVE, Telegram,
-real-cycle, and controlled production repair validations were therefore not
-performed. The safe next step is to rotate/verify the replacement credential,
-rerun only the blocked provider-dependent tickets, and keep the rollout profile
-disabled until those results are recorded.
+Restricted production AUTO_SAFE is not ready because fresh real OBSERVE,
+Telegram, and real-cycle validations remain incomplete. The profile remains an
+explicit opt-in, with the existing upper repair budgets but a one-test-file
+cap, and unrestricted AUTO_SAFE remains disabled.
