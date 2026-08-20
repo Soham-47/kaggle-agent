@@ -8,8 +8,15 @@ from kaggle_agent.config import load_settings
 from kaggle_agent.supervisor.loop import Supervisor
 
 
-def run_supervisor(root: Path, *, competition: str | None = None, wait: bool = True, mode: str | None = None) -> int:
-    settings = load_settings(root)
+def run_supervisor(
+    root: Path,
+    *,
+    competition: str | None = None,
+    wait: bool = True,
+    mode: str | None = None,
+    profile: str | None = None,
+) -> int:
+    settings = load_settings(root, profile=profile)
     if mode is not None:
         raw = dict(settings.raw)
         section = dict(raw.get("supervisor") or {})
