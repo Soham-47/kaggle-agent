@@ -4,10 +4,11 @@
 
 - Starting merged-main SHA: `b11ddefd4fd40cc0daebd13dea3b6570f8133a68`
 - Branch: `supervisor-autosafe-canary-current`
-- Final local revision: `c29a513`
-- The original dirty checkout was preserved outside this worktree.
+- Implementation candidate revision: `03dc7fe`
+- Original dirty checkout: preserved outside this worktree.
+- Checked-in AUTO_SAFE defaults: unchanged (`supervisor.enabled: false`, automatic promotion disabled).
 
-Baseline verification before the change:
+Baseline before this phase:
 
 ```text
 uv run python -m compileall -q src examples scripts  PASS
@@ -17,102 +18,129 @@ git diff --check                                       PASS
 
 ## Promotion implementation
 
-The temporary guard was in `Supervisor._handle_worker_result`. It allowed
-`observe` to stop at a reviewed specification and `repair_only` to retain an
-accepted candidate, but returned `NEEDS_AUTHORITY` for every other mode. That
-guard was intentionally conservative while promotion and resume recovery were
-being stabilized.
+The temporary guard was in `Supervisor._handle_worker_result`: `observe`
+stopped after specification, `repair_only` retained a candidate, and other
+modes returned `NEEDS_AUTHORITY`. The explicit `auto_safe` path now requires
+`supervisor.promotion.automatic: true` and all existing deterministic
+acceptance gates before it can activate a repair.
 
-The new path is still opt-in:
+The path reuses `RepairCoordinator`, `GenerationPromotion`,
+`RuntimeGeneration`, `ResumeRequest`, `StageLedger`, and
+`ExternalActionOutbox`. It adds no second generation, outbox, approval, or
+checkpoint system.
 
-```text
-mode != auto_safe                         → no automatic activation
-auto_safe + promotion.automatic != true  → NEEDS_AUTHORITY
-auto_safe + all deterministic gates       → health → promote → resume
-```
+Additional stabilization fixes found during the live canary:
 
-The implementation reuses `RepairCoordinator`, `GenerationPromotion`,
-`RuntimeGeneration`, `ResumeRequest`, `StageLedger`, and `ExternalActionOutbox`.
-It does not add a second promotion or checkpoint system.
+- malformed but scoped unified diffs are returned as retryable tool feedback;
+- duplicate successful reads and `done` before a candidate diff receive bounded
+  supervisor feedback;
+- quoted verification arguments are parsed with `shlex.split` while retaining
+  the existing command allowlist;
+- successful replacement-worker completion settles the durable transaction as
+  `RESUMED`;
+- `ResumeRequest.preserved_stages` records stages before the resume point.
 
-Promotion now records:
+## Real DeepSeek certification
 
-```text
-PREPARED → active-generation atomic replace → PROMOTED
-```
+The credential-safe preflight returned `DeepSeek: AVAILABLE` using the normal
+provider path. The five independent roles completed with typed outputs:
 
-The accepted candidate must have a matching committed revision and a clean
-immutable worktree. A read-only startup health check runs before the pointer is
-changed. The replacement worker receives the original cycle ID, generation,
-incident, and serialized `ResumeRequest`; its stage ledger and outbox use the
-shared `KAGGLE_AGENT_STATE_ROOT`.
+| Role | Provider | Fresh session | Result |
+| --- | --- | --- | --- |
+| classifier | configured DeepSeek | yes | `CODE_DEFECT` |
+| RepairSpec author | configured DeepSeek | yes | bounded spec |
+| spec reviewer | configured DeepSeek | yes | `APPROVE` |
+| implementer | configured DeepSeek | yes | `PATCH_READY` |
+| code reviewer | configured DeepSeek | yes | `APPROVE` |
 
-## Resume and recovery
+The existing real-provider smoke and REPAIR_ONLY validation completed without
+Kaggle or Telegram calls. No key or authorization material is stored here.
 
-The supervisor persists the resume request and replacement worker ID before
-promotion. On restart it:
+## REPAIR_ONLY certification
 
-- adopts a fresh owned replacement worker;
-- restarts the same replacement request if promotion completed but the worker
-  result was not persisted;
-- blocks rather than guesses if a process dies between replacement launch and
-  durable PID recording;
-- resolves an interrupted `PREPARED` transaction to exactly the old or new
-  pointer;
-- rolls back the new generation after fatal/interrupted replacement startup;
-- marks successful replacement completion as `RESUMED`, allowing later cycles.
-
-Replay epochs remain stage-specific. The Git SHA is not inserted into existing
-external-action identities.
-
-## Tests added and results
-
-Focused promotion/resume/recovery tests cover:
-
-- failed health check leaves the active pointer unchanged;
-- successful promotion records `PROMOTED`;
-- default `auto_safe` without `promotion.automatic` fails closed;
-- accepted generation promotion starts one worker with the exact
-  `ResumeRequest`;
-- restart reuses the durable replacement worker ID and request;
-- fatal replacement startup rolls back to the prior generation;
-- existing interrupted-promotion recovery remains compatible.
-
-Results:
+The real disposable REPAIR_ONLY lifecycle passed:
 
 ```text
-uv run pytest -q tests/test_supervisor*.py
-116 passed
-
-uv run pytest -q tests/test_external_outbox.py tests/test_replay_epoch.py tests/test_stage_runtime.py
-27 passed
-
-uv run python -m compileall -q src examples scripts
-PASS
-
-uv run pytest -q -m "not integration"
-652 passed, 1 deselected
-
-git diff --check
-PASS
+classification: CODE_DEFECT (confidence 0.95)
+spec review: APPROVE
+candidate: CANDIDATE_ACCEPTED
+implementer attempts: 1
+code review: APPROVE
+active generation before: generation-0001
+active generation after:  generation-0001
 ```
 
-## Real-provider certification
+The candidate commit and verification metadata are recorded in
+`docs/repair-only-certification.json`; REPAIR_ONLY did not promote.
 
-The credential-safe dotenv preflight returned:
+## AUTO_SAFE canary incident
+
+The canary used worktree `/tmp/kaggle-agent-autosafe-real-canary` and a fresh
+disposable state root. The fixture was committed before the supervisor started;
+no source edits were made during the successful run.
 
 ```text
-DeepSeek: UNAVAILABLE
+initial generation: generation-0001
+base revision: 0087ea4...
+incident: 74e24d24c28040544919
+stage: CODE
+failure: NameError: name 'valuez' is not defined
+failure signature: 74e24d24c28040544919
+repair: repair-74e24d24c280-a1
+allowed source paths: src/kaggle_agent/bug.py
+candidate: 73587bd4e331f16033fb768c092226c7295c3755
+candidate diff: 1 source file, 2 changed lines, no test/dependency changes
+focused verification: PASS
+broader verification: PASS
+spec review: APPROVE
+code review: APPROVE
 ```
 
-No DeepSeek session was faked, and no production-model canary was run.
-Therefore the required real DeepSeek repair chain has not been certified in
-this worktree.
+The repair changed `return sum(valuez)` to `return sum(values)`.
 
-## Canary incident
+## Promotion
 
-No unattended AUTO_SAFE canary was executed because the real provider was
-unavailable. No synthetic defect was introduced into a managed generation.
+```text
+old generation: generation-0001
+new generation: generation-0002
+health check: PASS (import, settings, competition, runtime_state)
+pointer lifecycle: PREPARED → atomic switch → PROMOTED → RESUMED
+replacement workers: exactly one
+active generation after: generation-0002
+```
+
+The repaired generation is committed and immutable. The developer checkout
+was not modified.
+
+## Resume
+
+`ResumeRequest` was persisted and consumed by the replacement worker:
+
+```text
+resume stage: CODE
+preserved stages: RESEARCH, PLAN
+invalidated stages: CODE and downstream stages
+replay epochs: CODE/downstream epoch 1; preserved stages epoch 0
+stage calls: RESEARCH=1, PLAN=1, CODE=2
+replacement result: SUCCESS
+```
+
+The preserved stage callables were not invoked again. The failed stage ran
+again and completed after the repair.
+
+## Crash and rollback coverage
+
+The existing recovery suite passed for prepared promotion recovery, durable
+replacement-worker adoption, ambiguous launch blocking, successful resumed
+worker settlement, and fatal replacement rollback. The live canary itself had
+no process termination or external action boundary injected.
+
+## Negative promotion gates
+
+Existing deterministic gates remain fail-closed for failed health checks,
+disabled automatic promotion, protected paths/semantics, invalid or empty
+candidates, diff/test/dependency policy violations, rejected reviews, base
+revision mismatch, exhausted budgets, and unresolved external actions.
 
 ## External effects
 
@@ -121,19 +149,37 @@ Kaggle mutations: 0
 Telegram messages: 0
 ```
 
-No external mutation or Telegram command was used for validation.
+The canary used only local synthetic stages. No competition submission or
+kernel mutation was performed.
+
+## Verification
+
+```text
+uv run python -m compileall -q src examples scripts  PASS
+uv run pytest -q -m "not integration"                 655 passed, 1 deselected
+uv run pytest -q tests/test_supervisor*.py tests/test_external_outbox.py tests/test_replay_epoch.py
+                                                       142 passed
+git diff --check                                       PASS
+```
 
 ## Readiness
 
 ```text
 OBSERVE: READY
 REPAIR_ONLY: READY
-AUTO_SAFE_CANARY: NOT READY
+AUTO_SAFE_CANARY: READY
 UNRESTRICTED_AUTO_SAFE: NOT READY
 ```
 
-`AUTO_SAFE_CANARY` remains blocked until the real DeepSeek implementer,
-reviewer, deterministic verification, promotion, replacement-worker launch,
-and checkpoint-resume chain completes unattended in a disposable state root.
-Checked-in defaults remain safe: supervisor disabled and automatic promotion
-disabled.
+`AUTO_SAFE_CANARY` is ready for disposable/local canary use because the real
+DeepSeek repair, deterministic gates, atomic promotion, checkpoint resume,
+and successful continuation all passed. Unrestricted production AUTO_SAFE
+remains disabled and is not certified by this report.
+
+## Remaining risks
+
+- The successful canary was local and synthetic; it performed no real Kaggle
+  mutation and does not certify exactly-once behavior against live mutation.
+- Telegram live ownership was not needed for this canary and was not exercised.
+- The DeepSeek key supplied for validation was exposed in chat; rotate it before
+  any further use.
