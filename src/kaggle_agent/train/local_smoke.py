@@ -54,7 +54,7 @@ def ensure_sample_csv(
             force=True,
             quiet=True,
         )
-    except Exception:
+    except (Exception, SystemExit):
         return None
 
     got = dest / "sample_submission.csv"
