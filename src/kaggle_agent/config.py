@@ -27,6 +27,211 @@ DEFAULT_PHASES = (
 )
 
 
+class ConfigError(ValueError):
+    """Raised when a YAML configuration violates its runtime contract."""
+
+
+class _Section(dict[str, Any]):
+    """Mapping view that retains its dotted path for precise errors."""
+
+    def __init__(self, values: dict[str, Any], config_path: str) -> None:
+        super().__init__(values)
+        self.config_path = config_path
+
+
+def _config_error(path: Path, field: str, reason: str, value: Any) -> ConfigError:
+    return ConfigError(f"{path}: {field} {reason}; got {value!r}")
+
+
+def _section(raw: dict[str, Any], name: str, path: Path) -> dict[str, Any]:
+    value = raw.get(name, {})
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise _config_error(path, name, "must be a mapping", value)
+    parent = getattr(raw, "config_path", "")
+    dotted = f"{parent}.{name}" if parent else name
+    return _Section(value, dotted)
+
+
+def _field(section: dict[str, Any], key: str) -> str:
+    parent = getattr(section, "config_path", "")
+    return f"{parent}.{key}" if parent else key
+
+
+def _bool(section: dict[str, Any], key: str, path: Path, default: bool) -> bool:
+    value = section.get(key, default)
+    if not isinstance(value, bool):
+        raise _config_error(path, _field(section, key), "must be a boolean", value)
+    return value
+
+
+def _int(
+    section: dict[str, Any], key: str, path: Path, default: int, *, minimum: int | None = None
+) -> int:
+    value = section.get(key, default)
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise _config_error(path, _field(section, key), "must be an integer", value)
+    if minimum is not None and value < minimum:
+        raise _config_error(path, _field(section, key), f"must be an integer >= {minimum}", value)
+    return value
+
+
+def _float(
+    section: dict[str, Any], key: str, path: Path, default: float, *, minimum: float | None = None
+) -> float:
+    value = section.get(key, default)
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise _config_error(path, _field(section, key), "must be a number", value)
+    number = float(value)
+    if minimum is not None and number < minimum:
+        raise _config_error(path, _field(section, key), f"must be a number >= {minimum}", value)
+    return number
+
+
+def _str(section: dict[str, Any], key: str, path: Path, default: str, *, nonempty: bool = False) -> str:
+    value = section.get(key, default)
+    if not isinstance(value, str) or (nonempty and not value.strip()):
+        expected = "a non-empty string" if nonempty else "a string"
+        raise _config_error(path, _field(section, key), f"must be {expected}", value)
+    return value
+
+
+def _list(section: dict[str, Any], key: str, path: Path, default: list[Any]) -> list[Any]:
+    value = section.get(key, default)
+    if not isinstance(value, list):
+        raise _config_error(path, _field(section, key), "must be a list", value)
+    return value
+
+
+def _validate_agent(section: dict[str, Any], path: Path, *, minutes: float, turns: int) -> None:
+    agent = _section(section, "agent", path)
+    _float(agent, "max_minutes", path, minutes, minimum=0.001)
+    _int(agent, "max_tool_turns", path, turns, minimum=1)
+    _int(agent, "max_tokens", path, 2048, minimum=256)
+
+
+def _validate_settings(raw: dict[str, Any], path: Path) -> None:
+    default_competition = raw.get("default_competition", "rsna_knee")
+    if not isinstance(default_competition, str) or not default_competition.strip():
+        raise _config_error(path, "default_competition", "must be a non-empty string", default_competition)
+
+    orchestrator = _section(raw, "orchestrator", path)
+    _bool(orchestrator, "dry_run", path, True)
+    phases = _list(orchestrator, "phases", path, list(DEFAULT_PHASES))
+    if not phases or any(not isinstance(item, str) or not item.strip() for item in phases):
+        raise _config_error(path, "orchestrator.phases", "must contain non-empty strings", phases)
+
+    submit = _section(raw, "submit", path)
+    _bool(submit, "require_telegram_approve", path, True)
+    _bool(submit, "api", path, True)
+    _bool(submit, "mcp", path, False)
+    _int(submit, "max_proposals_per_day", path, 2, minimum=0)
+
+    kernel = _section(raw, "kernel", path)
+    _bool(kernel, "push", path, False)
+    _bool(kernel, "enable_gpu", path, False)
+    _bool(kernel, "enable_internet", path, False)
+    _int(kernel, "poll_seconds", path, 30, minimum=1)
+    _int(kernel, "poll_attempts", path, 40, minimum=1)
+    if "machine_shape" in kernel and kernel["machine_shape"] is not None:
+        _str(kernel, "machine_shape", path, "")
+    if "username" in kernel and kernel["username"] is not None:
+        _str(kernel, "username", path, "")
+
+    research = _section(raw, "research", path)
+    _int(research, "loop_passes", path, 3, minimum=1)
+    _validate_agent(research, path, minutes=15.0, turns=40)
+    fleet = _section(research, "fleet", path)
+    _bool(fleet, "enabled", path, False)
+    agents = _list(fleet, "agents", path, list(ResearchFleetSettings.agents))
+    if any(not isinstance(item, str) or not item.strip() for item in agents):
+        raise _config_error(path, "research.fleet.agents", "must contain non-empty strings", agents)
+    _validate_agent(fleet, path, minutes=15.0, turns=24)
+    deep = _section(research, "deep", path)
+    _bool(deep, "enabled", path, True)
+    for key, default in (("breadth", 3), ("depth", 2), ("max_queries", 12), ("per_query_limit", 5),
+                         ("max_learnings", 4), ("max_followups", 3), ("max_fetches", 40)):
+        _int(deep, key, path, default, minimum=1)
+    _float(deep, "max_minutes", path, 15.0, minimum=0.001)
+    _str(deep, "report_dir", path, "memory/research-deep", nonempty=True)
+    _validate_agent(_section(raw, "plan", path), path, minutes=10.0, turns=20)
+    _validate_agent(_section(raw, "code", path), path, minutes=10.0, turns=20)
+
+    browser = _section(raw, "browser_research", path)
+    _bool(browser, "enabled", path, True)
+    _bool(browser, "prefer_browser_harness", path, True)
+    pages = _list(browser, "pages", path, ["overview", "discussion"])
+    if any(not isinstance(item, str) or not item.strip() for item in pages):
+        raise _config_error(path, "browser_research.pages", "must contain non-empty strings", pages)
+    _bool(_section(raw, "telegram", path), "enabled", path, False)
+    _bool(_section(raw, "judges", path), "train", path, False)
+    _bool(_section(raw, "eval", path), "block_submit", path, False)
+
+    heal = _section(raw, "heal", path)
+    _int(heal, "max_tune_attempts", path, 3, minimum=0)
+    _int(heal, "max_no_improve_days", path, 5, minimum=0)
+    feedback = _section(raw, "feedback", path)
+    _int(feedback, "wait_minutes", path, 12, minimum=0)
+    _int(feedback, "poll_seconds", path, 30, minimum=1)
+    loop = _section(raw, "loop", path)
+    n_min = _int(loop, "n_min", path, 2, minimum=1)
+    n_max = _int(loop, "n_max", path, 8, minimum=1)
+    default_n = _int(loop, "default_n", path, 3, minimum=1)
+    _float(loop, "typical_gain", path, 0.01, minimum=0.0)
+    _float(loop, "max_minutes", path, 90.0, minimum=0.001)
+    if n_max < n_min:
+        raise _config_error(path, "loop.n_max", "must be >= loop.n_min", n_max)
+    if not n_min <= default_n <= n_max:
+        raise _config_error(path, "loop.default_n", "must be between loop.n_min and loop.n_max", default_n)
+    cron = _section(raw, "cron", path)
+    hour = _int(cron, "hour_utc", path, 6, minimum=0)
+    if hour > 23:
+        raise _config_error(path, "cron.hour_utc", "must be between 0 and 23", hour)
+
+
+def _validate_competition(raw: dict[str, Any], path: Path) -> None:
+    for key in ("id", "slug"):
+        value = raw.get(key)
+        if not isinstance(value, str) or not value.strip():
+            raise _config_error(path, key, "must be a non-empty string", value)
+    metric = _section(raw, "metric", path)
+    direction = _str(metric, "direction", path, "max").lower()
+    if direction not in {"min", "max"}:
+        raise _config_error(path, "metric.direction", "must be min or max", direction)
+    labels = raw.get("labels", [])
+    if not isinstance(labels, list) or any(not isinstance(item, str) or not item.strip() for item in labels):
+        raise _config_error(path, "labels", "must be a list of non-empty strings", labels)
+    submission = _section(raw, "submission", path)
+    _str(submission, "id_column", path, "StudyInstanceUID", nonempty=True)
+    if "min_rows" in submission and submission["min_rows"] is not None:
+        _int(submission, "min_rows", path, 0, minimum=0)
+    probability_columns = _list(submission, "probability_columns", path, [])
+    if any(not isinstance(item, str) or not item.strip() for item in probability_columns):
+        raise _config_error(path, "submission.probability_columns", "must contain non-empty strings", probability_columns)
+    workspace = _section(raw, "workspace", path)
+    _str(workspace, "relative", path, f"competitions/{raw['id']}", nonempty=True)
+    submit = _section(raw, "submit", path)
+    mode = _str(submit, "mode", path, "file").lower()
+    if mode not in {"file", "notebook"}:
+        raise _config_error(path, "submit.mode", "must be one of {'file', 'notebook'}", mode)
+    _str(submit, "output_file", path, "submission.csv", nonempty=True)
+    models = _section(raw, "models", path)
+    for role in ("plan", "code", "distill", "vision"):
+        if role in models and models[role] is not None and not isinstance(models[role], str):
+            raise _config_error(path, f"models.{role}", "must be a string or null", models[role])
+    train = _section(raw, "train", path)
+    _str(train, "backend", path, "kaggle_kernel", nonempty=True)
+    _bool(train, "local_smoke_only", path, True)
+    budget = _section(raw, "submit_budget", path)
+    _int(budget, "max_proposals_per_day", path, 2, minimum=0)
+    fleet = raw.get("research", {}).get("fleet") if isinstance(raw.get("research"), dict) else None
+    if fleet is not None and fleet is not True and not isinstance(fleet, list):
+        raise _config_error(path, "research.fleet", "must be true, false, or a roster list", fleet)
+    if isinstance(fleet, list) and any(not isinstance(item, str) or not item.strip() for item in fleet):
+        raise _config_error(path, "research.fleet", "must contain non-empty strings", fleet)
+
+
 @dataclass(frozen=True)
 class ResearchAgentSettings:
     max_minutes: float = 15.0
@@ -368,10 +573,14 @@ def load_dotenv(root: Path | None = None) -> None:
 def load_settings(root: Path | None = None) -> Settings:
     root = root or repo_root()
     path = config_dir(root) / "settings.yaml"
-    return Settings(raw=_read_yaml(path), root=root)
+    raw = _read_yaml(path)
+    _validate_settings(raw, path)
+    return Settings(raw=raw, root=root)
 
 
 def load_competition(competition_id: str, root: Path | None = None) -> CompetitionConfig:
     root = root or repo_root()
     path = config_dir(root) / "competitions" / f"{competition_id}.yaml"
-    return CompetitionConfig(raw=_read_yaml(path), path=path)
+    raw = _read_yaml(path)
+    _validate_competition(raw, path)
+    return CompetitionConfig(raw=raw, path=path)

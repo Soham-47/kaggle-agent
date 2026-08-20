@@ -1,6 +1,8 @@
 from pathlib import Path
 
-from kaggle_agent.config import load_competition, load_settings
+import yaml
+
+from kaggle_agent.config import ConfigError, load_competition, load_settings
 from kaggle_agent.paths import repo_root
 
 
@@ -100,3 +102,127 @@ def test_competition_fleet_requires_bool_or_roster_list():
     c.raw["research"]["fleet"] = []
     assert c.fleet_enabled is False
     assert c.fleet_agents == []
+
+
+def _write_settings(tmp_path: Path, **overrides: object) -> None:
+    raw: dict[str, object] = {
+        "default_competition": "rsna_knee",
+        "loop": {"n_min": 1, "n_max": 3, "default_n": 2, "typical_gain": 0.01},
+    }
+    for section, values in overrides.items():
+        raw[section] = values
+    config = tmp_path / "config"
+    config.mkdir()
+    (config / "settings.yaml").write_text(yaml.safe_dump(raw), encoding="utf-8")
+
+
+def test_invalid_integer_fails_at_settings_load(tmp_path: Path):
+    _write_settings(tmp_path, kernel={"poll_attempts": "many"})
+    try:
+        load_settings(tmp_path)
+    except ConfigError as exc:
+        assert "config/settings.yaml" in str(exc)
+        assert "kernel.poll_attempts" in str(exc)
+    else:
+        raise AssertionError("malformed integer was accepted")
+
+
+def test_quoted_false_is_rejected_instead_of_truthy(tmp_path: Path):
+    _write_settings(tmp_path, orchestrator={"dry_run": "false"})
+    try:
+        load_settings(tmp_path)
+    except ConfigError as exc:
+        assert "orchestrator.dry_run" in str(exc)
+        assert "boolean" in str(exc)
+    else:
+        raise AssertionError("quoted boolean was accepted")
+
+
+def test_invalid_loop_range_fails_at_settings_load(tmp_path: Path):
+    _write_settings(tmp_path, loop={"n_min": 5, "n_max": 2, "default_n": 3, "typical_gain": 0.01})
+    try:
+        load_settings(tmp_path)
+    except ConfigError as exc:
+        assert "loop.n_max" in str(exc)
+        assert "n_min" in str(exc)
+    else:
+        raise AssertionError("invalid loop range was accepted")
+
+
+def test_malformed_float_fails_at_settings_load(tmp_path: Path):
+    _write_settings(tmp_path, loop={"typical_gain": "fast"})
+    try:
+        load_settings(tmp_path)
+    except ConfigError as exc:
+        assert "loop.typical_gain" in str(exc)
+        assert "number" in str(exc)
+    else:
+        raise AssertionError("malformed float was accepted")
+
+
+def test_negative_poll_timeout_fails_at_settings_load(tmp_path: Path):
+    _write_settings(tmp_path, kernel={"poll_seconds": -1})
+    try:
+        load_settings(tmp_path)
+    except ConfigError as exc:
+        assert "kernel.poll_seconds" in str(exc)
+        assert ">= 1" in str(exc)
+    else:
+        raise AssertionError("negative poll timeout was accepted")
+
+
+def test_invalid_competition_metric_and_submit_mode_fail_at_load(tmp_path: Path):
+    config = tmp_path / "config" / "competitions"
+    config.mkdir(parents=True)
+    (config / "bad.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "id": "bad",
+                "slug": "bad",
+                "metric": {"direction": "sideways"},
+                "submission": {"id_column": "id"},
+                "workspace": {"relative": "competitions/bad"},
+                "submit": {"mode": "browser"},
+            }
+        ),
+        encoding="utf-8",
+    )
+    try:
+        load_competition("bad", tmp_path)
+    except ConfigError as exc:
+        assert "metric.direction" in str(exc)
+        assert "min or max" in str(exc)
+    else:
+        raise AssertionError("invalid competition config was accepted")
+
+
+def test_invalid_competition_submit_mode_fails_at_load(tmp_path: Path):
+    config = tmp_path / "config" / "competitions"
+    config.mkdir(parents=True)
+    (config / "bad.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "id": "bad",
+                "slug": "bad",
+                "metric": {"direction": "max"},
+                "submission": {"id_column": "id"},
+                "workspace": {"relative": "competitions/bad"},
+                "submit": {"mode": "browser"},
+            }
+        ),
+        encoding="utf-8",
+    )
+    try:
+        load_competition("bad", tmp_path)
+    except ConfigError as exc:
+        assert "submit.mode" in str(exc)
+        assert "file" in str(exc) and "notebook" in str(exc)
+    else:
+        raise AssertionError("invalid submit mode was accepted")
+
+
+def test_valid_minimal_settings_keep_optional_defaults(tmp_path: Path):
+    _write_settings(tmp_path)
+    settings = load_settings(tmp_path)
+    assert settings.kernel_poll_seconds == 30
+    assert settings.require_telegram_approve is True
