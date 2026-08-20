@@ -29,6 +29,11 @@ class SupervisorCommandQueue:
     def enqueue(self, command: str, payload: dict[str, object] | None = None) -> SupervisorCommand:
         if command not in {"run", "pause", "resume"}:
             raise ValueError(f"unsupported supervisor command: {command}")
+        if command == "run":
+            pending = self.pending()
+            existing = next((item for item in pending if item.command == "run"), None)
+            if existing is not None:
+                return existing
         item = SupervisorCommand(
             uuid.uuid4().hex, command, dict(payload or {}),
             datetime.now(timezone.utc).isoformat(timespec="milliseconds"),
