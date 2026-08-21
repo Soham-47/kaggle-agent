@@ -23,6 +23,7 @@ from kaggle_agent.agents.code import (
 )
 from kaggle_agent.agents.loop import StageAgentConfig
 from kaggle_agent.llm.zen_client import ZenClient
+from kaggle_agent.memory.ingest import build_context_pack
 
 
 REAL_CASES = (
@@ -31,6 +32,11 @@ REAL_CASES = (
     ("existing_method", "apply grouped cross validation and rank mean members"),
     ("parser_edge", "discover hidden test IDs from folders and write submission"),
     ("custom_infer", "apply custom inference after the ranker and write submission"),
+    ("multi_file_change", "update the parser and ranker to discover hidden test IDs and rank average predictions"),
+    ("model_adaptation", "adapt the existing model with grouped cross validation and custom inference"),
+    ("competition_workflow", "attach the public weights, validate labels, and write submission.csv"),
+    ("artifact_path", "discover hidden test IDs from folders and write submission.csv to the required path"),
+    ("data_handling", "parse study folders, normalize labels, and rank average predictions"),
 )
 
 
@@ -94,6 +100,17 @@ def _fault_case(root: Path, response: str) -> dict[str, Any]:
     }
 
 
+def _targeted_context(root: Path, workspace: Path, plan_text: str) -> str:
+    """Match the production CODE context contract without dumping the repository."""
+    pack = build_context_pack(
+        root,
+        view="code",
+        workspace=workspace,
+        plan_text=plan_text,
+    )
+    return pack.as_prompt_block()
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--output", type=Path, default=Path("/tmp/code-agent-benchmark.json"))
@@ -122,7 +139,11 @@ def main() -> int:
                     config,
                     plan_text=f"steps: {plan}{feedback}",
                 )
-                out = agent.run("Synthetic local CODE benchmark; no external actions.")
+                context = _targeted_context(root, workspace, f"steps: {plan}{feedback}")
+                out = agent.run(
+                    "Synthetic local CODE benchmark; no external actions.\n\n"
+                    + context
+                )
                 wrapper = (workspace / "pipeline" / "kernel_recipe.py").read_text(
                     encoding="utf-8"
                 )
@@ -139,7 +160,12 @@ def main() -> int:
                         "stop_reason": out.stop_reason,
                         "turns": out.turns,
                         "tool_calls": out.tool_calls,
+                        "llm_calls": out.llm_calls,
+                        "source_reads": out.source_reads,
                         "writes": bool(state.get("wrote_recipe") or state.get("wrote_custom_infer")),
+                        "rejected_writes": out.rejected_writes,
+                        "errors": out.errors,
+                        "observations": out.observations[-6:],
                         "artifact_valid": artifact_valid,
                     }
                 )

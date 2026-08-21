@@ -1,0 +1,24 @@
+{
+  "sanitized": true,
+  "source": "scripts/benchmark_code_agent.py",
+  "provider": "DeepSeek for normal cases; scripted probes for negative cases",
+  "normal_cases": [
+    {"case": "simple_pipeline", "attempts": 1, "turns": 4, "llm_calls": 4, "artifact_valid": true, "outcome": "CODE_READY"},
+    {"case": "multi_step_recipe", "attempts": 1, "turns": 4, "llm_calls": 4, "artifact_valid": true, "outcome": "CODE_READY"},
+    {"case": "existing_method", "attempts": 1, "turns": 4, "llm_calls": 4, "artifact_valid": true, "outcome": "CODE_READY"},
+    {"case": "parser_edge", "attempts": 1, "turns": 4, "llm_calls": 4, "artifact_valid": true, "outcome": "CODE_READY"},
+    {"case": "custom_infer", "attempts": 1, "turns": 4, "llm_calls": 4, "artifact_valid": true, "outcome": "CODE_READY"},
+    {"case": "multi_file_change", "attempts": 1, "turns": 4, "llm_calls": 4, "artifact_valid": true, "outcome": "CODE_READY"},
+    {"case": "model_adaptation", "attempts": 1, "turns": 4, "llm_calls": 4, "artifact_valid": true, "outcome": "CODE_READY"},
+    {"case": "competition_workflow", "attempts": 1, "turns": 4, "llm_calls": 4, "artifact_valid": true, "outcome": "CODE_READY"},
+    {"case": "artifact_path", "attempts": 1, "turns": 4, "llm_calls": 4, "artifact_valid": true, "outcome": "CODE_READY"},
+    {"case": "data_handling", "attempts": 1, "turns": 4, "llm_calls": 4, "artifact_valid": true, "outcome": "CODE_READY"}
+  ],
+  "negative_probes": [
+    {"case": "malformed_response", "turns": 3, "writes": false, "outcome": "TOOL_PROTOCOL_FAILURE"},
+    {"case": "premature_done", "turns": 5, "writes": false, "outcome": "TURN_BUDGET_EXHAUSTED"},
+    {"case": "repeated_noop", "turns": 5, "writes": false, "outcome": "TURN_BUDGET_EXHAUSTED"}
+  ],
+  "secrets_logged": false,
+  "authorization_headers_logged": false
+}
