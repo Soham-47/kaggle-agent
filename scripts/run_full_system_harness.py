@@ -47,6 +47,12 @@ def _write_fixture_files(source: Path) -> None:
     settings["supervisor"].update({"enabled": True, "mode": "auto_safe"})
     settings["supervisor"]["promotion"]["automatic"] = True
     settings["supervisor"]["auto_safe"]["enabled"] = True
+    # The fixture intentionally changes its settings and contains a deliberate
+    # failing source defect. The repository-wide suite is run independently on
+    # the certification branch; this disposable repair needs deterministic
+    # focused verification rather than testing the corrupted fixture as if it
+    # were the repository baseline.
+    settings["supervisor"]["auto_safe"]["profiles"]["medium"]["require_full_tests"] = False
     settings["supervisor"]["repair"].update(
         {
             "max_attempts_per_incident": 2,
@@ -135,19 +141,12 @@ def _write_fixture_files(source: Path) -> None:
         "def test_trigger_returns_expected_marker():\n"
         "    assert trigger() == 'harness-ok'\n"
     )
-    competition_test = source / "competitions" / "full_system_harness" / "tests"
-    competition_test.mkdir(parents=True, exist_ok=True)
-    (competition_test / "test_defect.py").write_text(test_body, encoding="utf-8")
-    (pipeline / "test_defect.py").write_text(test_body, encoding="utf-8")
-    # Keep the conventional repository-level focused-test alias available as
-    # well. DeepSeek may choose either narrow path; neither test is writable by
-    # the repair spec for this existing-test defect.
+    # Keep one canonical repository-level focused test. Multiple files with the
+    # same basename make pytest import them as the same module and can produce
+    # an import-file-mismatch during the required broader verification.
     root_test = source / "tests"
     root_test.mkdir(parents=True, exist_ok=True)
-    (root_test / "test_pipeline_defect.py").write_text(test_body, encoding="utf-8")
     (root_test / "test_defect.py").write_text(test_body, encoding="utf-8")
-    (root_test / "harness" / "test_defect.py").parent.mkdir(parents=True, exist_ok=True)
-    (root_test / "harness" / "test_defect.py").write_text(test_body, encoding="utf-8")
     (source / "memory" / "templates" / "FULL_SYSTEM_HARNESS.md").write_text(
         "Synthetic local competition fixture; no external mutations are allowed.\n",
         encoding="utf-8",
@@ -363,7 +362,13 @@ def _run_recovery_probes(source: Path, state_root: Path) -> dict[str, Any]:
 
     store = SupervisorStateStore(RuntimeLayout.for_repo(state_root, state_root))
     transaction = store.read_json("promotion.json", {}) or {}
-    replacement_worker = str(transaction["replacement_worker_id"])
+    replacement_worker = str(transaction.get("replacement_worker_id") or "")
+    if not replacement_worker:
+        reason = f"promotion record has no replacement worker: {transaction}"
+        return {
+            "restart_after_promoted_before_result": {"passed": False, "reason": reason},
+            "unhealthy_replacement_rollback": {"passed": False, "reason": reason},
+        }
     result_path = store.path(f"workers/{replacement_worker}/result.json")
     result_path.unlink()
     metadata = store.read_json(f"workers/{replacement_worker}/metadata.json", {}) or {}
@@ -450,12 +455,20 @@ def run(*, keep: bool = False) -> int:
         state_root = temp / "state"
         _prepare_runtime(source, state_root)
         old_env = os.environ.copy()
+        isolated_home = temp / "home"
+        isolated_bin = isolated_home / "bin"
+        isolated_bin.mkdir(parents=True, exist_ok=True)
+        uv_path = shutil.which("uv")
+        if uv_path:
+            (isolated_bin / "uv").symlink_to(uv_path)
         os.environ.update(
             {
                 "KAGGLE_AGENT_SUPERVISOR_DIR": str(state_root),
                 "KAGGLE_AGENT_STATE_ROOT": str(state_root),
                 "KAGGLE_AGENT_FULL_SYSTEM_HARNESS": "1",
                 "UV_PROJECT_ENVIRONMENT": str(Path.cwd() / ".venv"),
+                "HOME": str(isolated_home),
+                "PATH": f"{isolated_bin}:{os.defpath}",
             }
         )
         try:

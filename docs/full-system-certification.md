@@ -3,15 +3,17 @@
 ## Baseline
 
 ```text
-starting origin/main: 973486c90aff2ca7e2ce811cec83a818f3dcf813
+starting origin/main: 34464cdbc10af329bea1a845f580d45390ada47c
 branch: full-system-certification
 working tree: clean at start
-baseline: 678 passed, 1 deselected
-final: 679 passed, 1 deselected
+origin/main baseline: 692 passed, 1 deselected
+final branch: 693 passed, 1 deselected
 ```
 
-The one additional passing test covers the worker cycle-ID regression found by
-the production-shaped harness.
+The earlier `679 passed` result was from the pre-PR#10 `973486c` base. Current
+`origin/main` contains PR #10 and collects `692/693` tests. This branch adds one
+regression test for the worker cycle-ID defect and therefore collects
+`693/694` tests.
 
 ## Fixture architecture
 
@@ -47,10 +49,10 @@ incident: b1f95916190585058cb3
 repair: repair-b1f959161905-a1
 initial generation: generation-0001
 candidate generation: generation-0002
-candidate revision: 1db75254d4d502ad69b25f18feeb8cda5fa91a02
+candidate revision: 05477021b49d333da9f99a303e439a605d11a8f8
 promotion: PREPARED -> PROMOTED -> RESUMED
-first worker PID: 4064879
-replacement worker PID: 4065521
+first worker PID: 265065
+replacement worker PID: 265912
 accepted repairs: 1
 new generations: 1
 promotions: 1
@@ -132,16 +134,20 @@ tests/test_supervisor_loop.py::test_initial_worker_request_gets_durable_cycle_id
 ```
 
 The harness also corrected its own acceptance-artifact accounting to read the
-supervisor’s durable `repairs/*/acceptance.json` records. No safety gate or
-production repair limit was weakened.
+supervisor’s durable `repairs/*/acceptance.json` records, isolated verifier
+process state, and kept one canonical focused test to avoid pytest module-name
+collisions. Its disposable MEDIUM profile does not require the repository-wide
+suite while the fixture intentionally contains a source defect and altered
+settings; the real repository-wide suite is run independently below. No
+safety gate or checked-in production default was weakened.
 
 ## Verification
 
 ```text
 uv run python -m compileall -q src examples scripts  PASS
-uv run pytest -q -m "not integration"                 679 passed, 1 deselected
+uv run pytest -q -m "not integration"                 693 passed, 1 deselected
 uv run pytest -q tests/test_supervisor_loop.py tests/test_supervisor_recovery.py tests/test_supervisor_acceptance.py tests/test_supervisor_worker.py tests/test_replay_epoch.py tests/test_external_outbox.py
-                                                        49 passed
+                                                        168 passed
 uv run pytest -q tests/test_orchestrator.py::test_dry_run_cycle (x5)
                                                         5 passed
 uv run python scripts/benchmark_implementer_reliability.py
