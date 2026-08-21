@@ -1,7 +1,7 @@
 from pathlib import Path
 
 from kaggle_agent.config import load_competition, load_settings
-from kaggle_agent.kaggle_api.models import SubmissionRow
+from kaggle_agent.kaggle_api.models import SubmissionRow, SubmitResult
 from kaggle_agent.orchestrator import CycleResult, Orchestrator
 from kaggle_agent.autonomy.outbox import kernel_push_key, submission_key
 from kaggle_agent.pipeline.validate import validate_submission_csv
@@ -18,6 +18,27 @@ class _KaggleWithoutSubmit:
 
     def kernels_status(self, kernel_ref):  # noqa: ANN001
         return ""
+
+
+class _KaggleWithSubmission:
+    def __init__(self) -> None:
+        self.submitted = False
+        self.submit_calls = 0
+        self.description = ""
+
+    def submissions(self, competition, *, top=20):  # noqa: ANN001
+        if not self.submitted:
+            return []
+        return [SubmissionRow("s-real", "submission.csv", "pending", description=self.description)]
+
+    def kernels_status(self, kernel_ref):  # noqa: ANN001
+        return "COMPLETE"
+
+    def submit(self, *args, **kwargs):  # noqa: ANN002, ANN003
+        self.submit_calls += 1
+        self.submitted = True
+        self.description = str(kwargs.get("message") or (args[2] if len(args) > 2 else ""))
+        return SubmitResult(dry_run=False, message="submitted", success=True)
 
 
 def test_unreconciled_submission_intent_is_never_sent_again(tmp_path: Path):
@@ -54,6 +75,40 @@ def test_unreconciled_submission_intent_is_never_sent_again(tmp_path: Path):
     assert result.submission_pending is True
     assert result.submit_ok is False
     assert orch._outbox.get(action.action_id).status == "sent"
+
+
+def test_successful_submission_persists_authoritative_ref(tmp_path: Path):
+    root = tmp_path / "ka"
+    copy_min_workspace(root, repo_root())
+    settings = load_settings(root)
+    settings.raw.setdefault("eval", {})["block_submit"] = False
+    kaggle = _KaggleWithSubmission()
+    orch = Orchestrator(
+        settings, load_competition("rsna_knee", root), root=root, kaggle=kaggle
+    )
+    candidate = root / "candidate.csv"
+    candidate.write_text(
+        orch.competition.id_column + "," + ",".join(orch.competition.labels) + "\n"
+        + "study-1," + ",".join(["0.5"] * len(orch.competition.labels)) + "\n",
+        encoding="utf-8",
+    )
+    result = CycleResult("rsna_knee", False, experiment_id="exp-ref", candidate_csv=str(candidate))
+    result.validate_ok = True
+    result.kernel_ref = "owner/kernel"
+    orch._assume_approved = True
+
+    orch._submit(AgentState(), False, result)
+
+    assert result.submit_ok is True
+    assert kaggle.submit_calls == 1
+    output_hash = submission_output_hash(candidate, orch.competition.id_column)
+    action = next(
+        item
+        for item in orch._outbox._items().values()
+        if item.action == "submit" and item.payload.get("output_hash") == output_hash
+    )
+    assert action.status == "accepted"
+    assert action.external_ref == "s-real"
 
 
 def test_unreconciled_kernel_push_intent_is_never_pushed_again(tmp_path: Path, monkeypatch):

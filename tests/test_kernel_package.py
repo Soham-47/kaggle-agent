@@ -56,6 +56,20 @@ def test_write_kernel_package(tmp_path: Path):
     assert "20260101-test" in notebook
 
 
+def test_write_kernel_package_keeps_long_title_slug_in_sync(tmp_path: Path):
+    root = _root_with_data(tmp_path)
+    comp = load_competition("rsna_knee", root)
+    pkg = write_kernel_package(
+        comp,
+        root=root,
+        username="tester",
+        exp_id="live-kernel-submission-qualification-20260821-01",
+    )
+    meta = json.loads(pkg.metadata_path.read_text(encoding="utf-8"))
+    slug = meta["id"].rsplit("/", 1)[1]
+    assert meta["title"] == slug
+
+
 def test_run_kernel_phase_local_only(tmp_path: Path):
     root = _root_with_data(tmp_path)
     comp = load_competition("rsna_knee", root)

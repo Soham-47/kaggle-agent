@@ -27,7 +27,8 @@ labels:
 
 submission:
   id_column: StudyInstanceUID
-  min_rows: 1000
+  # The current competition sample contains three test studies.
+  min_rows: 3
   # Header must match sample_submission.csv exactly (including Baker's apostrophe)
   probability_columns:
     - ACL

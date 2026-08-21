@@ -220,7 +220,10 @@ def write_kernel_package(
     # Kaggle slugs: keep short-ish
     slug_part = "".join(c if c.isalnum() or c == "-" else "-" for c in slug_part)[:60].strip("-")
     kernel_ref = f"{username}/{slug_part}"
-    title = f"{prefix}-agent {exp_id}"
+    # Kaggle resolves the metadata title to the id slug. Keep the title's
+    # slug identical when a long experiment id is truncated above; otherwise
+    # SaveKernel rejects the package before it can create a remote kernel.
+    title = slug_part
 
     folder = root / competition.workspace_relative / "notebooks" / exp_id
     folder.mkdir(parents=True, exist_ok=True)
