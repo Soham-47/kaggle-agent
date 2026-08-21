@@ -568,6 +568,75 @@ def test_code_agent_never_invents_a_recipe_after_stall(tmp_path: Path):
     assert "rank(method" not in (pipe / "kernel_recipe.py").read_text(encoding="utf-8")
 
 
+def test_code_agent_can_correct_rejected_write_before_turn_cap(tmp_path: Path):
+    """A rejected bounded write gets one feedback turn without more budget."""
+    root = tmp_path / "ka"
+    (root / "memory").mkdir(parents=True)
+    (root / "memory" / "state.md").write_text("# state\n- phase: IDLE\n")
+    _write_source_card(root)
+    ws = root / "competitions" / "rsna_knee"
+    pipe = ws / "pipeline"
+    pipe.mkdir(parents=True)
+    (pipe / "kernel_recipe.py").write_text(
+        "KERNEL_RECIPE_SOURCE = r'''\n"
+        "# === CUSTOM_INFER START ===\n"
+        "def CUSTOM_INFER(sub, ctx):\n    return sub\n"
+        "# === CUSTOM_INFER END ===\n"
+        "sub = CUSTOM_INFER(sub, ctx)\n"
+        "sub.to_csv('submission.csv')\n'''")
+    (pipe / "methods.json").write_text(json.dumps({"implement_steps": ["old"]}))
+
+    invalid = (
+        "def CUSTOM_INFER(sub, ctx):\n"
+        "    return sub\n"
+        "def main():\n"
+        "    sub = CUSTOM_INFER(sub, ctx)\n"
+        "    sub.to_csv('submission.csv')\n"
+    )
+    valid = (
+        "# === CUSTOM_INFER START ===\n"
+        "def CUSTOM_INFER(sub, ctx):\n"
+        "    return sub.rank(method='average', pct=True)\n"
+        "# === CUSTOM_INFER END ===\n"
+        "sub = sub.copy()\n"
+        "sub = CUSTOM_INFER(sub, ctx)\n"
+        "sub.to_csv('submission.csv')\n"
+    )
+
+    class _RetryingChoiceZen:
+        def __init__(self) -> None:
+            self.forced_writes = 0
+
+        def chat(self, model, messages, **kwargs):  # noqa: ANN001
+            choice = kwargs.get("tool_choice")
+            if isinstance(choice, dict):
+                self.forced_writes += 1
+                source = invalid if self.forced_writes == 1 else valid
+                return json.dumps(
+                    {
+                        "tool": "write_kernel_recipe",
+                        "args": {"source": source, "source_card_refs": ["source-rank"]},
+                    }
+                )
+            return json.dumps({"tool": "read_plan", "args": {}})
+
+    zen = _RetryingChoiceZen()
+    agent, state = make_code_agent(
+        zen,
+        "m",
+        root,
+        workspace=ws,
+        config=StageAgentConfig(max_minutes=5, max_tool_turns=8),
+        plan_text="steps: rank average predictions",
+    )
+
+    out = agent.run("code")
+
+    assert out.turns <= 8
+    assert state["wrote_recipe"] == "1"
+    assert "rank(method" in (pipe / "kernel_recipe.py").read_text(encoding="utf-8")
+
+
 def test_replace_kernel_recipe_works():
     wrapper = "KERNEL_RECIPE_SOURCE = r'''\n" "sub = CUSTOM_INFER(s,c)\n" "sub.to_csv('sub.csv')\n" "'''\n"
     out = replace_kernel_recipe(wrapper, "# === CUSTOM_INFER START ===\n" "def CUSTOM_INFER(sub, ctx):\n" "    return sub\n" "# === CUSTOM_INFER END ===\n" "sub = CUSTOM_INFER(sub, ctx)\n" "sub.to_csv('submission.csv')\n")

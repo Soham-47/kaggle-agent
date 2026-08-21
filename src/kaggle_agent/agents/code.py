@@ -917,7 +917,11 @@ def make_code_agent(
         ),
         tracer=tracer,
         tool_schemas=CODE_TOOL_SCHEMAS,
-        stall_after=3,
+        # Force the first bounded write early enough that a rejected artifact
+        # still leaves one model turn for deterministic validation feedback.
+        # This keeps the configured turn budget unchanged while avoiding a
+        # write arriving as the final possible turn.
+        stall_after=2,
         stall_nudge=(
             "STALL NUDGE: you have read enough. If the plan steps are already in "
             "the kernel recipe source (check with read_file kernel_recipe.py), "
