@@ -177,3 +177,124 @@ The kernel boundary demonstrated one real, reconciled logical mutation and
 zero duplicate pushes, but the remote execution failed. Submission mutation
 was not performed because no safe joined file-submission competition was
 available and the only joined competition required successful kernel output.
+
+## Final live qualification update
+
+This section supersedes the earlier readiness summary for the final
+qualification run.
+
+### Baseline and account context
+
+- Fresh base: `origin/main` at `3a46ae9937886d86c7a74785db14dafca005e78f`
+- Branch: `live-kernel-submission-certification`
+- Baseline: `698 passed, 1 deselected`
+- Account authentication: available through the existing Kaggle client.
+- The account has usable submission history only for the joined RSNA
+  kernels-only competition. File-submission candidates such as Titanic were
+  not joined; no competition was joined automatically.
+
+### Defects found and fixed
+
+1. Long experiment IDs were truncated for the Kaggle kernel `id` while the
+   display title retained the full value. Kaggle rejected the package with
+   `SaveKernel` 400. Kernel metadata now uses the canonical truncated slug as
+   its title, and a regression test covers the long-ID case.
+2. The checked-in RSNA contract required 1,000 rows although the authoritative
+   competition sample contains three test studies. The contract now requires
+   three rows, matching the real sample and the existing output validator.
+3. After a successful submission API call, the outbox was marked accepted
+   without immediately storing the authoritative submission ref. The success
+   path now reconciles history before finalizing the accepted action; a unit
+   test covers this behavior.
+
+Generated competition recipe/method files from the disposable run were
+restored and are not part of the change.
+
+### Successful kernel/output evidence
+
+The corrected normal path performed exactly one new logical kernel push:
+
+```text
+kernel ref:        sohamgawd47foden/rsna-knee-agent-live-kernel-qual-20260821-02
+kernel version:    1
+outbox:            prepared → sent → accepted
+remote execution:  ERROR
+duplicate pushes:  0
+```
+
+The corrected package reached Kaggle successfully, but the remote execution
+again ended in `ERROR` with no failure message or output. No second kernel push
+was attempted. For the submission qualification, an existing account-owned
+completed kernel was read-only reconciled and its real output was downloaded:
+
+```text
+completed kernel: sohamgawd47foden/rsna-knee-agent-20260819-141611
+status:           COMPLETE
+output:           submission.csv, 3 rows, contract-valid
+```
+
+### Successful submission evidence
+
+The existing production `_submit` phase performed exactly one notebook submit
+mutation using the completed kernel/version and the validated output contract:
+
+```text
+competition:      rsna-knee-abnormality-detection
+submission ref:   55674125
+status:            PENDING
+marker matches:   1
+outbox:           prepared → sent → accepted
+limits before:    5
+limits after:     4
+submit mutations: 1
+duplicate submits: 0
+```
+
+The real submission was then marked locally `unknown` and reconciled against
+authoritative Kaggle history. It returned to `accepted` with ref `55674125`
+and issued zero additional submit calls. Leaderboard scoring was still
+pending at certification time.
+
+### Final external-effect counts
+
+```text
+new kernel pushes:             1
+duplicate kernel pushes:       0
+new submissions:               1
+duplicate submissions:         0
+unsafe retries:                0
+Telegram messages:             0
+Kaggle mutations for testing:  2 total (1 kernel push, 1 submission)
+```
+
+### Updated readiness
+
+```text
+CODE_AGENT: READY
+LIVE_KERNEL_MUTATION: CONDITIONAL
+LIVE_SUBMISSION_MUTATION: READY
+EXACTLY_ONCE_EXTERNAL_ACTIONS: CONDITIONAL
+RISK_ADAPTIVE_AUTO_SAFE: CONDITIONAL
+UNRESTRICTED_AUTO_SAFE: NOT READY
+```
+
+`LIVE_KERNEL_MUTATION` remains conditional because the new real push was
+accepted and reconciled exactly once but did not reach remote `COMPLETE`.
+`LIVE_SUBMISSION_MUTATION` is ready for the one authorized submission path;
+the existing competition is kernels-only and the submission is pending score.
+
+### Final post-fix verification
+
+```text
+uv run python -m compileall -q src examples scripts       PASS
+uv run pytest -q -m "not integration"                     700 passed, 1 deselected
+focused supervisor/outbox/replay/config/kernel tests     209 passed
+uv run python scripts/run_full_system_harness.py           PASS
+uv run python scripts/benchmark_code_agent.py              10/10 normal;
+                                                           3/3 bounded probes
+git diff --check                                           PASS
+```
+
+The only committed changes from this qualification are the three production
+fixes, their regression tests, and this report. AUTO_SAFE defaults remain
+disabled; no Telegram messages were sent.

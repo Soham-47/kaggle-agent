@@ -2640,7 +2640,16 @@ class Orchestrator:
 
         if not dry and result.submit_ok:
             if outbox_action is not None:
-                self._outbox.reconcile(outbox_action.action_id, status="accepted")
+                # Prefer the authoritative submission record so the durable
+                # intent retains the remote submission id. If Kaggle's
+                # history is briefly eventual, keep the successful API result
+                # accepted and let the next reconciliation fill the ref.
+                reconciled = self._reconcile_outbox_action(outbox_action)
+                if reconciled.status != "accepted":
+                    reconciled = self._outbox.reconcile(
+                        outbox_action.action_id, status="accepted"
+                    )
+                outbox_action = reconciled
             mark_submitted(self.root)
             policy = self._submission_autonomy()
             if policy is not None and (
