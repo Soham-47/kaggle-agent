@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from kaggle_agent.agents.loop import StageAgent, StageAgentConfig, StageAgentResult
+from kaggle_agent.paths import memory_dir
 from kaggle_agent.experiment_fingerprint import (
     canonical_hash,
     recipe_hash,
@@ -490,7 +491,7 @@ def _source_card_catalog(root: Path) -> dict[str, str]:
     equivalent citation because it is what PLAN commonly carries forward.
     """
     catalog: dict[str, str] = {}
-    cards_dir = root / "memory" / "research-deep"
+    cards_dir = memory_dir(root) / "research-deep"
     if not cards_dir.is_dir():
         return catalog
     for path in sorted(cards_dir.glob("source-*.md")):

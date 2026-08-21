@@ -190,6 +190,25 @@ def test_code_write_methods_persists_grounding_card_reference(tmp_path: Path):
     ]
 
 
+def test_code_source_cards_follow_managed_state_root(tmp_path: Path, monkeypatch):
+    from kaggle_agent.agents.code import build_code_tools
+
+    root = tmp_path / "ka"
+    state_root = tmp_path / "managed-state"
+    monkeypatch.setenv("KAGGLE_AGENT_STATE_ROOT", str(state_root))
+    _write_source_card(state_root, "train ConvNeXt with DINOv2 backbone")
+    ws = root / "competitions" / "rsna_knee"
+    (ws / "pipeline").mkdir(parents=True)
+    tools, _, _ = build_code_tools(root, ws)
+
+    result = tools["write_methods"](
+        implement_steps=["train ConvNeXt with DINOv2 backbone"],
+        source_card_refs=["source-rank"],
+    )
+
+    assert result.endswith("pipeline/methods.json")
+
+
 def test_code_write_recipe_requires_card_grounding_not_just_plan_tokens(tmp_path: Path):
     from kaggle_agent.agents.code import build_code_tools
 
