@@ -9,8 +9,10 @@ from pathlib import Path
 from kaggle_agent.agents.loop import StageAgent, StageAgentConfig, StallControl
 from kaggle_agent.agents.plan import build_plan_tools, make_plan_agent, plan_is_ready, write_plan_text
 from kaggle_agent.agents.code import (
+    CodeOutcome,
     ValidationPipeline,
     calls_custom_infer,
+    classify_code_outcome,
     extract_recipe_string,
     make_code_agent,
     methods_payload_ok,
@@ -22,6 +24,7 @@ from kaggle_agent.agents.code import (
     valid_python,
     writes_submission_csv,
 )
+from kaggle_agent.agents.loop import StageAgentResult
 
 
 class _ScriptedZen:
@@ -77,6 +80,24 @@ def test_plan_write_then_done():
     assert out.stop_reason == "done"
     assert stored["h"] == "rank-mean DINOv2 slots"
     assert stored["a"] == "recipe"
+
+
+def test_code_outcomes_are_bounded_and_verifier_owned():
+    assert classify_code_outcome(
+        StageAgentResult(stop_reason="done", turns=1), artifact_valid=True
+    ) is CodeOutcome.CODE_READY
+    assert classify_code_outcome(
+        StageAgentResult(stop_reason="stalled", turns=3)
+    ) is CodeOutcome.NO_IMPLEMENTABLE_PLAN
+    assert classify_code_outcome(
+        StageAgentResult(stop_reason="turn_cap", turns=5)
+    ) is CodeOutcome.TURN_BUDGET_EXHAUSTED
+    assert classify_code_outcome(
+        StageAgentResult(stop_reason="no_llm", turns=2)
+    ) is CodeOutcome.TOOL_PROTOCOL_FAILURE
+    assert classify_code_outcome(
+        StageAgentResult(stop_reason="stalled", turns=1), provider_error=True
+    ) is CodeOutcome.PROVIDER_FAILURE
 
 
 def test_make_plan_agent_rejects_done_until_write_plan(tmp_path: Path):
@@ -416,11 +437,62 @@ def test_code_agent_stops_after_fallback_when_model_ignores_forced_write(tmp_pat
         plan_text="steps: rank average predictions",
     )
     out = agent.run("test")
-    assert out.stop_reason == "stalled"
+    assert out.stop_reason == "turn_cap"
     assert state.get("wrote_recipe") == "1"
     recipe = (pipe / "kernel_recipe.py").read_text(encoding="utf-8")
     assert "# === CUSTOM_INFER START ===" in recipe
     assert "rank" in recipe
+
+
+def test_code_agent_reaches_write_after_three_reads(tmp_path: Path):
+    """A read-only prefix must reach the bounded write nudge, not stop early."""
+    root = tmp_path / "ka"
+    (root / "memory").mkdir(parents=True)
+    (root / "memory" / "state.md").write_text("# state\n- phase: IDLE\n")
+    _write_source_card(root)
+    ws = root / "competitions" / "rsna_knee"
+    pipe = ws / "pipeline"
+    pipe.mkdir(parents=True)
+    (pipe / "kernel_recipe.py").write_text(
+        "KERNEL_RECIPE_SOURCE = r'''\n"
+        "# === CUSTOM_INFER START ===\n"
+        "def CUSTOM_INFER(sub, ctx):\n"
+        "    return sub\n"
+        "# === CUSTOM_INFER END ===\n"
+        "sub = CUSTOM_INFER(sub, ctx)\n"
+        "sub.to_csv('submission.csv')\n"
+        "'''")
+    (pipe / "methods.json").write_text(json.dumps({"implement_steps": ["old step"]}))
+    recipe = (
+        "# === CUSTOM_INFER START ===\n"
+        "def CUSTOM_INFER(sub, ctx):\n"
+        "    return sub.rank(method='average', pct=True)\n"
+        "# === CUSTOM_INFER END ===\n"
+        "sub = CUSTOM_INFER(sub, ctx)\n"
+        "sub.to_csv('submission.csv')\n"
+    )
+    zen = _ScriptedZen(
+        [
+            {"tool": "read_cards", "args": {}},
+            {"tool": "read_plan", "args": {}},
+            {"tool": "read_file", "args": {"rel": "pipeline/kernel_recipe.py"}},
+            {"tool": "write_kernel_recipe", "args": {"source": recipe, "source_card_refs": ["source-rank"]}},
+            {"tool": "done", "args": {}},
+        ]
+    )
+    agent, state = make_code_agent(
+        zen,
+        "m",
+        root,
+        workspace=ws,
+        config=StageAgentConfig(max_minutes=5, max_tool_turns=10),
+        plan_text="steps: rank average predictions",
+    )
+
+    out = agent.run("code")
+
+    assert out.stop_reason == "done"
+    assert state["wrote_recipe"] == "1"
 
 
 def test_code_agent_never_invents_a_recipe_after_stall(tmp_path: Path):
@@ -471,9 +543,9 @@ def test_code_agent_never_invents_a_recipe_after_stall(tmp_path: Path):
 
     out = agent.run("code")
 
-    assert out.stop_reason == "stalled"
+    assert out.stop_reason == "turn_cap"
     assert state["wrote_recipe"] == ""
-    assert not any(isinstance(choice, dict) for choice in zen.choices)
+    assert any(isinstance(choice, dict) for choice in zen.choices)
     assert "rank(method" not in (pipe / "kernel_recipe.py").read_text(encoding="utf-8")
 
 
@@ -596,7 +668,7 @@ def test_code_agent_fallback_stops_without_writing_a_synthetic_variant(tmp_path:
         plan_text=plan,
     )
     out = agent.run("test")
-    assert out.stop_reason == "stalled"
+    assert out.stop_reason == "turn_cap"
     recipe = (pipe / "kernel_recipe.py").read_text(encoding="utf-8")
     assert "T.Resize((224, 224))" in recipe
 

@@ -5,10 +5,11 @@ from __future__ import annotations
 import ast
 import json
 import re
+from enum import Enum
 from pathlib import Path
 from typing import Any, Callable
 
-from kaggle_agent.agents.loop import StageAgent, StageAgentConfig
+from kaggle_agent.agents.loop import StageAgent, StageAgentConfig, StageAgentResult
 from kaggle_agent.experiment_fingerprint import (
     canonical_hash,
     recipe_hash,
@@ -52,6 +53,50 @@ DEFAULT_BRIEF = (
     "input resolution, loss, epochs, and fold scheme. Attach listed datasets; "
     "discover test dirs; rank-mean members."
 )
+
+
+class CodeOutcome(str, Enum):
+    """Supervisor-visible, bounded outcomes for the CODE stage."""
+
+    CODE_READY = "CODE_READY"
+    NO_IMPLEMENTABLE_PLAN = "NO_IMPLEMENTABLE_PLAN"
+    PROVIDER_FAILURE = "PROVIDER_FAILURE"
+    TOOL_PROTOCOL_FAILURE = "TOOL_PROTOCOL_FAILURE"
+    TURN_BUDGET_EXHAUSTED = "TURN_BUDGET_EXHAUSTED"
+
+
+def classify_code_outcome(
+    result: StageAgentResult,
+    *,
+    artifact_valid: bool = False,
+    provider_error: bool = False,
+) -> CodeOutcome:
+    """Map an agent stop to a bounded CODE result.
+
+    The model's ``done`` action is deliberately absent from this decision.  A
+    CODE stage is ready only after the caller has independently validated the
+    required artifact.
+    """
+    if artifact_valid:
+        return CodeOutcome.CODE_READY
+    if provider_error:
+        return CodeOutcome.PROVIDER_FAILURE
+    evidence = "\n".join(
+        [*result.errors, *result.rejected_writes, *result.observations]
+    ).lower()
+    if any(
+        marker in evidence
+        for marker in (
+            "invalid_json",
+            "unknown tool",
+            "invalid tool arguments",
+            "tool protocol",
+        )
+    ) or result.stop_reason == "no_llm":
+        return CodeOutcome.TOOL_PROTOCOL_FAILURE
+    if result.stop_reason in {"turn_cap", "time"}:
+        return CodeOutcome.TURN_BUDGET_EXHAUSTED
+    return CodeOutcome.NO_IMPLEMENTABLE_PLAN
 
 CODE_TOOL_SCHEMAS: dict[str, dict[str, Any]] = {
     "read_cards": {
@@ -880,8 +925,11 @@ def make_code_agent(
             "every plan step (the recipe must write submission.csv and keep "
             "CUSTOM_INFER markers). Then call done."
         ),
-        # A stalled model is not evidence that a recipe change is valid. Stop
-        # the phase and let HEAL request a concrete, card-backed implementation.
-        stall_force=lambda _episode: None,
+        # Ask the model for one bounded write turn after the nudge.  The write
+        # tool still applies all normal recipe/card/no-op validation; this only
+        # prevents a read-only prefix from being mistaken for a completed CODE
+        # attempt.  If the model still cannot produce a valid artifact, the
+        # existing turn cap and supervisor failure path remain authoritative.
+        force_after_stall="write_kernel_recipe",
     )
     return agent, state

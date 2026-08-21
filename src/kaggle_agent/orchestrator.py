@@ -23,6 +23,7 @@ from kaggle_agent.judge import (
     new_judge_state,
 )
 from kaggle_agent.llm.router import ModelRouter
+from kaggle_agent.llm.zen_client import ZenError
 from kaggle_agent.memory.ingest import build_context_pack
 from kaggle_agent.memory.write import (
     append_daily_event,
@@ -43,7 +44,7 @@ from kaggle_agent.research.browser import (
     default_serp,
     merge_browser_into_research_md,
 )
-from kaggle_agent.agents.code import make_code_agent
+from kaggle_agent.agents.code import CodeOutcome, classify_code_outcome, make_code_agent
 from kaggle_agent.agents.loop import StageAgent, StageAgentConfig
 from kaggle_agent.agents.plan import make_plan_agent, write_plan_text
 from kaggle_agent.agents.verification import (
@@ -185,6 +186,7 @@ class CycleResult:
     wrote_recipe: bool = False
     plan_verified: bool | None = None
     code_verified: bool | None = None
+    code_outcome: str | None = None
     code_agent: str | None = None
     errors: list[str] = field(default_factory=list)
     stage_outcomes: list[StageOutcome] = field(default_factory=list)
@@ -1535,6 +1537,7 @@ class Orchestrator:
         check = ensure_pipeline_ready(workspace)
         if not check.ok:
             result.code_ok = False
+            result.code_outcome = CodeOutcome.NO_IMPLEMENTABLE_PLAN.value
             result.errors.append(f"code: missing {check.missing}")
             append_daily_log(f"code missing={check.missing}", self.root)
             if self._tracer is not None:
@@ -1554,6 +1557,7 @@ class Orchestrator:
                 manifest = json.loads(image_manifest.read_text(encoding="utf-8"))
             except json.JSONDecodeError as exc:
                 result.code_ok = False
+                result.code_outcome = CodeOutcome.TOOL_PROTOCOL_FAILURE.value
                 result.errors.append(f"code: image contract JSON invalid: {exc}")
                 return state
             if (
@@ -1562,113 +1566,210 @@ class Orchestrator:
                 and zen is None
             ):
                 result.code_ok = True
+                result.code_outcome = CodeOutcome.CODE_READY.value
                 result.wrote_recipe = True
                 result.wrote_methods = True
                 result.code_agent = "image-2d-dino-mil-template"
                 append_daily_log("code: using validated 2D DINO MIL template", self.root)
                 return state
-        agent, code_state = make_code_agent(
-            zen,
-            model,
-            self.root,
-            workspace,
-            self.settings.code_agent_config(),
-            plan_text=result.plan_text or "",
-            log=lambda msg: append_daily_log(msg, self.root),
-            tracer=self._tracer,
-        )
         pack = build_context_pack(
             self.root,
             view="code",
             workspace=workspace,
             plan_text=result.plan_text or "",
         )
-        out = agent.run(
-            f"Competition: {self.competition.slug}\n\n{pack.as_prompt_block()}"
-        )
-        result.code_agent = out.agent
-        if self._tracer is not None:
-            self._tracer.emit(
-                "agent_execution",
-                stage="code",
-                agent=out.agent,
-                stop_reason=out.stop_reason,
-                turns=out.turns,
-                tool_calls=out.tool_calls,
-                writes=out.writes,
-                rejected_writes=out.rejected_writes,
-                errors=out.errors,
-                verified=bool(out.writes),
+        base_context = f"Competition: {self.competition.slug}\n\n{pack.as_prompt_block()}"
+        feedback = ""
+        retryable = {
+            CodeOutcome.NO_IMPLEMENTABLE_PLAN,
+            CodeOutcome.TOOL_PROTOCOL_FAILURE,
+            CodeOutcome.TURN_BUDGET_EXHAUSTED,
+        }
+        for attempt in range(1, 3):
+            agent, code_state = make_code_agent(
+                zen,
+                model,
+                self.root,
+                workspace,
+                self.settings.code_agent_config(),
+                plan_text=result.plan_text or "",
+                log=lambda msg: append_daily_log(msg, self.root),
+                tracer=self._tracer,
             )
-        result.wrote_custom_infer = bool(code_state.get("wrote_custom_infer"))
-        result.wrote_methods = bool(code_state.get("wrote_methods"))
-        result.wrote_recipe = bool(code_state.get("wrote_recipe"))
-        if self._tracer is not None:
-            self._tracer.emit(
-                "tool",
-                stage="code",
-                tool="code_hook",
-                source="written" if result.wrote_custom_infer else "identity",
-                recipe="written" if result.wrote_recipe else "static",
-            )
-        append_daily_log(
-            f"code agent stop={out.stop_reason} turns={out.turns} "
-            f"wrote_methods={result.wrote_methods} wrote_recipe={result.wrote_recipe} "
-            f"wrote_custom_infer={result.wrote_custom_infer}",
-            self.root,
-        )
-        if not (result.wrote_recipe or result.wrote_custom_infer):
-            from kaggle_agent.agents.code import _recipe_text
-
-            recipe = _recipe_text(workspace)
-            if result.dry_run and zen is None and "submission.csv" in recipe:
-                result.code_ok = True
-                append_daily_log("code dry-run: using existing static recipe", self.root)
+            provider_error = False
+            out = None
+            try:
+                out = agent.run(base_context + feedback)
+            except ZenError:
+                provider_error = True
+                outcome = CodeOutcome.PROVIDER_FAILURE
+                result.code_outcome = outcome.value
+                result.code_ok = False
+                result.errors.append("code: provider failure")
+                append_daily_log("code rejected: provider failure", self.root)
+                if self._tracer is not None:
+                    self._tracer.emit(
+                        "agent_execution",
+                        stage="code",
+                        agent="code",
+                        attempt=attempt,
+                        outcome=outcome.value,
+                        provider_failure=True,
+                        verified=False,
+                    )
                 return state
-            result.code_ok = False
-            result.errors.append("code: no recipe change was written")
-            append_daily_log("code rejected: no recipe change was written", self.root)
+
+            assert out is not None
+            result.code_agent = out.agent
+            # These flags describe the current candidate, not an abandoned
+            # previous attempt.  A failed first patch must not make downstream
+            # stages believe that a valid artifact survived the retry.
+            result.wrote_custom_infer = bool(code_state.get("wrote_custom_infer"))
+            result.wrote_methods = bool(code_state.get("wrote_methods"))
+            result.wrote_recipe = bool(code_state.get("wrote_recipe"))
+            outcome = classify_code_outcome(out, provider_error=provider_error)
             if self._tracer is not None:
                 self._tracer.emit(
-                    "agent_verification",
+                    "agent_execution",
                     stage="code",
                     agent=out.agent,
+                    attempt=attempt,
+                    stop_reason=out.stop_reason,
+                    turns=out.turns,
+                    tool_calls=out.tool_calls,
+                    writes=out.writes,
+                    rejected_writes=out.rejected_writes,
+                    errors=out.errors,
+                    outcome=outcome.value,
                     verified=False,
-                    detail="no implementation artifact",
                 )
-            return state
-        try:
-            import sys
-
-            sys.path.insert(0, str(workspace))
-            from pipeline.recipe import apply_from_cards, apply_recipe  # type: ignore
-
-            applied = apply_recipe(workspace, data_dir=self.root / "data")
-            cards = apply_from_cards(workspace)
-            result.code_ok = True
+                self._tracer.emit(
+                    "tool",
+                    stage="code",
+                    tool="code_hook",
+                    attempt=attempt,
+                    source="written" if result.wrote_custom_infer else "identity",
+                    recipe="written" if result.wrote_recipe else "static",
+                )
             append_daily_log(
-                f"code recipe {applied.message} cards={cards.message} "
-                f"present={check.present}",
+                f"code attempt={attempt} stop={out.stop_reason} turns={out.turns} "
+                f"outcome={outcome.value} wrote_methods={result.wrote_methods} "
+                f"wrote_recipe={result.wrote_recipe} "
+                f"wrote_custom_infer={result.wrote_custom_infer}",
                 self.root,
             )
-            if not applied.ok:
+
+            attempt_has_artifact = bool(
+                code_state.get("wrote_recipe") or code_state.get("wrote_custom_infer")
+            )
+            if not attempt_has_artifact:
+                from kaggle_agent.agents.code import _recipe_text
+
+                recipe = _recipe_text(workspace)
+                if result.dry_run and zen is None and "submission.csv" in recipe:
+                    result.code_ok = True
+                    result.code_outcome = CodeOutcome.CODE_READY.value
+                    append_daily_log(
+                        "code dry-run: using existing static recipe", self.root
+                    )
+                    return state
+                if attempt < 2 and outcome in retryable:
+                    evidence = " ".join(
+                        [*out.errors, *out.rejected_writes, *out.observations]
+                    )[-1600:]
+                    feedback = (
+                        "\n\nVERIFICATION FEEDBACK: The previous CODE attempt did not "
+                        "produce a validated implementation artifact. Start a fresh "
+                        "bounded attempt. Read only the directly relevant files, then "
+                        "write the required recipe or call done only if it already "
+                        f"implements the plan. Observed: {evidence}"
+                    )
+                    append_daily_log(
+                        "code retrying once with fresh session after missing artifact",
+                        self.root,
+                    )
+                    continue
+                result.code_outcome = outcome.value
+                result.code_ok = False
+                result.errors.append("code: no recipe change was written")
                 append_daily_log(
-                    f"code recipe skipped (kernel will train on Kaggle): {applied.message}",
+                    f"code rejected: no recipe change was written ({outcome.value})",
                     self.root,
                 )
-        except Exception as exc:  # noqa: BLE001
-            result.code_ok = False
-            result.errors.append(f"code: recipe failed: {exc}")
-            append_daily_log(f"code recipe failed: {exc}", self.root)
-        if self._tracer is not None:
-            self._tracer.emit(
-                "agent_verification",
-                stage="code",
-                agent=out.agent,
-                verified=bool(result.code_ok),
-                detail="recipe validation",
-            )
-        return state
+                if self._tracer is not None:
+                    self._tracer.emit(
+                        "agent_verification",
+                        stage="code",
+                        agent=out.agent,
+                        attempt=attempt,
+                        outcome=outcome.value,
+                        verified=False,
+                        detail="no implementation artifact",
+                    )
+                return state
+
+            try:
+                import sys
+
+                sys.path.insert(0, str(workspace))
+                from pipeline.recipe import apply_from_cards, apply_recipe  # type: ignore
+
+                applied = apply_recipe(workspace, data_dir=self.root / "data")
+                cards = apply_from_cards(workspace)
+                result.code_ok = True
+                result.code_outcome = classify_code_outcome(
+                    out, artifact_valid=True
+                ).value
+                append_daily_log(
+                    f"code recipe {applied.message} cards={cards.message} "
+                    f"present={check.present}",
+                    self.root,
+                )
+                if not applied.ok:
+                    append_daily_log(
+                        f"code recipe skipped (kernel will train on Kaggle): {applied.message}",
+                        self.root,
+                    )
+                if self._tracer is not None:
+                    self._tracer.emit(
+                        "agent_verification",
+                        stage="code",
+                        agent=out.agent,
+                        attempt=attempt,
+                        outcome=CodeOutcome.CODE_READY.value,
+                        verified=True,
+                        detail="recipe validation",
+                    )
+                return state
+            except Exception as exc:  # noqa: BLE001
+                outcome = CodeOutcome.NO_IMPLEMENTABLE_PLAN
+                if attempt < 2:
+                    feedback = (
+                        "\n\nVERIFICATION FEEDBACK: The candidate artifact failed "
+                        f"deterministic validation ({type(exc).__name__}). Read the "
+                        "affected recipe and make the smallest correction; do not "
+                        "change tests or broaden scope."
+                    )
+                    append_daily_log(
+                        "code retrying once after deterministic artifact validation failure",
+                        self.root,
+                    )
+                    continue
+                result.code_outcome = outcome.value
+                result.code_ok = False
+                result.errors.append(f"code: recipe failed: {exc}")
+                append_daily_log(f"code recipe failed: {exc}", self.root)
+                if self._tracer is not None:
+                    self._tracer.emit(
+                        "agent_verification",
+                        stage="code",
+                        agent=out.agent,
+                        attempt=attempt,
+                        outcome=outcome.value,
+                        verified=False,
+                        detail="recipe validation",
+                    )
+                return state
 
     def _local_smoke(self, state: AgentState, result: CycleResult) -> AgentState:
         sample_csv = _first_existing(

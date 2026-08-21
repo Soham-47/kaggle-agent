@@ -162,6 +162,40 @@ def test_supervisor_mode_returns_failures_to_parent_without_inline_debug(tmp_pat
     assert orchestrator._debug_runner is None
 
 
+def test_code_missing_artifact_retries_once_with_fresh_agent(monkeypatch, tmp_path: Path):
+    from kaggle_agent.agents.loop import StageAgentResult
+    from kaggle_agent.orchestrator import CycleResult
+
+    root = tmp_path / "kaggle-agent"
+    _copy_min(root, Path(__file__).resolve().parents[1])
+    orchestrator = _judge_orch(root, zen=object())
+    sessions: list[object] = []
+
+    class _StalledAgent:
+        def run(self, _context: str) -> StageAgentResult:
+            return StageAgentResult(stop_reason="stalled", turns=3, agent="code")
+
+    def make_agent(*_args, **_kwargs):  # noqa: ANN001
+        session = object()
+        sessions.append(session)
+        return _StalledAgent(), {}
+
+    monkeypatch.setattr("kaggle_agent.orchestrator.make_code_agent", make_agent)
+    result = CycleResult(
+        competition="rsna_knee",
+        dry_run=False,
+        plan_text="steps: rank average predictions",
+    )
+
+    orchestrator._code(AgentState(), result)
+
+    assert len(sessions) == 2
+    assert sessions[0] is not sessions[1]
+    assert result.code_ok is False
+    assert result.code_outcome == "NO_IMPLEMENTABLE_PLAN"
+    assert result.errors == ["code: no recipe change was written"]
+
+
 def _write_kernel_output(root: Path, comp, exp_id: str) -> Path:  # noqa: ANN001
     kernel_dir = root / "competitions" / "rsna_knee" / "notebooks" / exp_id
     (kernel_dir / "output").mkdir(parents=True)
