@@ -143,3 +143,30 @@ def test_auto_safe_promotes_accepted_generation_and_starts_one_resume_worker(tmp
     assert len(requests) == 1
     assert requests[0][0].generation_id == new.generation_id
     assert requests[0][0].resume_request == resume
+
+
+def test_initial_worker_request_gets_durable_cycle_id(tmp_path: Path, monkeypatch):
+    settings = _settings(tmp_path, "observe")
+    supervisor = Supervisor(settings, tmp_path)
+    generation = RuntimeGeneration(
+        "generation-0001", RuntimeRevision("a", "b", "generation-0001"),
+        str(tmp_path), created_at="now",
+    )
+    requests = []
+
+    class FakeProcess:
+        pid = 12345
+
+        def wait(self):
+            return 0
+
+    def start(_launcher, request, *, cwd=None):
+        requests.append(request)
+        return FakeProcess()
+
+    monkeypatch.setattr("kaggle_agent.supervisor.loop.WorkerLauncher.start", start)
+    supervisor._start_worker(generation, "demo", "observe", wait=True)
+
+    assert len(requests) == 1
+    assert requests[0].cycle_id
+    assert requests[0].cycle_id.startswith("cycle-")

@@ -10,11 +10,11 @@
     "final_focused_pass": true,
     "findings": [],
     "first_focused_pass": true,
-    "llm_calls": 3,
+    "llm_calls": 4,
     "reason": "verified candidate is ready",
     "review_verdict": "APPROVE",
     "status": "PATCH_READY",
-    "tool_turns": 3
+    "tool_turns": 4
   },
   {
     "attempts": 1,
@@ -61,11 +61,11 @@
     "final_focused_pass": true,
     "findings": [],
     "first_focused_pass": true,
-    "llm_calls": 4,
+    "llm_calls": 3,
     "reason": "verified candidate is ready",
     "review_verdict": "APPROVE",
     "status": "PATCH_READY",
-    "tool_turns": 4
+    "tool_turns": 3
   },
   {
     "attempts": 1,
@@ -78,11 +78,11 @@
     "final_focused_pass": true,
     "findings": [],
     "first_focused_pass": true,
-    "llm_calls": 4,
+    "llm_calls": 3,
     "reason": "verified candidate is ready",
     "review_verdict": "APPROVE",
     "status": "PATCH_READY",
-    "tool_turns": 4
+    "tool_turns": 3
   },
   {
     "attempts": 1,
@@ -112,11 +112,11 @@
     "final_focused_pass": true,
     "findings": [],
     "first_focused_pass": true,
-    "llm_calls": 3,
+    "llm_calls": 5,
     "reason": "verified candidate is ready",
     "review_verdict": "APPROVE",
     "status": "PATCH_READY",
-    "tool_turns": 3
+    "tool_turns": 5
   },
   {
     "attempts": 1,
@@ -129,14 +129,14 @@
     "final_focused_pass": true,
     "findings": [],
     "first_focused_pass": true,
-    "llm_calls": 3,
+    "llm_calls": 5,
     "reason": "verified candidate is ready",
     "review_verdict": "APPROVE",
     "status": "PATCH_READY",
-    "tool_turns": 3
+    "tool_turns": 4
   },
   {
-    "attempts": 2,
+    "attempts": 1,
     "candidate_diff": "diff --git a/src/enum_helper.py b/src/enum_helper.py\nindex 989fa4b..3c8d776 100644\n--- a/src/enum_helper.py\n+++ b/src/enum_helper.py\n@@ -4,4 +4,4 @@ class Status(Enum):\n     READY = 'ready'\n \n def parse_status(value):\n-    return Status(value.upper())\n+    return Status(value.lower())\n",
     "case": "enum_conversion",
     "changed_lines": 2,
@@ -145,12 +145,12 @@
     ],
     "final_focused_pass": true,
     "findings": [],
-    "first_focused_pass": false,
-    "llm_calls": 8,
+    "first_focused_pass": true,
+    "llm_calls": 3,
     "reason": "verified candidate is ready",
     "review_verdict": "APPROVE",
     "status": "PATCH_READY",
-    "tool_turns": 5
+    "tool_turns": 3
   },
   {
     "attempts": 1,
