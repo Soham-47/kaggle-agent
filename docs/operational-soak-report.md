@@ -2,127 +2,136 @@
 
 ## Scope and baseline
 
-- Branch: `operational-soak`
-- Starting SHA: `87596a557c771897de6426aea456b9246f67a9b0`
+- Branch: `final-controlled-rollout`
+- Starting SHA: `69c326639d924bb61acd18416e5723be1f6b6f6f`
 - Competition: `rsna_knee` / `rsna-knee-abnormality-detection`
-- DeepSeek: available through the existing dotenv path
-- Kaggle credentials: available; authenticated read preflight passed
-- Telegram credentials: available, but no Telegram command or message was sent
-- AUTO_SAFE remained bounded and no real Kaggle mutation was enabled
+- State root: disposable `/tmp/kaggle-agent-final-controlled-gHWnEv/state`
+- DeepSeek: available through the existing dotenv path; no key was logged or persisted
+- Kaggle: authenticated read path used; no mutation was enabled
+- Telegram: credentials were available, but no command or message was sent
+- AUTO_SAFE: no real-cycle promotion was triggered; unrestricted AUTO_SAFE remained disabled
 
-Fresh baseline:
-
-```text
-uv run python -m compileall -q src examples scripts       PASS
-uv run pytest -q -m "not integration"                     696 passed, 1 deselected
-git diff --check                                          PASS
-```
-
-The final suite contains one additional regression test for the discovered
-managed-state bug, so the final count is `697 passed, 1 deselected`.
-
-## Real soak cycles
-
-Three disposable attempts were made across two isolated state roots
-(`/tmp/kaggle-agent-soak-20260821-asiCKi` for the failing run and
-`/tmp/kaggle-agent-soak-fixed-gYj9qp` for the two reruns):
-
-1. The first attempt reached real RESEARCH and CODE, then was stopped after
-   its bounded CODE retry path repeatedly rejected valid card references.
-2. After the fix below, cycle `cycle-975520268f0d` completed all three dry-run
-   slices successfully.
-3. Cycle `cycle-e3522a1cd7c5` completed all three dry-run slices successfully.
-
-The two completed cycles therefore produced six successful dry-run slices.
-Each slice reached RESEARCH, PLAN, CODE, LOCAL_SMOKE, local-only
-KERNEL_TRAIN, VALIDATE_SUB, dry submission preparation, FEEDBACK, HEAL, and
-REPORT. The worker results were `SUCCESS`; there were no worker incidents,
-repairs, promotions, rollbacks, exhausted incidents, duplicate workers, or
-duplicate promotions.
-
-The normal research loop remained bounded. Some research agents reached their
-turn cap and some source-card writes were rejected by the existing provenance
-guards; these were recorded as research/tool outcomes and never classified as
-`CODE_DEFECT`. No false `CODE_DEFECT` classification occurred.
-
-## Genuine defect found and fixed
-
-Managed workers correctly redirected mutable memory and research cards to the
-external `KAGGLE_AGENT_STATE_ROOT`, but the CODE source-card catalog still
-looked only at `<code_root>/memory/research-deep`. In a real worker this made
-valid card references fail with `unknown source card`, causing the bounded CODE
-loop to spend both attempts without a usable artifact.
-
-The smallest fix was to resolve the catalog through the existing `memory_dir`
-path helper, preserving the state-root architecture. A regression test places
-cards only in the managed state root and verifies that `write_methods` resolves
-them successfully.
-
-Files changed:
-
-- `src/kaggle_agent/agents/code.py`
-- `tests/test_plan_code_agents.py`
-
-The operational run did not uncover an unsafe external-action retry, duplicate
-worker, replay error, protected-path acceptance, or policy bypass.
-
-## DeepSeek and CODE reliability
-
-The real 10-case implementer benchmark passed `10/10`; every patch passed its
-focused test and independent review.
-
-The separate 5-case CODE benchmark was provider-variable: two runs produced
-`3/5` and `4/5` final valid normal artifacts. All malformed, premature-done,
-and repeated-no-op probes remained bounded and failed closed. The real soak
-cycles completed all six production CODE slices after deterministic validation;
-some intermediate model attempts were rejected for stale/fabricated card
-references or invalid `CUSTOM_INFER` shape and were safely corrected or
-accepted only after artifact validation.
-
-This is sufficient to confirm bounded operational behavior, but the separate
-benchmark variance means CODE reliability remains `CONDITIONAL` for a stronger
-provider-certification claim.
-
-## Risk and repair metrics
-
-| Metric | Result |
-| --- | ---: |
-| Completed real dry-run cycles | 2 |
-| Completed dry-run slices | 6 |
-| Worker incidents | 0 |
-| `CODE_DEFECT` incidents | 0 |
-| False `CODE_DEFECT` classifications | 0 |
-| UNKNOWN incidents | 0 |
-| Repairs / accepted repairs | 0 / 0 |
-| Promotions / rollbacks | 0 / 0 |
-| Risk decisions in real cycles | 0 (no repair incident reached policy evaluation) |
-| Duplicate workers | 0 |
-| Duplicate promotions | 0 |
-| Duplicate logical external actions | 0 |
-| Protected changes accepted | 0 |
-| Kaggle mutations/submissions | 0 |
-| Telegram messages | 0 |
-
-The existing synthetic certification still covers LOW/MEDIUM/HIGH/PROHIBITED
-risk behavior, promotion, resume, and rollback. This real soak did not create
-a natural repair incident, so it does not independently re-certify those
-synthetic paths.
-
-## Required regression verification
+Fresh baseline before this run:
 
 ```text
 uv run python -m compileall -q src examples scripts       PASS
 uv run pytest -q -m "not integration"                     697 passed, 1 deselected
+git diff --check                                          PASS
+```
+
+## Real soak campaign
+
+Five consecutive real worker cycles ran in OBSERVE mode against the configured
+RSNA Knee competition with `dry_run=True`. Every run used a real supervisor,
+worker subprocess, stage ledger, managed state root, Kaggle read path, and
+DeepSeek-backed RESEARCH, PLAN, and CODE stages.
+
+| Cycle | Worker result | Slices | Incidents | Promotions | External mutations |
+| --- | --- | ---: | ---: | ---: | ---: |
+| `cycle-3078b0dde417` | SUCCESS | 3 | 0 | 0 | 0 |
+| `cycle-ddb465a2efaa` | SUCCESS | 3 | 0 | 0 | 0 |
+| `cycle-7e8961dc4542` | SUCCESS | 3 | 0 | 0 | 0 |
+| `cycle-44343691d223` | SUCCESS | 1 | 0 | 0 | 0 |
+| `cycle-3913adab4a04` | SUCCESS | 1 | 0 | 0 | 0 |
+
+Aggregate result: 5/5 successful cycles and 11 attempted dry-run slices;
+9 slices had successful CODE stage outcomes and 2 recorded bounded CODE
+recoverable failures before a later slice completed the cycle.
+All slices reached the safe local path through RESEARCH, PLAN, CODE,
+LOCAL_SMOKE, local-only KERNEL_TRAIN, VALIDATE_SUB, dry submission
+preparation, FEEDBACK, HEAL, and REPORT where the slice produced a usable
+candidate.
+
+Two slices in the third multi-slice cycle recorded bounded CODE recoverable
+failures before the later slice succeeded. The failures were caused by the
+model proposing stale or fabricated source-card references; deterministic tool
+policy rejected them, the bounded session ended, and no source repair or
+external action was attempted. This is recorded as CODE reliability evidence,
+not as a false `CODE_DEFECT` classification.
+
+## CODE and RESEARCH reliability
+
+Operational counts:
+
+| Metric | Result |
+| --- | ---: |
+| CODE stage successes | 9 |
+| Bounded CODE recoverable slice failures | 2 |
+| CODE provider failures | 0 |
+| CODE infinite/no-op loops | 0 |
+| RESEARCH stage failures | 0 |
+| PLAN stage failures | 0 |
+| Fresh CODE revision sessions | bounded existing retry path |
+| False `CODE_DEFECT` classifications | 0 |
+
+The real implementer reliability benchmark passed 10/10 cases, including
+focused verification and independent review.
+
+The separate real DeepSeek CODE benchmark was bounded in all 5 normal cases,
+but only 2/5 produced a valid final artifact in this run:
+
+```text
+simple_pipeline   bounded, final artifact: fail
+multi_step_recipe bounded, final artifact: fail
+existing_method   bounded, final artifact: pass
+parser_edge       bounded, final artifact: pass after retry
+custom_infer      bounded, final artifact: fail
+```
+
+Malformed-response, premature-done, and repeated-no-op probes all failed
+closed without infinite loops or writes. The benchmark therefore does not
+support declaring `CODE_AGENT: READY`; the correct result remains
+`CONDITIONAL` pending better provider consistency.
+
+## External integrations and safety
+
+- Kaggle authentication and read/research calls completed during every cycle.
+- Kernel training remained local-only (`push=False`).
+- Submission preparation remained dry-run; no competition submission occurred.
+- Kaggle mutations/submissions: **0**.
+- Telegram messages/commands: **0**.
+- Unresolved external state was not converted into a source repair.
+- Duplicate workers: **0**.
+- Duplicate promotions: **0**.
+- Duplicate logical external actions: **0**.
+- Protected changes accepted: **0**.
+- Repair attempts, accepted repairs, promotions, and rollbacks in real cycles:
+  **0 / 0 / 0 / 0**.
+
+The previously certified synthetic full-system harness was rerun with the real
+DeepSeek path and passed: one accepted repair, generation `0001 → 0002`,
+atomic promotion and resume, rollback recovery, stage calls
+`RESEARCH=1`, `PLAN=1`, `CODE=2`, Kaggle mutations `0`, and Telegram messages
+`0`.
+
+## Genuine defects found or fixed
+
+No new production source defect was fixed during this soak. The merged
+state-root fix was present in the starting SHA and remained green under the
+five-cycle run. Generated competition recipe/method files produced by the
+disposable cycles were restored and are not part of this branch change.
+
+The operational evidence did identify a remaining reliability limitation:
+DeepSeek CODE artifact production is bounded and fail-closed, but provider
+output is not yet consistent enough for an unconditional CODE readiness claim.
+No safety gate was weakened to improve the benchmark result.
+
+## Required regression verification
+
+```text
+uv run python -m compileall -q src examples scripts                         PASS
+uv run pytest -q -m "not integration"                                       697 passed, 1 deselected
 uv run pytest -q tests/test_supervisor*.py tests/test_replay_epoch.py \
   tests/test_external_outbox.py tests/test_risk_adaptive_controlled_rollout.py \
-  tests/test_plan_code_agents.py                           227 passed
-uv run python scripts/run_full_system_harness.py           PASS
-  accepted repairs=1, generation 0001→0002, RESUMED, rollback PASS,
-  stage calls RESEARCH=1 PLAN=1 CODE=2, Kaggle=0, Telegram=0
-uv run python scripts/benchmark_implementer_reliability.py 10/10 PASS
-uv run python scripts/benchmark_code_agent.py               bounded; provider-variable
-git diff --check                                           PASS
+  tests/test_plan_code_agents.py                                             227 passed
+uv run python scripts/run_full_system_harness.py                             PASS
+uv run python scripts/benchmark_implementer_reliability.py                  10/10 PASS
+uv run python scripts/benchmark_code_agent.py --output /tmp/...              bounded; 2/5 normal artifacts
+git diff --check                                                              PASS
 ```
+
+The repository remained clean until this report was added; no generated
+benchmark output or live competition artifact is included.
 
 ## Readiness
 
