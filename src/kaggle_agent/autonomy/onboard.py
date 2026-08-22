@@ -85,15 +85,32 @@ class CompetitionBootstrapper:
             probe = self.root / ".agent" / "onboard" / _competition_id(slug)
             sample_path = self.kaggle.download_file(slug, sample_name, probe, force=True)
             with sample_path.open(newline="", encoding="utf-8-sig") as handle:
-                reader = csv.reader(handle)
-                columns = next(reader, [])
-                rows = sum(1 for _ in reader)
-            if len(columns) < 2 or rows < 1:
+                reader = csv.DictReader(handle)
+                columns = list(reader.fieldnames or [])
+                sample_rows = list(reader)
+            identifiers = [columns[0]] if columns else []
+            rows = len(sample_rows)
+            identifier_values = [str(row.get(columns[0]) or "").strip() for row in sample_rows] if columns else []
+            malformed_rows = any(None in row or any(key not in row for key in columns) for row in sample_rows)
+            if len(columns) < 2 or rows < 1 or malformed_rows or any(not str(column).strip() for column in columns) or len(set(columns)) != len(columns):
                 return OnboardResult(
                     StageOutcome(OutcomeState.NEEDS_AUTHORITY, "BOOTSTRAP", "sample submission schema is ambiguous")
                 )
-            identifiers = [columns[0]]
+            if not all(identifier_values) or len(set(identifier_values)) != len(identifier_values):
+                return OnboardResult(
+                    StageOutcome(OutcomeState.NEEDS_AUTHORITY, "BOOTSTRAP", "sample submission contains blank or duplicate identifiers")
+                )
             targets = columns[1:]
+            try:
+                for row in sample_rows:
+                    for target in targets:
+                        value = float(row.get(target, ""))
+                        if value != value or value in {float("inf"), float("-inf")}:
+                            raise ValueError
+            except (TypeError, ValueError):
+                return OnboardResult(
+                    StageOutcome(OutcomeState.NEEDS_AUTHORITY, "BOOTSTRAP", "sample submission target values are not finite numeric values")
+                )
             contract = CompetitionContract.from_mapping(
                 {
                     "id": _competition_id(slug),
@@ -224,6 +241,29 @@ class CompetitionBootstrapper:
                 "@dataclass\nclass RecipeResult:\n    ok: bool\n    message: str = ''\n\n"
                 "def apply_recipe(*args, **kwargs):\n"
                 "    return RecipeResult(False, 'CODE has not generated a verified training recipe')\n"
+            ),
+            "kernel_recipe.py": (
+                "\"\"\"Generated Kaggle wrapper. The payload is the string below.\"\"\"\n"
+                "KERNEL_RECIPE_SOURCE = r'''\n"
+                "from pathlib import Path\n"
+                "import csv\n"
+                f"ID_COLUMN = {identifier!r}\n"
+                f"LABELS = {targets!r}\n"
+                "candidates = [Path('sample_submission.csv'), Path('data/sample_submission.csv'), Path('../data/sample_submission.csv'), Path('test.csv'), Path('data/test.csv'), Path('../data/test.csv')]\n"
+                "sample = next((p for p in candidates if p.is_file()), None)\n"
+                "if sample is None:\n"
+                "    raise FileNotFoundError('contract baseline requires mounted sample_submission.csv or test.csv')\n"
+                "with sample.open(newline='', encoding='utf-8-sig') as handle:\n"
+                "    rows = list(csv.DictReader(handle))\n"
+                "if not rows:\n"
+                "    raise ValueError('contract baseline found zero test rows')\n"
+                "with Path('submission.csv').open('w', newline='', encoding='utf-8') as handle:\n"
+                "    writer = csv.DictWriter(handle, fieldnames=[ID_COLUMN, *LABELS])\n"
+                "    writer.writeheader()\n"
+                "    for index, row in enumerate(rows):\n"
+                "        value = 0.25 + 0.5 * (index % 2)\n"
+                "        writer.writerow({ID_COLUMN: row.get(ID_COLUMN, ''), **{label: value for label in LABELS}})\n"
+                "'''\n"
             ),
         }
         for name, content in files.items():

@@ -136,7 +136,7 @@ def test_submit_notebook_reads_mapping_push_response(tmp_path):
     assert call[4:] == ("u/mapped", 7)
 
 
-def test_submit_notebook_retries_transient_push_and_records_artifact_provenance(tmp_path):
+def test_submit_notebook_does_not_retry_uncertain_push_and_records_failure(tmp_path):
     folder = tmp_path / "pkg"
     _write_meta(folder)
     api = FakeKaggleApi()
@@ -158,10 +158,9 @@ def test_submit_notebook_retries_transient_push_and_records_artifact_provenance(
         retry_attempts=2, retry_seconds=0,
     )
 
-    assert result.success
-    assert attempts == 2
-    assert '"artifact_sha256"' in result.raw_status
-    assert '"kernel_ref": "tester/fake-kernel"' in result.raw_status
+    assert not result.success
+    assert attempts == 1
+    assert "kernels_push" in result.message
 
 
 def test_submit_notebook_returns_structured_nonretryable_submit_failure(tmp_path):

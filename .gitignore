@@ -17,6 +17,10 @@ build/
 memory/run.lock
 memory/kernel_job.md
 memory/pending_submit.md
+memory/kernel_history.jsonl
+memory/output_history.jsonl
+memory/kernel_history.lock
+memory/reports/
 memory/daily/
 memory/research-deep/deep-*.md
 memory/experiments/
@@ -30,6 +34,11 @@ competitions/*/data/
 competitions/*/pipeline/code_brief.md
 competitions/*/pipeline/methods_applied.md
 /data/
+
+# autonomous runtime artifacts (canonical memory/docs/tasks remain tracked)
+.agent/
+logs/
+.scratch/ops-dashboard/
 
 # editor / OS
 .idea/

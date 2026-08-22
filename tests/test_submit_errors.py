@@ -168,7 +168,7 @@ def test_client_retries_network_on_submissions(tmp_path: Path):
     assert call_count == 3
 
 
-def test_client_gives_up_after_max_retries(tmp_path: Path):
+def test_client_does_not_retry_uncertain_kernel_push(tmp_path: Path):
     from kaggle_agent.kaggle_api.client import KaggleClient
 
     class AlwaysFailApi:
@@ -190,4 +190,29 @@ def test_client_gives_up_after_max_retries(tmp_path: Path):
         assert False, "should have raised"
     except Exception:
         pass
-    assert api.attempts == 3  # default attempts
+    # A transport error after a mutation is ambiguous: repeating the push can
+    # create a duplicate kernel.  The caller must reconcile the outbox before
+    # deciding whether another push is safe.
+    assert api.attempts == 1
+
+
+def test_client_keeps_read_retries_for_kernel_status():
+    from kaggle_agent.kaggle_api.client import KaggleClient
+
+    class ReadApi:
+        def __init__(self):
+            self.attempts = 0
+
+        def authenticate(self):
+            pass
+
+        def kernels_status(self, kernel):
+            self.attempts += 1
+            if self.attempts < 3:
+                raise ConnectionError("urlopen error: Name or service not known")
+            return {"status": "COMPLETE"}
+
+    api = ReadApi()
+    client = KaggleClient(api=api).connect()
+    assert client.kernels_status("tester/kernel") == "COMPLETE"
+    assert api.attempts == 3

@@ -5,6 +5,7 @@ from __future__ import annotations
 import csv
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any, Iterable
 
 
 @dataclass
@@ -26,17 +27,28 @@ class ValidationResult:
 def validate_submission_csv(
     path: Path,
     *,
-    id_column: str,
-    labels: list[str],
+    id_column: str | None = None,
+    labels: list[str] | None = None,
     require_rows: bool = True,
     require_min_rows: int | None = None,
     require_prediction_variation: bool = False,
+    contract: Any | None = None,
+    expected_ids: Iterable[tuple[str, ...]] | None = None,
 ) -> ValidationResult:
+    if contract is not None:
+        from kaggle_agent.autonomy.contracts import validate_submission_contract
+
+        checked = validate_submission_contract(path, contract, expected_ids=expected_ids)
+        result = ValidationResult(checked.ok, path, checked.n_rows, list(checked.errors or []))
+        return result
     result = ValidationResult(ok=True, path=path)
     if not path.is_file():
         result.fail(f"missing file: {path}")
         return result
 
+    if id_column is None:
+        id_column = "id"
+    labels = list(labels or [])
     expected = [id_column, *labels]
     with path.open(newline="", encoding="utf-8") as f:
         reader = csv.DictReader(f)

@@ -174,7 +174,9 @@ class KaggleClient:
         return self
 
     def submission_limits(self, competition: str) -> SubmissionLimits:
-        raw = self.api.competition_get_submission_limits(competition)
+        raw = _retry_network(
+            lambda: self.api.competition_get_submission_limits(competition)
+        )
         return SubmissionLimits(
             num_today=int(_g(raw, "num_today", "numToday", default=0) or 0),
             num_total=int(_g(raw, "num_total", "numTotal", default=0) or 0),
@@ -184,7 +186,7 @@ class KaggleClient:
 
     def competition_info(self, slug: str) -> CompetitionInfo:
         """Return exact competition metadata from the official API search."""
-        response = self.api.competitions_list(search=slug)
+        response = _retry_network(lambda: self.api.competitions_list(search=slug))
         rows = _g(response, "competitions", default=response) or []
         wanted = slug.rstrip("/").split("/")[-1]
         matches = []
@@ -227,8 +229,10 @@ class KaggleClient:
         out: list[MetaFile] = []
         token: str | None = None
         for _ in range(max_pages):
-            resp = self.api.competition_list_files(
-                competition, page_token=token, page_size=page_size
+            resp = _retry_network(
+                lambda: self.api.competition_list_files(
+                    competition, page_token=token, page_size=page_size
+                )
             )
             for f in _g(resp, "files", default=[]) or []:
                 name = _s(f, "name")
@@ -255,8 +259,10 @@ class KaggleClient:
             )
         dest_dir.mkdir(parents=True, exist_ok=True)
         try:
-            self.api.competition_download_file(
-                competition, file_name, path=str(dest_dir), force=force, quiet=True
+            _retry_network(
+                lambda: self.api.competition_download_file(
+                    competition, file_name, path=str(dest_dir), force=force, quiet=True
+                )
             )
         except Exception as exc:  # noqa: BLE001
             raise KaggleApiError(f"download_file failed for {file_name}: {exc}") from exc
@@ -270,7 +276,9 @@ class KaggleClient:
         raise KaggleApiError(f"Expected file missing after download: {path}")
 
     def leaderboard(self, competition: str, *, top: int = 10) -> list[LeaderboardRow]:
-        rows = self.api.competition_leaderboard_view(competition, page_size=top) or []
+        rows = _retry_network(
+            lambda: self.api.competition_leaderboard_view(competition, page_size=top)
+        ) or []
         out: list[LeaderboardRow] = []
         for r in rows[:top]:
             if r is None:
@@ -292,8 +300,10 @@ class KaggleClient:
         top: int = 10,
         sort_by: str = "voteCount",
     ) -> list[KernelRow]:
-        rows = self.api.kernels_list(
-            competition=competition, page_size=top, sort_by=sort_by
+        rows = _retry_network(
+            lambda: self.api.kernels_list(
+                competition=competition, page_size=top, sort_by=sort_by
+            )
         ) or []
         out: list[KernelRow] = []
         for k in rows[:top]:
@@ -344,6 +354,8 @@ class KaggleClient:
         output_file: str = "submission.csv",
         poll_seconds: int = 30,
         poll_attempts: int = 40,
+        outbox: Any | None = None,
+        push_idempotency_key: str | None = None,
     ) -> SubmitResult:
         """file = CSV upload; notebook = push kernel + submit_code (kernels-only comps)."""
         mode = (mode or "file").lower()
@@ -370,6 +382,8 @@ class KaggleClient:
                     status_fn=self.kernels_status,
                     poll_seconds=poll_seconds,
                     poll_attempts=poll_attempts,
+                    outbox=outbox,
+                    push_idempotency_key=push_idempotency_key,
                 )
             path = Path(file_path) if file_path else None
             if path is None or not path.is_file():
@@ -401,7 +415,11 @@ class KaggleClient:
         Source: KaggleApi.kernels_push
         """
         try:
-            resp = _retry_network(lambda: self.api.kernels_push(str(folder)))
+            # Push is a mutation.  A transport exception is ambiguous because
+            # Kaggle may have accepted the request before the client observed
+            # the failure.  Surface it to the outbox reconciliation path
+            # instead of automatically creating a duplicate kernel.
+            resp = self.api.kernels_push(str(folder))
         except Exception as exc:  # noqa: BLE001
             raise KaggleApiError(f"kernels_push failed: {exc}") from exc
         return _s(resp, "message", "ref", "errorMessage", default=str(resp))
@@ -409,7 +427,7 @@ class KaggleClient:
     def kernels_push_result(self, folder: Path | str) -> Any:
         """Push a kernel and preserve the API response, including its version."""
         try:
-            return _retry_network(lambda: self.api.kernels_push(str(folder)))
+            return self.api.kernels_push(str(folder))
         except Exception as exc:  # noqa: BLE001
             raise KaggleApiError(f"kernels_push failed: {exc}") from exc
 
@@ -422,6 +440,7 @@ class KaggleClient:
 
         ref = normalize_kernel_ref(kernel_ref)
         try:
+            # Status is read-only, so transient network failures can be retried.
             resp = _retry_network(lambda: self.api.kernels_status(ref))
         except Exception as exc:  # noqa: BLE001
             raise KaggleApiError(f"kernels_status failed: {exc}") from exc
@@ -433,7 +452,7 @@ class KaggleClient:
 
         ref = normalize_kernel_ref(kernel_ref)
         try:
-            resp = self.api.kernels_status(ref)
+            resp = _retry_network(lambda: self.api.kernels_status(ref))
         except Exception as exc:  # noqa: BLE001
             raise KaggleApiError(f"kernels_status failed: {exc}") from exc
         return _s(resp, "failureMessage", "errorMessage", "failure_message", default="")
@@ -445,7 +464,9 @@ class KaggleClient:
         """
         dest_dir.mkdir(parents=True, exist_ok=True)
         try:
-            resp = self.api.kernels_output(kernel_ref, str(dest_dir), quiet=True)
+            resp = _retry_network(
+                lambda: self.api.kernels_output(kernel_ref, str(dest_dir), quiet=True)
+            )
         except Exception as exc:  # noqa: BLE001
             raise KaggleApiError(f"kernels_output failed: {exc}") from exc
         if isinstance(resp, tuple) and resp:
@@ -466,7 +487,11 @@ class KaggleClient:
         ref = normalize_kernel_ref(kernel_ref)
         dest_dir.mkdir(parents=True, exist_ok=True)
         try:
-            self.api.kernels_pull(ref, str(dest_dir), metadata=False, quiet=True)
+            _retry_network(
+                lambda: self.api.kernels_pull(
+                    ref, str(dest_dir), metadata=False, quiet=True
+                )
+            )
         except Exception as exc:  # noqa: BLE001
             raise KaggleApiError(f"kernels_pull failed for {ref}: {exc}") from exc
         slug = ref.rsplit("/", 1)[-1]

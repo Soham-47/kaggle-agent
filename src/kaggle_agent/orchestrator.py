@@ -228,6 +228,7 @@ class Orchestrator:
         skip_phases: frozenset[str] | None = None,
         state_access: StateAccessor | None = None,
         debug_runner: Any | None = None,
+        progress_reporter: Any | None = None,
     ) -> None:
         self.settings = settings
         self.competition = competition
@@ -241,6 +242,7 @@ class Orchestrator:
         # injected a browser fallback. Submission is API-only by policy.
         _ = browser_submit
         self._mcp_submit_fn = mcp_submit_fn  # tests inject call_tool
+        self._progress_reporter = progress_reporter
         self._assume_approved = False
         self._loop_n_used = 0
         self._tracer: Tracer | None = None
@@ -248,8 +250,9 @@ class Orchestrator:
         self._stages: dict[str, Stage] = build_stage_registry(self)
         self._stage_executor = StageExecutor(StageLedger(self.root))
         self._outbox = ExternalActionOutbox(self.root)
-        self._debug_runner = debug_runner
-        if self._debug_runner is None and self._llm_available():
+        supervisor_enabled = self.settings.supervisor_config().enabled
+        self._debug_runner = None if supervisor_enabled else debug_runner
+        if self._debug_runner is None and not supervisor_enabled and self._llm_available():
             from kaggle_agent.autonomy.debug_agent import CodingDebugAgent
 
             self._debug_runner = CodingDebugAgent(
@@ -468,6 +471,8 @@ class Orchestrator:
     ) -> AgentState:
         for phase in phases:
             state.phase = phase
+            if self._progress_reporter is not None:
+                self._progress_reporter(phase, "stage_started")
             self._sa.save_state(state)
             append_daily_log(phase, self.root)
             append_daily_event(
@@ -503,6 +508,8 @@ class Orchestrator:
                 restore_stage_outputs(phase, result, execution.outputs)
                 append_daily_log(f"{phase} replayed from durable stage ledger", self.root)
             result.stage_outcomes.append(outcome)
+            if self._progress_reporter is not None:
+                self._progress_reporter(phase, f"stage_{outcome.state.value}")
             if self._tracer is not None:
                 # Keep the operational event compact and secret-free; the durable
                 # ledger retains the detailed evidence for incident diagnosis.
@@ -1845,6 +1852,33 @@ class Orchestrator:
                                 poll_seconds=self.settings.kernel_poll_seconds,
                                 poll_attempts=self.settings.kernel_poll_attempts,
                             )
+                        elif push_action.status == "accepted":
+                            # A prior attempt already delivered this exact
+                            # package.  Resume the durable remote job without
+                            # issuing another kernels_push mutation.
+                            accepted_ref = push_action.external_ref or package.kernel_ref
+                            save_kernel_job(
+                                KernelJob(
+                                    kernel_ref=accepted_ref,
+                                    folder=str(package.folder),
+                                    status="pushed",
+                                    competition=self.competition.slug,
+                                    exp_id=exp_id,
+                                    kernel_version=str(push_action.external_version or "none"),
+                                ),
+                                self.root,
+                            )
+                            run = run_kernel_phase(
+                                self._kaggle,
+                                None,
+                                push=True,
+                                pull_output_dir=out_dir,
+                                root=self.root,
+                                competition=self.competition.slug,
+                                exp_id=exp_id,
+                                poll_seconds=self.settings.kernel_poll_seconds,
+                                poll_attempts=self.settings.kernel_poll_attempts,
+                            )
                         else:
                             self._outbox.mark_sent(push_action.action_id)
                             run = run_kernel_phase(
@@ -1940,17 +1974,47 @@ class Orchestrator:
             result.kernel_path is not None
             and path == Path(result.kernel_path) / "output" / "submission.csv"
         )
-        check = validate_submission_csv(
-            path,
-            id_column=self.competition.id_column,
-            labels=self.competition.labels,
-            require_min_rows=(
-                self.competition.submission_min_rows
-                if self.competition.submit_mode == "file"
-                else None
-            ),
-            require_prediction_variation=kernel_output,
-        )
+        contract = self.competition.contract
+        if contract is not None:
+            # Generic onboarded competitions validate against their typed
+            # submission contract. Legacy configs (such as the active RSNA
+            # contest) retain the established id/label validator below.
+            expected_ids = None
+            if contract.raw.get("data", {}).get("hidden_id_strategy") == "sample_submission":
+                sample_path = (
+                    self.root
+                    / self.competition.workspace_relative
+                    / "data"
+                    / "sample_submission.csv"
+                )
+                if sample_path.is_file():
+                    try:
+                        with sample_path.open(newline="", encoding="utf-8-sig") as handle:
+                            sample_reader = csv.DictReader(handle)
+                            sample_identifiers = contract.raw["data"]["identifier_columns"]
+                            expected_ids = [
+                                tuple(str(row.get(column) or "").strip() for column in sample_identifiers)
+                                for row in sample_reader
+                            ]
+                    except (OSError, csv.Error):
+                        expected_ids = None
+            check = validate_submission_csv(
+                path,
+                contract=contract,
+                expected_ids=expected_ids,
+            )
+        else:
+            check = validate_submission_csv(
+                path,
+                id_column=self.competition.id_column,
+                labels=self.competition.labels,
+                require_min_rows=(
+                    self.competition.submission_min_rows
+                    if self.competition.submit_mode == "file"
+                    else None
+                ),
+                require_prediction_variation=kernel_output,
+            )
         result.validate_ok = check.ok
         result.candidate_csv = str(path)
         if check.ok:
@@ -2411,6 +2475,16 @@ class Orchestrator:
                     result.submit_message = "outbox: submission intent awaits reconciliation"
                     append_daily_log(result.submit_message, self.root)
                     return state
+            elif outbox_action.status == "accepted":
+                result.submit_ok = True
+                result.submit_message = f"outbox: already accepted {outbox_action.external_ref or 'submission'}"
+                mark_submitted(self.root)
+                append_daily_log(result.submit_message, self.root)
+                return state
+            elif outbox_action.status == "rejected":
+                result.submit_message = "outbox: submission intent was rejected"
+                result.errors.append(result.submit_message)
+                return state
             else:
                 outbox_action = self._outbox.mark_sent(outbox_action.action_id)
 
@@ -2485,6 +2559,7 @@ class Orchestrator:
                             poll_attempts=(
                                 self.settings.kernel_poll_attempts if nb else 10
                             ),
+                            outbox=self._outbox if nb else None,
                         )
                         result.submit_ok = sr.success
                         result.submit_message = f"api: {sr.message}"
@@ -2844,18 +2919,24 @@ def run_daily(
     browser_submit: Any | None = None,
     mcp_submit_fn: Any | None = None,
     skip_phases: frozenset[str] | None = None,
+    progress_reporter: Any | None = None,
 ) -> CycleResult:
     settings = load_settings(root)
     cid = competition_id or settings.default_competition
     competition = load_competition(cid, root or settings.root)
+    orchestrator_kwargs: dict[str, Any] = {
+        "root": root or settings.root,
+        "kaggle": kaggle,
+        "browser_fetch": browser_fetch,
+        "telegram": telegram,
+        "browser_submit": browser_submit,
+        "mcp_submit_fn": mcp_submit_fn,
+        "skip_phases": skip_phases,
+    }
+    if progress_reporter is not None:
+        orchestrator_kwargs["progress_reporter"] = progress_reporter
     return Orchestrator(
         settings,
         competition,
-        root=root or settings.root,
-        kaggle=kaggle,
-        browser_fetch=browser_fetch,
-        telegram=telegram,
-        browser_submit=browser_submit,
-        mcp_submit_fn=mcp_submit_fn,
-        skip_phases=skip_phases,
+        **orchestrator_kwargs,
     ).run_cycle(dry_run=dry_run, assume_approved=assume_approved)

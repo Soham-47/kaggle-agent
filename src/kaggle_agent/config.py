@@ -189,6 +189,33 @@ def _validate_settings(raw: dict[str, Any], path: Path) -> None:
     if hour > 23:
         raise _config_error(path, "cron.hour_utc", "must be between 0 and 23", hour)
 
+    supervisor = _section(raw, "supervisor", path)
+    _bool(supervisor, "enabled", path, False)
+    mode = _str(supervisor, "mode", path, "observe").lower()
+    if mode not in {"off", "observe", "repair_only", "auto_safe"}:
+        raise _config_error(path, "supervisor.mode", "must be one of off, observe, repair_only, auto_safe", mode)
+    heartbeat = _int(supervisor, "heartbeat_seconds", path, 30, minimum=1)
+    timeout = _int(supervisor, "heartbeat_timeout_seconds", path, 180, minimum=1)
+    if timeout <= heartbeat:
+        raise _config_error(path, "supervisor.heartbeat_timeout_seconds", "must be greater than heartbeat_seconds", timeout)
+    _int(supervisor, "progress_timeout_seconds", path, 3600, minimum=1)
+    _int(supervisor, "worker_terminate_grace_seconds", path, 20, minimum=1)
+    repair = _section(supervisor, "repair", path)
+    _bool(repair, "enabled", path, True)
+    _float(repair, "classification_min_confidence", path, 0.80, minimum=0.0)
+    if float(repair.get("classification_min_confidence", 0.80)) > 1:
+        raise _config_error(path, "supervisor.repair.classification_min_confidence", "must be <= 1", repair.get("classification_min_confidence"))
+    for key in ("max_attempts_per_incident", "max_repairs_per_cycle", "max_repairs_per_day",
+                "max_changed_source_files", "max_changed_test_files", "max_changed_lines"):
+        _int(repair, key, path, {"max_attempts_per_incident": 3, "max_repairs_per_cycle": 5,
+                                  "max_repairs_per_day": 20, "max_changed_source_files": 8,
+                                  "max_changed_test_files": 5, "max_changed_lines": 500}[key], minimum=1)
+    for key in ("allow_dependency_changes", "require_spec_review", "require_code_review", "require_full_tests"):
+        _bool(repair, key, path, {"allow_dependency_changes": False, "require_spec_review": True,
+                                  "require_code_review": True, "require_full_tests": True}[key])
+    _bool(_section(supervisor, "promotion", path), "automatic", path, False)
+    _bool(_section(supervisor, "protected", path), "strict", path, True)
+
 
 def _validate_competition(raw: dict[str, Any], path: Path) -> None:
     for key in ("id", "slug"):
@@ -474,6 +501,11 @@ class Settings:
     def cron_hour(self) -> int:
         return int(self.raw.get("cron", {}).get("hour_utc", 6))
 
+    def supervisor_config(self):
+        from kaggle_agent.supervisor.config import SupervisorSettings
+
+        return SupervisorSettings.from_mapping(self.raw.get("supervisor"))
+
 
 @dataclass(frozen=True)
 class CompetitionConfig:
@@ -491,6 +523,23 @@ class CompetitionConfig:
     @property
     def labels(self) -> list[str]:
         return [str(x) for x in self.raw.get("labels", [])]
+
+    @property
+    def contract(self):
+        """Return the verified contract when this config uses the generic schema.
+
+        The active RSNA config predates the generic contract fields, so it
+        continues through the legacy validator. Generic onboarded contests
+        expose the typed contract to all downstream validation callers.
+        """
+        from kaggle_agent.autonomy.contracts import CompetitionContract
+
+        generic_present = any(key in self.raw for key in ("task", "data", "validation")) or (
+            isinstance(self.raw.get("submission"), dict) and "columns" in self.raw["submission"]
+        )
+        if not generic_present:
+            return None
+        return CompetitionContract.from_mapping(self.raw)
 
     @property
     def metric_direction(self) -> str:

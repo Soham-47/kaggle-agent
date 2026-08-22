@@ -120,7 +120,9 @@ class FakeKaggleApi:
         self.submit_calls.append(
             ("submit_code", file_name, message, competition, kernel, kernel_version)
         )
-        return SimpleNamespace(message="ok", ref=kernel or "user/kernel")
+        # The real endpoint's acceptance must be represented explicitly; a
+        # transport-level message alone is intentionally ambiguous.
+        return SimpleNamespace(message="ok", ref=kernel or "user/kernel", status="SUCCESS")
 
     def kernels_list(self, **kwargs):
         return [
